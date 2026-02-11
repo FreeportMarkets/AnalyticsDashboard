@@ -827,19 +827,55 @@ with tab_notifications:
     if df.empty:
         st.info("No data for notification analysis.")
     else:
+        # Server-side sends
+        broadcast_events = df[df["event"] == "notification_sent_broadcast"]
+        targeted_sends = df[df["event"] == "notification_sent"]
+        # Client-side
         received_events = df[df["event"] == "notification_received"]
         tapped_events = df[df["event"] == "notification_tap"]
 
+        # Calculate total server sends
+        total_broadcast_sent = 0
+        if not broadcast_events.empty and "metadata" in broadcast_events.columns:
+            for _, r in broadcast_events.iterrows():
+                meta = r.get("metadata")
+                if isinstance(meta, dict):
+                    total_broadcast_sent += int(meta.get("sent_count", 0))
+        total_targeted_sent = len(targeted_sends[targeted_sends.apply(
+            lambda r: isinstance(r.get("metadata"), dict) and r["metadata"].get("success", False),
+            axis=1,
+        )]) if not targeted_sends.empty and "metadata" in targeted_sends.columns else 0
+        total_server_sent = total_broadcast_sent + total_targeted_sent
+
         received_count = len(received_events)
         tapped_count = len(tapped_events)
-        tap_rate = (tapped_count / received_count * 100) if received_count > 0 else 0
+        tap_rate_server = (tapped_count / total_server_sent * 100) if total_server_sent > 0 else 0
+        tap_rate_client = (tapped_count / received_count * 100) if received_count > 0 else 0
         unique_tappers = tapped_events["wallet_address"].nunique()
 
-        col1, col2, col3, col4 = st.columns(4)
-        col1.metric("Received", fmt_number(received_count))
-        col2.metric("Tapped", fmt_number(tapped_count))
-        col3.metric("Tap Rate", f"{tap_rate:.1f}%")
-        col4.metric("Unique Tappers", fmt_number(unique_tappers))
+        col1, col2, col3, col4, col5 = st.columns(5)
+        col1.metric("Sent (server)", fmt_number(total_server_sent))
+        col2.metric("Received (client)", fmt_number(received_count))
+        col3.metric("Tapped", fmt_number(tapped_count))
+        col4.metric("Tap Rate (server)", f"{tap_rate_server:.1f}%")
+        col5.metric("Unique Tappers", fmt_number(unique_tappers))
+
+        # Breakdown by notification type
+        if not broadcast_events.empty or not targeted_sends.empty:
+            st.markdown("---")
+            st.subheader("Sends by Type")
+            type_data = []
+            if not broadcast_events.empty and "metadata" in broadcast_events.columns:
+                type_data.append({"Type": "Trade Alerts (broadcast)", "Sends": len(broadcast_events), "Recipients": total_broadcast_sent})
+            if not targeted_sends.empty and "metadata" in targeted_sends.columns:
+                for ntype in ["price_alert", "lifecycle"]:
+                    typed = targeted_sends[targeted_sends.apply(
+                        lambda r: isinstance(r.get("metadata"), dict) and r["metadata"].get("type") == ntype, axis=1
+                    )]
+                    if len(typed) > 0:
+                        type_data.append({"Type": ntype.replace("_", " ").title(), "Sends": len(typed), "Recipients": len(typed)})
+            if type_data:
+                st.dataframe(pd.DataFrame(type_data), use_container_width=True, hide_index=True)
 
         st.markdown("---")
 
