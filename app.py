@@ -1,11 +1,93 @@
 import streamlit as st
 import boto3
 import pandas as pd
+import plotly.express as px
+import plotly.graph_objects as go
 from datetime import datetime, timedelta
 from decimal import Decimal
 from boto3.dynamodb.conditions import Key
 
 st.set_page_config(page_title="Freeport Analytics", page_icon="📊", layout="wide")
+
+# --- Brand Colors ---
+BRAND = "#4F46E5"  # indigo
+BRAND_LIGHT = "#818CF8"
+ACCENT = "#10B981"  # emerald
+ACCENT_WARN = "#F59E0B"  # amber
+ACCENT_RED = "#EF4444"
+BG_CARD = "#1E1E2E"
+TEXT_MUTED = "#9CA3AF"
+
+CHART_COLORS = [BRAND, ACCENT, ACCENT_WARN, "#EC4899", "#8B5CF6", "#06B6D4", "#F97316", "#84CC16", "#E11D48", "#14B8A6"]
+
+# --- Custom CSS ---
+st.markdown("""
+<style>
+    /* Metric cards */
+    [data-testid="stMetric"] {
+        background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+        border: 1px solid rgba(79, 70, 229, 0.3);
+        border-radius: 12px;
+        padding: 16px 20px;
+    }
+    [data-testid="stMetricValue"] {
+        font-size: 1.8rem;
+        font-weight: 700;
+    }
+    [data-testid="stMetricLabel"] {
+        font-size: 0.85rem;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+        opacity: 0.7;
+    }
+
+    /* Tab styling */
+    .stTabs [data-baseweb="tab-list"] {
+        gap: 8px;
+    }
+    .stTabs [data-baseweb="tab"] {
+        padding: 10px 24px;
+        border-radius: 8px 8px 0 0;
+        font-weight: 600;
+    }
+
+    /* Headers */
+    h1, h2, h3 {
+        letter-spacing: -0.02em;
+    }
+
+    /* Dataframes */
+    [data-testid="stDataFrame"] {
+        border-radius: 8px;
+        overflow: hidden;
+    }
+
+    /* Dividers */
+    hr {
+        border-color: rgba(79, 70, 229, 0.2);
+        margin: 2rem 0;
+    }
+
+    /* Sidebar */
+    [data-testid="stSidebar"] {
+        background: linear-gradient(180deg, #0f0f1a 0%, #1a1a2e 100%);
+    }
+    [data-testid="stSidebar"] [data-testid="stMetric"] {
+        background: rgba(79, 70, 229, 0.1);
+        border: 1px solid rgba(79, 70, 229, 0.2);
+    }
+</style>
+""", unsafe_allow_html=True)
+
+PLOTLY_LAYOUT = dict(
+    paper_bgcolor="rgba(0,0,0,0)",
+    plot_bgcolor="rgba(0,0,0,0)",
+    font=dict(color="#E5E7EB", size=13),
+    margin=dict(l=0, r=0, t=40, b=0),
+    xaxis=dict(gridcolor="rgba(255,255,255,0.06)", zerolinecolor="rgba(255,255,255,0.06)"),
+    yaxis=dict(gridcolor="rgba(255,255,255,0.06)", zerolinecolor="rgba(255,255,255,0.06)"),
+    hoverlabel=dict(bgcolor="#1E1E2E", font_size=13, font_color="#E5E7EB"),
+)
 
 
 # --- Helpers ---
@@ -15,8 +97,15 @@ def short_wallet(w):
     return f"{w[:4]}...{w[-4:]}"
 
 
+def fmt_number(n):
+    if n >= 1_000_000:
+        return f"{n/1_000_000:.1f}M"
+    if n >= 1_000:
+        return f"{n/1_000:.1f}K"
+    return f"{n:,.0f}"
+
+
 def decimal_to_float(obj):
-    """Convert DynamoDB Decimal types to float for pandas."""
     if isinstance(obj, Decimal):
         return float(obj)
     if isinstance(obj, dict):
@@ -24,6 +113,54 @@ def decimal_to_float(obj):
     if isinstance(obj, list):
         return [decimal_to_float(i) for i in obj]
     return obj
+
+
+def make_h_bar(data, x_col, y_col, title="", color=BRAND, x_prefix="", x_suffix=""):
+    fig = px.bar(
+        data, x=x_col, y=y_col, orientation="h",
+        text=[f"{x_prefix}{fmt_number(v)}{x_suffix}" for v in data[x_col]],
+    )
+    fig.update_traces(
+        marker_color=color, textposition="auto",
+        textfont=dict(size=12, color="white"),
+        hovertemplate=f"<b>%{{y}}</b><br>{x_prefix}%{{x:,.0f}}{x_suffix}<extra></extra>",
+    )
+    fig.update_layout(
+        **PLOTLY_LAYOUT, title=title, showlegend=False,
+        yaxis=dict(autorange="reversed", gridcolor="rgba(0,0,0,0)"),
+        xaxis=dict(title="", gridcolor="rgba(255,255,255,0.06)"),
+        height=max(300, len(data) * 32 + 60),
+    )
+    fig.update_yaxes(title="")
+    return fig
+
+
+def make_time_series(data, x_col, y_col, title="", color=BRAND, kind="area"):
+    if kind == "area":
+        fig = px.area(data, x=x_col, y=y_col)
+        fig.update_traces(
+            line=dict(color=color, width=2.5),
+            fillcolor=f"rgba({int(color[1:3],16)},{int(color[3:5],16)},{int(color[5:7],16)},0.15)",
+        )
+    else:
+        fig = px.bar(data, x=x_col, y=y_col)
+        fig.update_traces(marker_color=color)
+    fig.update_layout(**PLOTLY_LAYOUT, title=title, showlegend=False, height=350)
+    fig.update_xaxes(title="")
+    fig.update_yaxes(title="")
+    return fig
+
+
+def make_funnel(steps, values, title=""):
+    fig = go.Figure(go.Funnel(
+        y=steps, x=values,
+        textinfo="value+percent previous",
+        textfont=dict(size=14, color="white"),
+        marker=dict(color=[BRAND, BRAND_LIGHT, ACCENT, ACCENT_WARN, ACCENT_RED][:len(steps)]),
+        connector=dict(line=dict(color="rgba(255,255,255,0.1)", width=1)),
+    ))
+    fig.update_layout(**PLOTLY_LAYOUT, title=title, height=350)
+    return fig
 
 
 # --- AWS Setup ---
@@ -46,8 +183,7 @@ TRADES_TABLE = "freeport-trades-history"
 def load_events_for_date(date_str: str) -> list:
     db = get_dynamodb()
     table = db.Table(ANALYTICS_TABLE)
-    items = []
-    params = {"KeyConditionExpression": Key("date").eq(date_str)}
+    items, params = [], {"KeyConditionExpression": Key("date").eq(date_str)}
     while True:
         resp = table.query(**params)
         items.extend(resp.get("Items", []))
@@ -72,11 +208,8 @@ def load_events_range(start_date: str, end_date: str) -> list:
 def load_trades_range(start_date: str, end_date: str) -> list:
     db = get_dynamodb()
     table = db.Table(TRADES_TABLE)
-    items = []
-    params = {
-        "FilterExpression": Key("timestamp").between(
-            start_date + "T00:00:00", end_date + "T23:59:59"
-        ),
+    items, params = [], {
+        "FilterExpression": Key("timestamp").between(start_date + "T00:00:00", end_date + "T23:59:59"),
     }
     while True:
         resp = table.scan(**params)
@@ -101,7 +234,6 @@ def events_to_df(events: list) -> pd.DataFrame:
 
 
 def extract_session_durations(df: pd.DataFrame) -> pd.DataFrame:
-    """Extract per-session duration from session_end events."""
     ends = df[df["event"] == "session_end"].copy()
     if ends.empty or "metadata" not in ends.columns:
         return pd.DataFrame(columns=["wallet_address", "session_id", "duration_ms", "date"])
@@ -121,7 +253,8 @@ def extract_session_durations(df: pd.DataFrame) -> pd.DataFrame:
 
 
 # --- Sidebar ---
-st.sidebar.title("Freeport Analytics")
+st.sidebar.markdown("## Freeport Analytics")
+st.sidebar.markdown("---")
 
 today = datetime.utcnow().date()
 date_range = st.sidebar.date_input(
@@ -137,14 +270,19 @@ else:
 
 start_str = start_date.strftime("%Y-%m-%d")
 end_str = end_date.strftime("%Y-%m-%d")
+num_days = (end_date - start_date).days + 1
 
 with st.spinner("Loading analytics data..."):
     events = load_events_range(start_str, end_str)
     df = events_to_df(events)
 
-st.sidebar.metric("Total Events", f"{len(df):,}")
+st.sidebar.markdown("---")
+st.sidebar.metric("Total Events", fmt_number(len(df)))
 if not df.empty:
-    st.sidebar.metric("Unique Users", f"{df['wallet_address'].nunique():,}")
+    st.sidebar.metric("Unique Users", fmt_number(df["wallet_address"].nunique()))
+    st.sidebar.metric("Date Range", f"{num_days} days")
+st.sidebar.markdown("---")
+st.sidebar.caption("Data refreshes every 5 minutes")
 
 # --- Tabs ---
 tab_overview, tab_users, tab_retention, tab_funnels, tab_trades, tab_notifications = st.tabs(
@@ -156,114 +294,144 @@ tab_overview, tab_users, tab_retention, tab_funnels, tab_trades, tab_notificatio
 # TAB 1: Overview
 # =====================
 with tab_overview:
-    st.header("Overview")
-
     if df.empty:
-        st.info("No analytics events found for this date range.")
+        st.info("No analytics events found for this date range. Events will appear here once the app starts sending data.")
     else:
-        daily_users = df.groupby("date")["wallet_address"].nunique()
+        daily_users = df.groupby("date")["wallet_address"].nunique().reset_index(name="users")
         total_unique = df["wallet_address"].nunique()
-
         sessions = df[df["event"] == "session_start"]
         sess_durations = extract_session_durations(df)
-        avg_duration_ms = sess_durations["duration_ms"].mean() if not sess_durations.empty else 0
+        avg_dur = sess_durations["duration_ms"].mean() if not sess_durations.empty else 0
 
         col1, col2, col3, col4 = st.columns(4)
-        col1.metric("DAU (avg)", f"{daily_users.mean():.0f}" if not daily_users.empty else "0")
-        col2.metric("Unique Users", f"{total_unique:,}")
-        col3.metric("Total Sessions", f"{len(sessions):,}")
-        col4.metric("Avg Session", f"{avg_duration_ms / 1000:.0f}s" if avg_duration_ms else "N/A")
+        col1.metric("DAU (avg)", f"{daily_users['users'].mean():.0f}" if not daily_users.empty else "0")
+        col2.metric("Unique Users", fmt_number(total_unique))
+        col3.metric("Sessions", fmt_number(len(sessions)))
+        col4.metric("Avg Session", f"{avg_dur/1000:.0f}s" if avg_dur else "N/A")
+
+        st.markdown("---")
 
         # DAU over time
-        st.subheader("Daily Active Users")
-        st.line_chart(daily_users)
+        fig = make_time_series(daily_users, "date", "users", title="Daily Active Users", color=BRAND)
+        st.plotly_chart(fig, use_container_width=True)
 
-        # WAU/MAU
+        # WAU / MAU side by side
         col_w, col_m = st.columns(2)
         wau = df[df["date"] >= (today - timedelta(days=7)).strftime("%Y-%m-%d")]["wallet_address"].nunique()
         mau = df[df["date"] >= (today - timedelta(days=30)).strftime("%Y-%m-%d")]["wallet_address"].nunique()
-        col_w.metric("WAU (last 7 days)", f"{wau:,}")
-        col_m.metric("MAU (last 30 days)", f"{mau:,}")
+        col_w.metric("WAU (7d)", fmt_number(wau))
+        col_m.metric("MAU (30d)", fmt_number(mau))
 
-        # Events by day
-        st.subheader("Events by Day")
-        events_by_day = df.groupby("date").size().reset_index(name="count")
-        st.bar_chart(events_by_day.set_index("date")["count"])
+        st.markdown("---")
 
-        # Top events
-        st.subheader("Top Events")
-        top_events = df["event"].value_counts().head(15).reset_index()
-        top_events.columns = ["Event", "Count"]
-        st.dataframe(top_events, use_container_width=True)
+        # Events by day + Top events side by side
+        col_left, col_right = st.columns([3, 2])
 
-        # Hourly activity
-        if "hour" in df.columns:
-            st.subheader("Hourly Activity (UTC)")
-            hourly = df.groupby("hour").size().reindex(range(24), fill_value=0)
-            st.bar_chart(hourly)
+        with col_left:
+            ebd = df.groupby("date").size().reset_index(name="count")
+            fig = make_time_series(ebd, "date", "count", title="Events by Day", color=BRAND_LIGHT, kind="bar")
+            st.plotly_chart(fig, use_container_width=True)
 
-        # Daily activity by day of week
-        if "day_of_week" in df.columns:
-            st.subheader("Activity by Day of Week")
-            dow_labels = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
-            by_dow = df.groupby("day_of_week").size().reindex(range(7), fill_value=0)
-            by_dow.index = dow_labels
-            st.bar_chart(by_dow)
+        with col_right:
+            top_ev = df["event"].value_counts().head(12).reset_index()
+            top_ev.columns = ["event", "count"]
+            fig = make_h_bar(top_ev, "count", "event", title="Top Events", color=BRAND)
+            st.plotly_chart(fig, use_container_width=True)
+
+        st.markdown("---")
+
+        # Hourly + DOW side by side
+        col_h, col_d = st.columns(2)
+
+        with col_h:
+            if "hour" in df.columns:
+                hourly = df.groupby("hour").size().reindex(range(24), fill_value=0).reset_index()
+                hourly.columns = ["hour", "events"]
+                hourly["label"] = hourly["hour"].apply(lambda h: f"{h:02d}:00")
+                fig = px.bar(hourly, x="label", y="events", title="Hourly Activity (UTC)")
+                fig.update_traces(marker_color=BRAND, hovertemplate="<b>%{x}</b><br>%{y:,} events<extra></extra>")
+                fig.update_layout(**PLOTLY_LAYOUT, height=320)
+                fig.update_xaxes(title="", tickangle=-45)
+                fig.update_yaxes(title="")
+                st.plotly_chart(fig, use_container_width=True)
+
+        with col_d:
+            if "day_of_week" in df.columns:
+                dow_labels = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
+                by_dow = df.groupby("day_of_week").size().reindex(range(7), fill_value=0).reset_index()
+                by_dow.columns = ["dow", "events"]
+                by_dow["day"] = by_dow["dow"].map(lambda i: dow_labels[int(i)] if pd.notna(i) and int(i) < 7 else "?")
+                fig = px.bar(by_dow, x="day", y="events", title="Activity by Day of Week")
+                fig.update_traces(marker_color=ACCENT, hovertemplate="<b>%{x}</b><br>%{y:,} events<extra></extra>")
+                fig.update_layout(**PLOTLY_LAYOUT, height=320)
+                fig.update_xaxes(title="")
+                fig.update_yaxes(title="")
+                st.plotly_chart(fig, use_container_width=True)
 
 
 # =====================
 # TAB 2: Top Users
 # =====================
 with tab_users:
-    st.header("Top Users")
-
     if df.empty:
         st.info("No data available.")
     else:
         # --- Time Spent Leaderboard ---
-        st.subheader("Most Time Spent in App")
+        st.subheader("Time Spent in App")
         sess_durations = extract_session_durations(df)
         if not sess_durations.empty:
             time_by_user = sess_durations.groupby("wallet_address").agg(
                 total_time_min=("duration_ms", lambda x: round(x.sum() / 60000, 1)),
                 sessions=("session_id", "count"),
                 avg_session_min=("duration_ms", lambda x: round(x.mean() / 60000, 1)),
-            ).sort_values("total_time_min", ascending=False).head(25).reset_index()
+            ).sort_values("total_time_min", ascending=False).head(20).reset_index()
             time_by_user["wallet"] = time_by_user["wallet_address"].apply(short_wallet)
-            st.dataframe(
-                time_by_user[["wallet", "total_time_min", "sessions", "avg_session_min"]].rename(columns={
-                    "wallet": "Wallet",
-                    "total_time_min": "Total Time (min)",
-                    "sessions": "Sessions",
-                    "avg_session_min": "Avg Session (min)",
-                }),
-                use_container_width=True,
+
+            fig = make_h_bar(
+                time_by_user, "total_time_min", "wallet",
+                title="Top Users by Time Spent", color=BRAND, x_suffix=" min",
             )
+            st.plotly_chart(fig, use_container_width=True)
+
+            with st.expander("Detailed time breakdown"):
+                st.dataframe(
+                    time_by_user[["wallet", "total_time_min", "sessions", "avg_session_min"]].rename(columns={
+                        "wallet": "Wallet", "total_time_min": "Total (min)",
+                        "sessions": "Sessions", "avg_session_min": "Avg (min)",
+                    }),
+                    use_container_width=True, hide_index=True,
+                )
         else:
             st.info("No session duration data yet.")
 
+        st.markdown("---")
+
         # --- Most Active by Event Count ---
-        st.subheader("Most Active Users (by event count)")
+        st.subheader("Most Active Users")
         events_per_user = df.groupby("wallet_address").agg(
             events=("event", "count"),
             days_active=("date", "nunique"),
             first_seen=("date", "min"),
             last_seen=("date", "max"),
-        ).sort_values("events", ascending=False).head(25).reset_index()
+        ).sort_values("events", ascending=False).head(20).reset_index()
         events_per_user["wallet"] = events_per_user["wallet_address"].apply(short_wallet)
-        st.dataframe(
-            events_per_user[["wallet", "events", "days_active", "first_seen", "last_seen"]].rename(columns={
-                "wallet": "Wallet",
-                "events": "Events",
-                "days_active": "Days Active",
-                "first_seen": "First Seen",
-                "last_seen": "Last Seen",
-            }),
-            use_container_width=True,
-        )
 
-        # --- Top Traders by Volume ---
-        st.subheader("Top Traders (by volume)")
+        fig = make_h_bar(events_per_user, "events", "wallet", title="Top Users by Event Count", color=ACCENT)
+        st.plotly_chart(fig, use_container_width=True)
+
+        with st.expander("Detailed activity breakdown"):
+            st.dataframe(
+                events_per_user[["wallet", "events", "days_active", "first_seen", "last_seen"]].rename(columns={
+                    "wallet": "Wallet", "events": "Events", "days_active": "Days Active",
+                    "first_seen": "First Seen", "last_seen": "Last Seen",
+                }),
+                use_container_width=True, hide_index=True,
+            )
+
+        st.markdown("---")
+
+        # --- Top Traders ---
+        st.subheader("Top Traders")
         with st.spinner("Loading trade data..."):
             trades = load_trades_range(start_str, end_str)
 
@@ -271,58 +439,51 @@ with tab_users:
             tdf = pd.DataFrame(trades)
             if "amount_usd" in tdf.columns and "wallet_address" in tdf.columns:
                 tdf["amount_usd"] = pd.to_numeric(tdf["amount_usd"], errors="coerce")
-                trader_stats = tdf.groupby("wallet_address").agg(
-                    volume=("amount_usd", "sum"),
-                    trades=("amount_usd", "count"),
-                    avg_trade=("amount_usd", "mean"),
-                ).sort_values("volume", ascending=False).head(25).reset_index()
-                trader_stats["wallet"] = trader_stats["wallet_address"].apply(short_wallet)
-                trader_stats["volume"] = trader_stats["volume"].round(2)
-                trader_stats["avg_trade"] = trader_stats["avg_trade"].round(2)
-                st.dataframe(
-                    trader_stats[["wallet", "volume", "trades", "avg_trade"]].rename(columns={
-                        "wallet": "Wallet",
-                        "volume": "Volume ($)",
-                        "trades": "Trades",
-                        "avg_trade": "Avg Trade ($)",
-                    }),
-                    use_container_width=True,
-                )
-            else:
-                st.info("Trade data missing expected fields.")
+
+                col_vol, col_count = st.columns(2)
+
+                with col_vol:
+                    trader_vol = tdf.groupby("wallet_address").agg(
+                        volume=("amount_usd", "sum"), trades=("amount_usd", "count"),
+                    ).sort_values("volume", ascending=False).head(15).reset_index()
+                    trader_vol["wallet"] = trader_vol["wallet_address"].apply(short_wallet)
+                    trader_vol["volume"] = trader_vol["volume"].round(0)
+                    fig = make_h_bar(trader_vol, "volume", "wallet", title="By Volume ($)", color=ACCENT_WARN, x_prefix="$")
+                    st.plotly_chart(fig, use_container_width=True)
+
+                with col_count:
+                    trader_cnt = tdf.groupby("wallet_address").size().sort_values(ascending=False).head(15).reset_index()
+                    trader_cnt.columns = ["wallet_address", "trades"]
+                    trader_cnt["wallet"] = trader_cnt["wallet_address"].apply(short_wallet)
+                    fig = make_h_bar(trader_cnt, "trades", "wallet", title="By Trade Count", color="#EC4899")
+                    st.plotly_chart(fig, use_container_width=True)
         else:
             st.info("No trade data for this period.")
 
-        # --- Top Traders by Trade Count ---
-        if trades:
-            tdf = pd.DataFrame(trades)
-            if "wallet_address" in tdf.columns:
-                st.subheader("Most Frequent Traders (by count)")
-                freq_traders = tdf.groupby("wallet_address").size().sort_values(ascending=False).head(25).reset_index()
-                freq_traders.columns = ["wallet_address", "trade_count"]
-                freq_traders["wallet"] = freq_traders["wallet_address"].apply(short_wallet)
-                st.dataframe(
-                    freq_traders[["wallet", "trade_count"]].rename(columns={
-                        "wallet": "Wallet",
-                        "trade_count": "Trades",
-                    }),
-                    use_container_width=True,
-                )
+        st.markdown("---")
 
-        # --- User Activity Heatmap (hour × day of week) ---
-        st.subheader("User Activity Heatmap (Hour × Day)")
+        # --- Heatmap ---
+        st.subheader("Activity Heatmap")
         if "hour" in df.columns and "day_of_week" in df.columns:
+            dow_labels = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
             heatmap = df.groupby(["day_of_week", "hour"]).size().unstack(fill_value=0)
             heatmap = heatmap.reindex(index=range(7), columns=range(24), fill_value=0)
-            heatmap.index = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
-            heatmap.columns = [f"{h:02d}" for h in range(24)]
-            try:
-                st.dataframe(
-                    heatmap.style.background_gradient(cmap="YlOrRd", axis=None),
-                    use_container_width=True,
-                )
-            except Exception:
-                st.dataframe(heatmap, use_container_width=True)
+
+            fig = go.Figure(data=go.Heatmap(
+                z=heatmap.values,
+                x=[f"{h:02d}:00" for h in range(24)],
+                y=dow_labels,
+                colorscale=[[0, "#1a1a2e"], [0.5, BRAND], [1, "#EC4899"]],
+                hovertemplate="<b>%{y} %{x}</b><br>%{z} events<extra></extra>",
+            ))
+            fig.update_layout(
+                **PLOTLY_LAYOUT, title="Events by Hour & Day of Week",
+                height=300, yaxis=dict(autorange="reversed", gridcolor="rgba(0,0,0,0)"),
+                xaxis=dict(gridcolor="rgba(0,0,0,0)"),
+            )
+            st.plotly_chart(fig, use_container_width=True)
+
+        st.markdown("---")
 
         # --- Per-User Deep Dive ---
         st.subheader("User Deep Dive")
@@ -335,82 +496,117 @@ with tab_users:
             user_df = df[df["wallet_address"] == full_wallet]
 
             col1, col2, col3 = st.columns(3)
-            col1.metric("Events", f"{len(user_df):,}")
-            col2.metric("Days Active", f"{user_df['date'].nunique()}")
-
+            col1.metric("Events", fmt_number(len(user_df)))
+            col2.metric("Days Active", str(user_df["date"].nunique()))
             user_sessions = extract_session_durations(user_df)
             total_min = user_sessions["duration_ms"].sum() / 60000 if not user_sessions.empty else 0
             col3.metric("Total Time", f"{total_min:.1f} min")
 
-            # User's event breakdown
-            st.write("**Event breakdown:**")
-            user_events = user_df["event"].value_counts().reset_index()
-            user_events.columns = ["Event", "Count"]
-            st.dataframe(user_events, use_container_width=True)
+            col_ev, col_act = st.columns(2)
+            with col_ev:
+                ue = user_df["event"].value_counts().head(10).reset_index()
+                ue.columns = ["event", "count"]
+                fig = make_h_bar(ue, "count", "event", title="Event Breakdown", color=BRAND)
+                st.plotly_chart(fig, use_container_width=True)
 
-            # User's daily activity
-            st.write("**Daily activity:**")
-            user_daily = user_df.groupby("date").size().reset_index(name="events")
-            st.bar_chart(user_daily.set_index("date")["events"])
+            with col_act:
+                ud = user_df.groupby("date").size().reset_index(name="events")
+                fig = make_time_series(ud, "date", "events", title="Daily Activity", color=ACCENT, kind="bar")
+                st.plotly_chart(fig, use_container_width=True)
 
-            # User's trades
             if trades:
                 user_trades = [t for t in trades if t.get("wallet_address") == full_wallet]
                 if user_trades:
                     utdf = pd.DataFrame(user_trades)
                     if "amount_usd" in utdf.columns:
                         utdf["amount_usd"] = pd.to_numeric(utdf["amount_usd"], errors="coerce")
-                        st.write(f"**Trades:** {len(utdf)} trades, ${utdf['amount_usd'].sum():,.2f} volume")
+                        st.markdown(f"**Trades:** {len(utdf)} trades | **${utdf['amount_usd'].sum():,.2f}** total volume")
                         display_cols = [c for c in ["timestamp", "from_token", "to_token", "amount_usd", "status", "source"] if c in utdf.columns]
-                        st.dataframe(utdf[display_cols].sort_values("timestamp", ascending=False), use_container_width=True)
+                        st.dataframe(utdf[display_cols].sort_values("timestamp", ascending=False), use_container_width=True, hide_index=True)
 
 
 # =====================
 # TAB 3: Retention
 # =====================
 with tab_retention:
-    st.header("Cohort Retention")
-
     if df.empty:
-        st.info("No data for retention analysis.")
+        st.info("No data for retention analysis. Need at least a few days of data for cohort analysis.")
     else:
         first_seen = df.groupby("wallet_address")["date"].min().reset_index()
         first_seen.columns = ["wallet_address", "cohort_date"]
-
         cohort_dates = sorted(first_seen["cohort_date"].unique())
         retention_days = [0, 1, 3, 7, 14, 30]
 
         retention_data = []
+        retention_nums = []
         for cohort in cohort_dates:
             cohort_users = set(first_seen[first_seen["cohort_date"] == cohort]["wallet_address"])
             cohort_size = len(cohort_users)
             if cohort_size == 0:
                 continue
-
             row = {"Cohort": cohort, "Users": cohort_size}
+            num_row = {"cohort": cohort, "size": cohort_size}
             cohort_dt = datetime.strptime(cohort, "%Y-%m-%d")
-
             for d in retention_days:
                 target_date = (cohort_dt + timedelta(days=d)).strftime("%Y-%m-%d")
                 active_on_day = set(df[df["date"] == target_date]["wallet_address"])
                 retained = cohort_users & active_on_day
                 pct = (len(retained) / cohort_size * 100) if cohort_size > 0 else 0
                 row[f"D{d}"] = f"{pct:.0f}%"
-
+                num_row[f"D{d}"] = pct
             retention_data.append(row)
+            retention_nums.append(num_row)
 
         if retention_data:
+            # Styled retention table
             ret_df = pd.DataFrame(retention_data)
-            st.dataframe(ret_df, use_container_width=True)
+            st.dataframe(ret_df, use_container_width=True, hide_index=True)
 
-            # Retention curve (average across cohorts)
+            st.markdown("---")
+
+            # Retention curve
             st.subheader("Average Retention Curve")
-            avg_retention = {}
+            avg_ret = {}
             for d in retention_days:
-                col = f"D{d}"
-                vals = [int(r[col].replace("%", "")) for r in retention_data if col in r]
-                avg_retention[f"Day {d}"] = sum(vals) / len(vals) if vals else 0
-            st.bar_chart(pd.Series(avg_retention))
+                vals = [r[f"D{d}"] for r in retention_nums]
+                avg_ret[d] = sum(vals) / len(vals) if vals else 0
+
+            curve_df = pd.DataFrame({"Day": [f"D{d}" for d in retention_days], "Retention %": list(avg_ret.values())})
+            fig = px.line(curve_df, x="Day", y="Retention %", markers=True)
+            fig.update_traces(
+                line=dict(color=BRAND, width=3),
+                marker=dict(size=10, color=BRAND),
+                hovertemplate="<b>%{x}</b><br>%{y:.1f}%<extra></extra>",
+            )
+            fig.update_layout(**PLOTLY_LAYOUT, height=350, yaxis=dict(range=[0, 105], gridcolor="rgba(255,255,255,0.06)"))
+            fig.update_xaxes(title="")
+            fig.update_yaxes(title="Retention %")
+            st.plotly_chart(fig, use_container_width=True)
+
+            # Retention heatmap
+            if len(retention_nums) > 1:
+                st.subheader("Cohort Retention Heatmap")
+                heat_data = []
+                for r in retention_nums:
+                    for d in retention_days:
+                        heat_data.append({"Cohort": r["cohort"], "Day": f"D{d}", "Retention": r[f"D{d}"]})
+                heat_df = pd.DataFrame(heat_data)
+                pivot = heat_df.pivot(index="Cohort", columns="Day", values="Retention")
+                pivot = pivot[[f"D{d}" for d in retention_days]]
+
+                fig = go.Figure(data=go.Heatmap(
+                    z=pivot.values, x=pivot.columns.tolist(), y=pivot.index.tolist(),
+                    colorscale=[[0, "#1a1a2e"], [0.5, BRAND], [1, ACCENT]],
+                    text=[[f"{v:.0f}%" for v in row] for row in pivot.values],
+                    texttemplate="%{text}", textfont=dict(size=12, color="white"),
+                    hovertemplate="<b>%{y}</b> → <b>%{x}</b><br>%{z:.0f}% retained<extra></extra>",
+                ))
+                fig.update_layout(
+                    **PLOTLY_LAYOUT, height=max(250, len(pivot) * 35 + 80),
+                    yaxis=dict(autorange="reversed", gridcolor="rgba(0,0,0,0)"),
+                    xaxis=dict(gridcolor="rgba(0,0,0,0)"),
+                )
+                st.plotly_chart(fig, use_container_width=True)
         else:
             st.info("Not enough data for cohort analysis.")
 
@@ -419,69 +615,79 @@ with tab_retention:
 # TAB 4: Funnels
 # =====================
 with tab_funnels:
-    st.header("Funnels")
-
     if df.empty:
         st.info("No data for funnel analysis.")
     else:
+        col_notif, col_trade = st.columns(2)
+
         # Notification → Trade funnel
-        st.subheader("Notification → Trade Funnel")
-        notif_received = df[df["event"] == "notification_received"]["wallet_address"].nunique()
-        notif_tapped = df[df["event"] == "notification_tap"]["wallet_address"].nunique()
-        trade_init = df[df["event"] == "trade_initiated"]["wallet_address"].nunique()
-        trade_success = df[df["event"] == "trade_success"]["wallet_address"].nunique()
-
-        funnel_data = pd.DataFrame({
-            "Step": ["Notification Received", "Notification Tapped", "Trade Initiated", "Trade Success"],
-            "Users": [notif_received, notif_tapped, trade_init, trade_success],
-        })
-        funnel_data["Conversion"] = ["—"] + [
-            f"{(funnel_data['Users'].iloc[i] / funnel_data['Users'].iloc[i-1] * 100):.0f}%"
-            if funnel_data["Users"].iloc[i-1] > 0 else "—"
-            for i in range(1, len(funnel_data))
-        ]
-        st.dataframe(funnel_data, use_container_width=True)
-
-        # Deposit funnel
-        st.subheader("Deposit Funnel")
-        dep_modal = df[df["event"] == "deposit_modal_open"]["wallet_address"].nunique()
-        dep_init = df[df["event"] == "deposit_initiated"]["wallet_address"].nunique()
-        dep_success = df[df["event"] == "deposit_success"]["wallet_address"].nunique()
-        dep_error = df[df["event"] == "deposit_error"]["wallet_address"].nunique()
-
-        dep_funnel = pd.DataFrame({
-            "Step": ["Deposit Modal Open", "Deposit Initiated", "Deposit Success", "Deposit Error"],
-            "Users": [dep_modal, dep_init, dep_success, dep_error],
-        })
-        st.dataframe(dep_funnel, use_container_width=True)
-
-        # Deposit by provider
-        st.subheader("Deposits by Provider")
-        dep_events = df[df["event"].isin(["deposit_initiated", "deposit_success", "deposit_error"])]
-        if not dep_events.empty and "metadata" in dep_events.columns:
-            provider_rows = []
-            for _, r in dep_events.iterrows():
-                meta = r.get("metadata")
-                if isinstance(meta, dict) and meta.get("provider"):
-                    provider_rows.append({"provider": meta["provider"], "event": r["event"]})
-            if provider_rows:
-                prov_df = pd.DataFrame(provider_rows)
-                prov_pivot = prov_df.groupby(["provider", "event"]).size().unstack(fill_value=0)
-                st.dataframe(prov_pivot, use_container_width=True)
+        with col_notif:
+            st.subheader("Notification → Trade")
+            notif_received = df[df["event"] == "notification_received"]["wallet_address"].nunique()
+            notif_tapped = df[df["event"] == "notification_tap"]["wallet_address"].nunique()
+            trade_init = df[df["event"] == "trade_initiated"]["wallet_address"].nunique()
+            trade_ok = df[df["event"] == "trade_success"]["wallet_address"].nunique()
+            fig = make_funnel(
+                ["Notif Received", "Notif Tapped", "Trade Started", "Trade Success"],
+                [notif_received, notif_tapped, trade_init, trade_ok],
+            )
+            st.plotly_chart(fig, use_container_width=True)
 
         # Trade funnel
-        st.subheader("Trade Funnel")
-        swap_modal = df[df["event"] == "swap_modal_open"]["wallet_address"].nunique()
-        buy_tap = df[df["event"] == "buy_button_tap"]["wallet_address"].nunique()
-        t_init = df[df["event"] == "trade_initiated"]["wallet_address"].nunique()
-        t_success = df[df["event"] == "trade_success"]["wallet_address"].nunique()
-        t_error = df[df["event"] == "trade_error"]["wallet_address"].nunique()
+        with col_trade:
+            st.subheader("Trade Funnel")
+            buy_tap = df[df["event"] == "buy_button_tap"]["wallet_address"].nunique()
+            swap_modal = df[df["event"] == "swap_modal_open"]["wallet_address"].nunique()
+            t_init = df[df["event"] == "trade_initiated"]["wallet_address"].nunique()
+            t_ok = df[df["event"] == "trade_success"]["wallet_address"].nunique()
+            t_err = df[df["event"] == "trade_error"]["wallet_address"].nunique()
+            fig = make_funnel(
+                ["Buy Tap", "Swap Modal", "Trade Started", "Trade Success", "Trade Error"],
+                [buy_tap, swap_modal, t_init, t_ok, t_err],
+            )
+            st.plotly_chart(fig, use_container_width=True)
 
-        trade_funnel = pd.DataFrame({
-            "Step": ["Buy Button Tap", "Swap Modal Open", "Trade Initiated", "Trade Success", "Trade Error"],
-            "Users": [buy_tap, swap_modal, t_init, t_success, t_error],
-        })
-        st.dataframe(trade_funnel, use_container_width=True)
+        st.markdown("---")
+
+        # Deposit funnel
+        col_dep, col_prov = st.columns(2)
+
+        with col_dep:
+            st.subheader("Deposit Funnel")
+            dep_modal = df[df["event"] == "deposit_modal_open"]["wallet_address"].nunique()
+            dep_init = df[df["event"] == "deposit_initiated"]["wallet_address"].nunique()
+            dep_ok = df[df["event"] == "deposit_success"]["wallet_address"].nunique()
+            dep_err = df[df["event"] == "deposit_error"]["wallet_address"].nunique()
+            fig = make_funnel(
+                ["Modal Open", "Initiated", "Success", "Error"],
+                [dep_modal, dep_init, dep_ok, dep_err],
+            )
+            st.plotly_chart(fig, use_container_width=True)
+
+        # Deposit by provider
+        with col_prov:
+            st.subheader("Deposits by Provider")
+            dep_events = df[df["event"].isin(["deposit_initiated", "deposit_success", "deposit_error"])]
+            if not dep_events.empty and "metadata" in dep_events.columns:
+                provider_rows = []
+                for _, r in dep_events.iterrows():
+                    meta = r.get("metadata")
+                    if isinstance(meta, dict) and meta.get("provider"):
+                        provider_rows.append({"provider": meta["provider"], "event": r["event"]})
+                if provider_rows:
+                    prov_df = pd.DataFrame(provider_rows)
+                    fig = px.histogram(prov_df, x="provider", color="event", barmode="group",
+                                       color_discrete_sequence=[BRAND, ACCENT, ACCENT_RED])
+                    fig.update_layout(**PLOTLY_LAYOUT, height=350, legend=dict(orientation="h", y=-0.15))
+                    fig.update_xaxes(title="")
+                    fig.update_yaxes(title="Count")
+                    st.plotly_chart(fig, use_container_width=True)
+                else:
+                    st.info("No provider metadata found.")
+            else:
+                st.info("No deposit events yet.")
+
+        st.markdown("---")
 
         # Feature engagement
         st.subheader("Feature Engagement")
@@ -493,21 +699,21 @@ with tab_funnels:
         eng_data = []
         for evt in engagement_events:
             evt_df = df[df["event"] == evt]
-            eng_data.append({
-                "Event": evt,
-                "Total": len(evt_df),
-                "Unique Users": evt_df["wallet_address"].nunique(),
-            })
-        eng_df = pd.DataFrame(eng_data).sort_values("Total", ascending=False)
-        st.dataframe(eng_df, use_container_width=True)
+            eng_data.append({"event": evt, "total": len(evt_df), "users": evt_df["wallet_address"].nunique()})
+        eng_df = pd.DataFrame(eng_data).sort_values("total", ascending=False)
+        eng_df = eng_df[eng_df["total"] > 0]
+
+        if not eng_df.empty:
+            fig = make_h_bar(eng_df, "total", "event", title="Feature Usage (total events)", color=BRAND_LIGHT)
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.info("No feature engagement data yet.")
 
 
 # =====================
 # TAB 5: Trades
 # =====================
 with tab_trades:
-    st.header("Trades")
-
     with st.spinner("Loading trade data..."):
         trades = load_trades_range(start_str, end_str)
 
@@ -529,64 +735,95 @@ with tab_trades:
         avg_trade = total_vol / total_trades if total_trades > 0 else 0
 
         col1, col2, col3, col4 = st.columns(4)
-        col1.metric("Total Volume", f"${total_vol:,.0f}")
-        col2.metric("Total Trades", f"{total_trades:,}")
-        col3.metric("Unique Traders", f"{unique_traders:,}")
+        col1.metric("Total Volume", f"${fmt_number(total_vol)}")
+        col2.metric("Total Trades", fmt_number(total_trades))
+        col3.metric("Unique Traders", fmt_number(unique_traders))
         col4.metric("Avg Trade Size", f"${avg_trade:,.0f}")
 
-        # Volume by day
+        st.markdown("---")
+
+        # Daily volume
         if "trade_date" in tdf.columns and "amount_usd" in tdf.columns:
-            st.subheader("Daily Volume")
-            daily_vol = tdf.groupby("trade_date")["amount_usd"].sum()
-            st.bar_chart(daily_vol)
+            daily_vol = tdf.groupby("trade_date")["amount_usd"].sum().reset_index()
+            daily_vol.columns = ["date", "volume"]
+            fig = make_time_series(daily_vol, "date", "volume", title="Daily Volume ($)", color=ACCENT, kind="bar")
+            st.plotly_chart(fig, use_container_width=True)
 
-        # Volume by token
-        if "to_token" in tdf.columns and "amount_usd" in tdf.columns:
-            st.subheader("Volume by Token (top 20)")
-            vol_by_token = tdf.groupby("to_token")["amount_usd"].sum().sort_values(ascending=False).head(20)
-            st.bar_chart(vol_by_token)
+        st.markdown("---")
 
-        # Trade count by token
-        if "to_token" in tdf.columns:
-            st.subheader("Trade Count by Token (top 20)")
-            count_by_token = tdf["to_token"].value_counts().head(20)
-            st.bar_chart(count_by_token)
+        # Volume by token + Count by token side by side
+        col_vol, col_cnt = st.columns(2)
 
-        # Trades by hour
-        if "hour" in tdf.columns:
-            st.subheader("Trades by Hour (UTC)")
-            by_hour = tdf.groupby("hour").size().reindex(range(24), fill_value=0)
-            st.bar_chart(by_hour)
+        with col_vol:
+            if "to_token" in tdf.columns and "amount_usd" in tdf.columns:
+                vbt = tdf.groupby("to_token")["amount_usd"].sum().sort_values(ascending=False).head(15).reset_index()
+                vbt.columns = ["token", "volume"]
+                vbt["volume"] = vbt["volume"].round(0)
+                fig = make_h_bar(vbt, "volume", "token", title="Volume by Token (Top 15)", color=ACCENT_WARN, x_prefix="$")
+                st.plotly_chart(fig, use_container_width=True)
 
-        # Trades by day of week
-        if "dow" in tdf.columns:
-            st.subheader("Trades by Day of Week")
-            dow_labels = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
-            by_dow = tdf.groupby("dow").size().reindex(range(7), fill_value=0)
-            by_dow.index = dow_labels
-            st.bar_chart(by_dow)
+        with col_cnt:
+            if "to_token" in tdf.columns:
+                cbt = tdf["to_token"].value_counts().head(15).reset_index()
+                cbt.columns = ["token", "trades"]
+                fig = make_h_bar(cbt, "trades", "token", title="Trades by Token (Top 15)", color="#EC4899")
+                st.plotly_chart(fig, use_container_width=True)
 
-        # Trade source breakdown
+        st.markdown("---")
+
+        # Hour + DOW side by side
+        col_h, col_d = st.columns(2)
+
+        with col_h:
+            if "hour" in tdf.columns:
+                bh = tdf.groupby("hour").size().reindex(range(24), fill_value=0).reset_index()
+                bh.columns = ["hour", "trades"]
+                bh["label"] = bh["hour"].apply(lambda h: f"{h:02d}:00")
+                fig = px.bar(bh, x="label", y="trades", title="Trades by Hour (UTC)")
+                fig.update_traces(marker_color=BRAND, hovertemplate="<b>%{x}</b><br>%{y} trades<extra></extra>")
+                fig.update_layout(**PLOTLY_LAYOUT, height=320)
+                fig.update_xaxes(title="", tickangle=-45)
+                fig.update_yaxes(title="")
+                st.plotly_chart(fig, use_container_width=True)
+
+        with col_d:
+            if "dow" in tdf.columns:
+                dow_labels = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+                bd = tdf.groupby("dow").size().reindex(range(7), fill_value=0).reset_index()
+                bd.columns = ["dow", "trades"]
+                bd["day"] = bd["dow"].map(lambda i: dow_labels[int(i)] if pd.notna(i) and int(i) < 7 else "?")
+                fig = px.bar(bd, x="day", y="trades", title="Trades by Day of Week")
+                fig.update_traces(marker_color=ACCENT, hovertemplate="<b>%{x}</b><br>%{y} trades<extra></extra>")
+                fig.update_layout(**PLOTLY_LAYOUT, height=320)
+                fig.update_xaxes(title="")
+                fig.update_yaxes(title="")
+                st.plotly_chart(fig, use_container_width=True)
+
+        # Trade source
         if "source" in tdf.columns:
+            st.markdown("---")
             st.subheader("Trade Source")
-            source_counts = tdf["source"].value_counts()
-            st.bar_chart(source_counts)
+            src = tdf["source"].value_counts().reset_index()
+            src.columns = ["source", "count"]
+            fig = px.pie(src, values="count", names="source", hole=0.5, color_discrete_sequence=CHART_COLORS)
+            fig.update_traces(textinfo="label+percent", textfont=dict(size=13, color="white"))
+            fig.update_layout(**PLOTLY_LAYOUT, height=350, showlegend=False)
+            st.plotly_chart(fig, use_container_width=True)
 
-        # Recent trades table
+        # Recent trades
+        st.markdown("---")
         st.subheader("Recent Trades")
         display_cols = [c for c in ["timestamp", "wallet_address", "from_token", "to_token", "amount_usd", "status", "source", "type"] if c in tdf.columns]
-        recent = tdf[display_cols].sort_values("timestamp", ascending=False).head(50)
+        recent = tdf[display_cols].sort_values("timestamp", ascending=False).head(50).copy()
         if "wallet_address" in recent.columns:
             recent["wallet_address"] = recent["wallet_address"].apply(short_wallet)
-        st.dataframe(recent, use_container_width=True)
+        st.dataframe(recent, use_container_width=True, hide_index=True)
 
 
 # =====================
 # TAB 6: Notifications
 # =====================
 with tab_notifications:
-    st.header("Notifications")
-
     if df.empty:
         st.info("No data for notification analysis.")
     else:
@@ -599,20 +836,27 @@ with tab_notifications:
         unique_tappers = tapped_events["wallet_address"].nunique()
 
         col1, col2, col3, col4 = st.columns(4)
-        col1.metric("Received", f"{received_count:,}")
-        col2.metric("Tapped", f"{tapped_count:,}")
+        col1.metric("Received", fmt_number(received_count))
+        col2.metric("Tapped", fmt_number(tapped_count))
         col3.metric("Tap Rate", f"{tap_rate:.1f}%")
-        col4.metric("Unique Tappers", f"{unique_tappers:,}")
+        col4.metric("Unique Tappers", fmt_number(unique_tappers))
+
+        st.markdown("---")
 
         # Tap rate by day
-        st.subheader("Tap Rate by Day")
         if not received_events.empty:
-            daily_received = received_events.groupby("date").size()
-            daily_tapped = tapped_events.groupby("date").size() if not tapped_events.empty else pd.Series(dtype=int)
-            daily_rate = (daily_tapped / daily_received * 100).fillna(0)
-            st.line_chart(daily_rate)
+            st.subheader("Tap Rate by Day")
+            daily_recv = received_events.groupby("date").size()
+            daily_tap = tapped_events.groupby("date").size() if not tapped_events.empty else pd.Series(dtype=int)
+            daily_rate = ((daily_tap / daily_recv * 100).fillna(0)).reset_index()
+            daily_rate.columns = ["date", "rate"]
+            fig = make_time_series(daily_rate, "date", "rate", title="Tap Rate %", color=ACCENT)
+            fig.update_yaxes(title="Tap Rate %")
+            st.plotly_chart(fig, use_container_width=True)
 
-        # Time to trade after notification tap
+        st.markdown("---")
+
+        # Time to trade
         st.subheader("Time to Trade After Notification Tap")
         if not tapped_events.empty and "ts" in df.columns:
             trade_events = df[df["event"] == "trade_initiated"].copy()
@@ -629,17 +873,25 @@ with tab_notifications:
                         & (trade_events["ts"] < tap_ts + timedelta(hours=1))
                     ]
                     if not wallet_trades.empty:
-                        first_trade = wallet_trades.iloc[0]
-                        delta = (first_trade["ts"] - tap_ts).total_seconds()
+                        delta = (wallet_trades.iloc[0]["ts"] - tap_ts).total_seconds()
                         times_to_trade.append(delta)
 
                 if times_to_trade:
-                    avg_seconds = sum(times_to_trade) / len(times_to_trade)
-                    median_seconds = sorted(times_to_trade)[len(times_to_trade) // 2]
+                    avg_s = sum(times_to_trade) / len(times_to_trade)
+                    med_s = sorted(times_to_trade)[len(times_to_trade) // 2]
                     col1, col2, col3 = st.columns(3)
-                    col1.metric("Avg Time to Trade", f"{avg_seconds:.0f}s")
-                    col2.metric("Median Time to Trade", f"{median_seconds:.0f}s")
-                    col3.metric("Conversions (tap→trade <1hr)", f"{len(times_to_trade)}")
+                    col1.metric("Avg Time", f"{avg_s:.0f}s")
+                    col2.metric("Median Time", f"{med_s:.0f}s")
+                    col3.metric("Conversions (<1hr)", fmt_number(len(times_to_trade)))
+
+                    # Distribution
+                    ttd_df = pd.DataFrame({"seconds": times_to_trade})
+                    fig = px.histogram(ttd_df, x="seconds", nbins=20, title="Time to Trade Distribution")
+                    fig.update_traces(marker_color=BRAND)
+                    fig.update_layout(**PLOTLY_LAYOUT, height=300)
+                    fig.update_xaxes(title="Seconds after tap")
+                    fig.update_yaxes(title="Count")
+                    st.plotly_chart(fig, use_container_width=True)
                 else:
                     st.info("No notification→trade conversions found within 1 hour.")
             else:
@@ -647,25 +899,30 @@ with tab_notifications:
         else:
             st.info("No notification tap events found.")
 
-        # Top tapped tickers
-        if not tapped_events.empty and "metadata" in tapped_events.columns:
-            st.subheader("Most Tapped Tickers")
-            tickers = []
-            for _, row in tapped_events.iterrows():
-                meta = row.get("metadata")
-                if isinstance(meta, dict) and meta.get("ticker"):
-                    tickers.append(meta["ticker"])
-            if tickers:
-                ticker_counts = pd.Series(tickers).value_counts().head(10)
-                st.bar_chart(ticker_counts)
+        st.markdown("---")
 
-        # Top notification tappers
-        if not tapped_events.empty:
-            st.subheader("Most Engaged Notification Users")
-            top_tappers = tapped_events.groupby("wallet_address").size().sort_values(ascending=False).head(15).reset_index()
-            top_tappers.columns = ["wallet_address", "taps"]
-            top_tappers["wallet"] = top_tappers["wallet_address"].apply(short_wallet)
-            st.dataframe(
-                top_tappers[["wallet", "taps"]].rename(columns={"wallet": "Wallet", "taps": "Notification Taps"}),
-                use_container_width=True,
-            )
+        # Top tapped tickers + Top tappers side by side
+        col_tick, col_tap = st.columns(2)
+
+        with col_tick:
+            if not tapped_events.empty and "metadata" in tapped_events.columns:
+                st.subheader("Most Tapped Tickers")
+                tickers = []
+                for _, row in tapped_events.iterrows():
+                    meta = row.get("metadata")
+                    if isinstance(meta, dict) and meta.get("ticker"):
+                        tickers.append(meta["ticker"])
+                if tickers:
+                    tc = pd.Series(tickers).value_counts().head(10).reset_index()
+                    tc.columns = ["ticker", "taps"]
+                    fig = make_h_bar(tc, "taps", "ticker", title="Top Tickers", color=ACCENT_WARN)
+                    st.plotly_chart(fig, use_container_width=True)
+
+        with col_tap:
+            if not tapped_events.empty:
+                st.subheader("Most Engaged Users")
+                tt = tapped_events.groupby("wallet_address").size().sort_values(ascending=False).head(10).reset_index()
+                tt.columns = ["wallet_address", "taps"]
+                tt["wallet"] = tt["wallet_address"].apply(short_wallet)
+                fig = make_h_bar(tt, "taps", "wallet", title="Top Notification Tappers", color="#EC4899")
+                st.plotly_chart(fig, use_container_width=True)
