@@ -84,10 +84,10 @@ PLOTLY_LAYOUT = dict(
     plot_bgcolor="rgba(0,0,0,0)",
     font=dict(color="#E5E7EB", size=13),
     margin=dict(l=0, r=0, t=40, b=0),
-    xaxis=dict(gridcolor="rgba(255,255,255,0.06)", zerolinecolor="rgba(255,255,255,0.06)"),
-    yaxis=dict(gridcolor="rgba(255,255,255,0.06)", zerolinecolor="rgba(255,255,255,0.06)"),
     hoverlabel=dict(bgcolor="#1E1E2E", font_size=13, font_color="#E5E7EB"),
 )
+# Default axis styling — applied separately to avoid duplicate kwarg conflicts
+AXIS_DEFAULTS = dict(gridcolor="rgba(255,255,255,0.06)", zerolinecolor="rgba(255,255,255,0.06)")
 
 
 # --- Helpers ---
@@ -128,7 +128,7 @@ def make_h_bar(data, x_col, y_col, title="", color=BRAND, x_prefix="", x_suffix=
     fig.update_layout(
         **PLOTLY_LAYOUT, title=title, showlegend=False,
         yaxis=dict(autorange="reversed", gridcolor="rgba(0,0,0,0)"),
-        xaxis=dict(title="", gridcolor="rgba(255,255,255,0.06)"),
+        xaxis=dict(title="", **AXIS_DEFAULTS),
         height=max(300, len(data) * 32 + 60),
     )
     fig.update_yaxes(title="")
@@ -146,8 +146,8 @@ def make_time_series(data, x_col, y_col, title="", color=BRAND, kind="area"):
         fig = px.bar(data, x=x_col, y=y_col)
         fig.update_traces(marker_color=color)
     fig.update_layout(**PLOTLY_LAYOUT, title=title, showlegend=False, height=350)
-    fig.update_xaxes(title="")
-    fig.update_yaxes(title="")
+    fig.update_xaxes(title="", **AXIS_DEFAULTS)
+    fig.update_yaxes(title="", **AXIS_DEFAULTS)
     return fig
 
 
@@ -505,10 +505,10 @@ with tab_users:
                 hovertemplate="<b>%{y} %{x}</b><br>%{z} events<extra></extra>",
             ))
             fig.update_layout(
-                **PLOTLY_LAYOUT, title="Events by Hour & Day of Week",
-                height=300, yaxis=dict(autorange="reversed", gridcolor="rgba(0,0,0,0)"),
-                xaxis=dict(gridcolor="rgba(0,0,0,0)"),
+                **PLOTLY_LAYOUT, title="Events by Hour & Day of Week", height=300,
             )
+            fig.update_yaxes(autorange="reversed", gridcolor="rgba(0,0,0,0)")
+            fig.update_xaxes(gridcolor="rgba(0,0,0,0)")
             st.plotly_chart(fig, use_container_width=True)
 
         st.markdown("---")
@@ -606,7 +606,8 @@ with tab_retention:
                 marker=dict(size=10, color=BRAND),
                 hovertemplate="<b>%{x}</b><br>%{y:.1f}%<extra></extra>",
             )
-            fig.update_layout(**PLOTLY_LAYOUT, height=350, yaxis=dict(range=[0, 105], gridcolor="rgba(255,255,255,0.06)"))
+            fig.update_layout(**PLOTLY_LAYOUT, height=350)
+            fig.update_yaxes(range=[0, 105], **AXIS_DEFAULTS)
             fig.update_xaxes(title="")
             fig.update_yaxes(title="Retention %")
             st.plotly_chart(fig, use_container_width=True)
@@ -631,9 +632,9 @@ with tab_retention:
                 ))
                 fig.update_layout(
                     **PLOTLY_LAYOUT, height=max(250, len(pivot) * 35 + 80),
-                    yaxis=dict(autorange="reversed", gridcolor="rgba(0,0,0,0)"),
-                    xaxis=dict(gridcolor="rgba(0,0,0,0)"),
                 )
+                fig.update_yaxes(autorange="reversed", gridcolor="rgba(0,0,0,0)")
+                fig.update_xaxes(gridcolor="rgba(0,0,0,0)")
                 st.plotly_chart(fig, use_container_width=True)
         else:
             st.info("Not enough data for cohort analysis.")
