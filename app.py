@@ -25,7 +25,6 @@ st.markdown("""
 <style>
     /* Metric cards */
     [data-testid="stMetric"] {
-        background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
         border: 1px solid rgba(79, 70, 229, 0.3);
         border-radius: 12px;
         padding: 16px 20px;
@@ -68,10 +67,7 @@ st.markdown("""
         margin: 2rem 0;
     }
 
-    /* Sidebar */
-    [data-testid="stSidebar"] {
-        background: linear-gradient(180deg, #0f0f1a 0%, #1a1a2e 100%);
-    }
+    /* Sidebar metrics */
     [data-testid="stSidebar"] [data-testid="stMetric"] {
         background: rgba(79, 70, 229, 0.1);
         border: 1px solid rgba(79, 70, 229, 0.2);
