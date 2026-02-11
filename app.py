@@ -276,10 +276,20 @@ with st.spinner("Loading analytics data..."):
     events = load_events_range(start_str, end_str)
     df = events_to_df(events)
 
+# Filter out server/system entries from user metrics
+SYSTEM_WALLETS = {"server", "unknown", "system", ""}
+if not df.empty and "wallet_address" in df.columns:
+    is_real_user = ~df["wallet_address"].isin(SYSTEM_WALLETS)
+    if "platform" in df.columns:
+        is_real_user = is_real_user & (df["platform"] != "server")
+    user_df = df[is_real_user].copy()
+else:
+    user_df = df.copy()
+
 st.sidebar.markdown("---")
 st.sidebar.metric("Total Events", fmt_number(len(df)))
-if not df.empty:
-    st.sidebar.metric("Unique Users", fmt_number(df["wallet_address"].nunique()))
+if not user_df.empty:
+    st.sidebar.metric("Unique Users", fmt_number(user_df["wallet_address"].nunique()))
     st.sidebar.metric("Date Range", f"{num_days} days")
 st.sidebar.markdown("---")
 st.sidebar.caption("Data refreshes every 5 minutes")
@@ -294,13 +304,13 @@ tab_overview, tab_users, tab_retention, tab_funnels, tab_trades, tab_notificatio
 # TAB 1: Overview
 # =====================
 with tab_overview:
-    if df.empty:
+    if user_df.empty:
         st.info("No analytics events found for this date range. Events will appear here once the app starts sending data.")
     else:
-        daily_users = df.groupby("date")["wallet_address"].nunique().reset_index(name="users")
-        total_unique = df["wallet_address"].nunique()
-        sessions = df[df["event"] == "session_start"]
-        sess_durations = extract_session_durations(df)
+        daily_users = user_df.groupby("date")["wallet_address"].nunique().reset_index(name="users")
+        total_unique = user_df["wallet_address"].nunique()
+        sessions = user_df[user_df["event"] == "session_start"]
+        sess_durations = extract_session_durations(user_df)
         avg_dur = sess_durations["duration_ms"].mean() if not sess_durations.empty else 0
 
         col1, col2, col3, col4 = st.columns(4)
@@ -308,6 +318,24 @@ with tab_overview:
         col2.metric("Unique Users", fmt_number(total_unique))
         col3.metric("Sessions", fmt_number(len(sessions)))
         col4.metric("Avg Session", f"{avg_dur/1000:.0f}s" if avg_dur else "N/A")
+
+        # Expandable unique users list
+        with st.expander(f"View all {total_unique} unique users"):
+            all_user_wallets = user_df.groupby("wallet_address").agg(
+                events=("event", "count"),
+                days_active=("date", "nunique"),
+                first_seen=("date", "min"),
+                last_seen=("date", "max"),
+            ).sort_values("last_seen", ascending=False).reset_index()
+            all_user_wallets["wallet_short"] = all_user_wallets["wallet_address"].apply(short_wallet)
+            st.dataframe(
+                all_user_wallets[["wallet_short", "wallet_address", "events", "days_active", "first_seen", "last_seen"]].rename(columns={
+                    "wallet_short": "Wallet", "wallet_address": "Full Address",
+                    "events": "Events", "days_active": "Days Active",
+                    "first_seen": "First Seen", "last_seen": "Last Seen",
+                }),
+                use_container_width=True, hide_index=True,
+            )
 
         st.markdown("---")
 
@@ -317,8 +345,8 @@ with tab_overview:
 
         # WAU / MAU side by side
         col_w, col_m = st.columns(2)
-        wau = df[df["date"] >= (today - timedelta(days=7)).strftime("%Y-%m-%d")]["wallet_address"].nunique()
-        mau = df[df["date"] >= (today - timedelta(days=30)).strftime("%Y-%m-%d")]["wallet_address"].nunique()
+        wau = user_df[user_df["date"] >= (today - timedelta(days=7)).strftime("%Y-%m-%d")]["wallet_address"].nunique()
+        mau = user_df[user_df["date"] >= (today - timedelta(days=30)).strftime("%Y-%m-%d")]["wallet_address"].nunique()
         col_w.metric("WAU (7d)", fmt_number(wau))
         col_m.metric("MAU (30d)", fmt_number(mau))
 
@@ -328,12 +356,12 @@ with tab_overview:
         col_left, col_right = st.columns([3, 2])
 
         with col_left:
-            ebd = df.groupby("date").size().reset_index(name="count")
+            ebd = user_df.groupby("date").size().reset_index(name="count")
             fig = make_time_series(ebd, "date", "count", title="Events by Day", color=BRAND_LIGHT, kind="bar")
             st.plotly_chart(fig, use_container_width=True)
 
         with col_right:
-            top_ev = df["event"].value_counts().head(12).reset_index()
+            top_ev = user_df["event"].value_counts().head(12).reset_index()
             top_ev.columns = ["event", "count"]
             fig = make_h_bar(top_ev, "count", "event", title="Top Events", color=BRAND)
             st.plotly_chart(fig, use_container_width=True)
@@ -344,8 +372,8 @@ with tab_overview:
         col_h, col_d = st.columns(2)
 
         with col_h:
-            if "hour" in df.columns:
-                hourly = df.groupby("hour").size().reindex(range(24), fill_value=0).reset_index()
+            if "hour" in user_df.columns:
+                hourly = user_df.groupby("hour").size().reindex(range(24), fill_value=0).reset_index()
                 hourly.columns = ["hour", "events"]
                 hourly["label"] = hourly["hour"].apply(lambda h: f"{h:02d}:00")
                 fig = px.bar(hourly, x="label", y="events", title="Hourly Activity (UTC)")
@@ -356,9 +384,9 @@ with tab_overview:
                 st.plotly_chart(fig, use_container_width=True)
 
         with col_d:
-            if "day_of_week" in df.columns:
+            if "day_of_week" in user_df.columns:
                 dow_labels = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
-                by_dow = df.groupby("day_of_week").size().reindex(range(7), fill_value=0).reset_index()
+                by_dow = user_df.groupby("day_of_week").size().reindex(range(7), fill_value=0).reset_index()
                 by_dow.columns = ["dow", "events"]
                 by_dow["day"] = by_dow["dow"].map(lambda i: dow_labels[int(i)] if pd.notna(i) and int(i) < 7 else "?")
                 fig = px.bar(by_dow, x="day", y="events", title="Activity by Day of Week")
@@ -373,12 +401,12 @@ with tab_overview:
 # TAB 2: Top Users
 # =====================
 with tab_users:
-    if df.empty:
+    if user_df.empty:
         st.info("No data available.")
     else:
         # --- Time Spent Leaderboard ---
         st.subheader("Time Spent in App")
-        sess_durations = extract_session_durations(df)
+        sess_durations = extract_session_durations(user_df)
         if not sess_durations.empty:
             time_by_user = sess_durations.groupby("wallet_address").agg(
                 total_time_min=("duration_ms", lambda x: round(x.sum() / 60000, 1)),
@@ -408,7 +436,7 @@ with tab_users:
 
         # --- Most Active by Event Count ---
         st.subheader("Most Active Users")
-        events_per_user = df.groupby("wallet_address").agg(
+        events_per_user = user_df.groupby("wallet_address").agg(
             events=("event", "count"),
             days_active=("date", "nunique"),
             first_seen=("date", "min"),
@@ -464,9 +492,9 @@ with tab_users:
 
         # --- Heatmap ---
         st.subheader("Activity Heatmap")
-        if "hour" in df.columns and "day_of_week" in df.columns:
+        if "hour" in user_df.columns and "day_of_week" in user_df.columns:
             dow_labels = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
-            heatmap = df.groupby(["day_of_week", "hour"]).size().unstack(fill_value=0)
+            heatmap = user_df.groupby(["day_of_week", "hour"]).size().unstack(fill_value=0)
             heatmap = heatmap.reindex(index=range(7), columns=range(24), fill_value=0)
 
             fig = go.Figure(data=go.Heatmap(
@@ -487,30 +515,30 @@ with tab_users:
 
         # --- Per-User Deep Dive ---
         st.subheader("User Deep Dive")
-        all_wallets = sorted(df["wallet_address"].unique())
+        all_wallets = sorted(user_df["wallet_address"].unique())
         wallet_options = [f"{short_wallet(w)} ({w})" for w in all_wallets]
         selected = st.selectbox("Select a user", wallet_options, index=None, placeholder="Pick a wallet...")
 
         if selected:
             full_wallet = selected.split("(")[1].rstrip(")")
-            user_df = df[df["wallet_address"] == full_wallet]
+            selected_user_df = user_df[user_df["wallet_address"] == full_wallet]
 
             col1, col2, col3 = st.columns(3)
-            col1.metric("Events", fmt_number(len(user_df)))
-            col2.metric("Days Active", str(user_df["date"].nunique()))
-            user_sessions = extract_session_durations(user_df)
+            col1.metric("Events", fmt_number(len(selected_user_df)))
+            col2.metric("Days Active", str(selected_user_df["date"].nunique()))
+            user_sessions = extract_session_durations(selected_user_df)
             total_min = user_sessions["duration_ms"].sum() / 60000 if not user_sessions.empty else 0
             col3.metric("Total Time", f"{total_min:.1f} min")
 
             col_ev, col_act = st.columns(2)
             with col_ev:
-                ue = user_df["event"].value_counts().head(10).reset_index()
+                ue = selected_user_df["event"].value_counts().head(10).reset_index()
                 ue.columns = ["event", "count"]
                 fig = make_h_bar(ue, "count", "event", title="Event Breakdown", color=BRAND)
                 st.plotly_chart(fig, use_container_width=True)
 
             with col_act:
-                ud = user_df.groupby("date").size().reset_index(name="events")
+                ud = selected_user_df.groupby("date").size().reset_index(name="events")
                 fig = make_time_series(ud, "date", "events", title="Daily Activity", color=ACCENT, kind="bar")
                 st.plotly_chart(fig, use_container_width=True)
 
@@ -529,10 +557,10 @@ with tab_users:
 # TAB 3: Retention
 # =====================
 with tab_retention:
-    if df.empty:
+    if user_df.empty:
         st.info("No data for retention analysis. Need at least a few days of data for cohort analysis.")
     else:
-        first_seen = df.groupby("wallet_address")["date"].min().reset_index()
+        first_seen = user_df.groupby("wallet_address")["date"].min().reset_index()
         first_seen.columns = ["wallet_address", "cohort_date"]
         cohort_dates = sorted(first_seen["cohort_date"].unique())
         retention_days = [0, 1, 3, 7, 14, 30]
@@ -549,7 +577,7 @@ with tab_retention:
             cohort_dt = datetime.strptime(cohort, "%Y-%m-%d")
             for d in retention_days:
                 target_date = (cohort_dt + timedelta(days=d)).strftime("%Y-%m-%d")
-                active_on_day = set(df[df["date"] == target_date]["wallet_address"])
+                active_on_day = set(user_df[user_df["date"] == target_date]["wallet_address"])
                 retained = cohort_users & active_on_day
                 pct = (len(retained) / cohort_size * 100) if cohort_size > 0 else 0
                 row[f"D{d}"] = f"{pct:.0f}%"
@@ -615,7 +643,7 @@ with tab_retention:
 # TAB 4: Funnels
 # =====================
 with tab_funnels:
-    if df.empty:
+    if user_df.empty:
         st.info("No data for funnel analysis.")
     else:
         col_notif, col_trade = st.columns(2)
@@ -623,10 +651,10 @@ with tab_funnels:
         # Notification → Trade funnel
         with col_notif:
             st.subheader("Notification → Trade")
-            notif_received = df[df["event"] == "notification_received"]["wallet_address"].nunique()
-            notif_tapped = df[df["event"] == "notification_tap"]["wallet_address"].nunique()
-            trade_init = df[df["event"] == "trade_initiated"]["wallet_address"].nunique()
-            trade_ok = df[df["event"] == "trade_success"]["wallet_address"].nunique()
+            notif_received = user_df[user_df["event"] == "notification_received"]["wallet_address"].nunique()
+            notif_tapped = user_df[user_df["event"] == "notification_tap"]["wallet_address"].nunique()
+            trade_init = user_df[user_df["event"] == "trade_initiated"]["wallet_address"].nunique()
+            trade_ok = user_df[user_df["event"] == "trade_success"]["wallet_address"].nunique()
             fig = make_funnel(
                 ["Notif Received", "Notif Tapped", "Trade Started", "Trade Success"],
                 [notif_received, notif_tapped, trade_init, trade_ok],
@@ -636,11 +664,11 @@ with tab_funnels:
         # Trade funnel
         with col_trade:
             st.subheader("Trade Funnel")
-            buy_tap = df[df["event"] == "buy_button_tap"]["wallet_address"].nunique()
-            swap_modal = df[df["event"] == "swap_modal_open"]["wallet_address"].nunique()
-            t_init = df[df["event"] == "trade_initiated"]["wallet_address"].nunique()
-            t_ok = df[df["event"] == "trade_success"]["wallet_address"].nunique()
-            t_err = df[df["event"] == "trade_error"]["wallet_address"].nunique()
+            buy_tap = user_df[user_df["event"] == "buy_button_tap"]["wallet_address"].nunique()
+            swap_modal = user_df[user_df["event"] == "swap_modal_open"]["wallet_address"].nunique()
+            t_init = user_df[user_df["event"] == "trade_initiated"]["wallet_address"].nunique()
+            t_ok = user_df[user_df["event"] == "trade_success"]["wallet_address"].nunique()
+            t_err = user_df[user_df["event"] == "trade_error"]["wallet_address"].nunique()
             fig = make_funnel(
                 ["Buy Tap", "Swap Modal", "Trade Started", "Trade Success", "Trade Error"],
                 [buy_tap, swap_modal, t_init, t_ok, t_err],
@@ -654,10 +682,10 @@ with tab_funnels:
 
         with col_dep:
             st.subheader("Deposit Funnel")
-            dep_modal = df[df["event"] == "deposit_modal_open"]["wallet_address"].nunique()
-            dep_init = df[df["event"] == "deposit_initiated"]["wallet_address"].nunique()
-            dep_ok = df[df["event"] == "deposit_success"]["wallet_address"].nunique()
-            dep_err = df[df["event"] == "deposit_error"]["wallet_address"].nunique()
+            dep_modal = user_df[user_df["event"] == "deposit_modal_open"]["wallet_address"].nunique()
+            dep_init = user_df[user_df["event"] == "deposit_initiated"]["wallet_address"].nunique()
+            dep_ok = user_df[user_df["event"] == "deposit_success"]["wallet_address"].nunique()
+            dep_err = user_df[user_df["event"] == "deposit_error"]["wallet_address"].nunique()
             fig = make_funnel(
                 ["Modal Open", "Initiated", "Success", "Error"],
                 [dep_modal, dep_init, dep_ok, dep_err],
@@ -667,7 +695,7 @@ with tab_funnels:
         # Deposit by provider
         with col_prov:
             st.subheader("Deposits by Provider")
-            dep_events = df[df["event"].isin(["deposit_initiated", "deposit_success", "deposit_error"])]
+            dep_events = user_df[user_df["event"].isin(["deposit_initiated", "deposit_success", "deposit_error"])]
             if not dep_events.empty and "metadata" in dep_events.columns:
                 provider_rows = []
                 for _, r in dep_events.iterrows():
@@ -698,7 +726,7 @@ with tab_funnels:
         ]
         eng_data = []
         for evt in engagement_events:
-            evt_df = df[df["event"] == evt]
+            evt_df = user_df[user_df["event"] == evt]
             eng_data.append({"event": evt, "total": len(evt_df), "users": evt_df["wallet_address"].nunique()})
         eng_df = pd.DataFrame(eng_data).sort_values("total", ascending=False)
         eng_df = eng_df[eng_df["total"] > 0]
@@ -827,12 +855,12 @@ with tab_notifications:
     if df.empty:
         st.info("No data for notification analysis.")
     else:
-        # Server-side sends
+        # Server-side sends (use full df — these are server events)
         broadcast_events = df[df["event"] == "notification_sent_broadcast"]
         targeted_sends = df[df["event"] == "notification_sent"]
-        # Client-side
-        received_events = df[df["event"] == "notification_received"]
-        tapped_events = df[df["event"] == "notification_tap"]
+        # Client-side (use user_df — real users only)
+        received_events = user_df[user_df["event"] == "notification_received"]
+        tapped_events = user_df[user_df["event"] == "notification_tap"]
 
         # Calculate total server sends
         total_broadcast_sent = 0
@@ -894,8 +922,8 @@ with tab_notifications:
 
         # Time to trade
         st.subheader("Time to Trade After Notification Tap")
-        if not tapped_events.empty and "ts" in df.columns:
-            trade_events = df[df["event"] == "trade_initiated"].copy()
+        if not tapped_events.empty and "ts" in user_df.columns:
+            trade_events = user_df[user_df["event"] == "trade_initiated"].copy()
             if not trade_events.empty:
                 times_to_trade = []
                 for _, tap in tapped_events.iterrows():
