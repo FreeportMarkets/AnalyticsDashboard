@@ -316,11 +316,13 @@ with tab_users:
             heatmap = heatmap.reindex(index=range(7), columns=range(24), fill_value=0)
             heatmap.index = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
             heatmap.columns = [f"{h:02d}" for h in range(24)]
-            # Use a styled dataframe as heatmap
-            st.dataframe(
-                heatmap.style.background_gradient(cmap="YlOrRd", axis=None),
-                use_container_width=True,
-            )
+            try:
+                st.dataframe(
+                    heatmap.style.background_gradient(cmap="YlOrRd", axis=None),
+                    use_container_width=True,
+                )
+            except Exception:
+                st.dataframe(heatmap, use_container_width=True)
 
         # --- Per-User Deep Dive ---
         st.subheader("User Deep Dive")
