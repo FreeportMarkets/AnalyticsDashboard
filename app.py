@@ -461,7 +461,10 @@ with tab_users:
 
         if trades:
             tdf = pd.DataFrame(trades)
-            if "amount_usd" in tdf.columns and "wallet_address" in tdf.columns:
+            # Exclude deposits from trader leaderboards
+            if "type" in tdf.columns:
+                tdf = tdf[tdf["type"] != "deposit"]
+            if not tdf.empty and "amount_usd" in tdf.columns and "wallet_address" in tdf.columns:
                 tdf["amount_usd"] = pd.to_numeric(tdf["amount_usd"], errors="coerce")
 
                 col_vol, col_count = st.columns(2)
@@ -481,6 +484,8 @@ with tab_users:
                     trader_cnt["wallet"] = trader_cnt["wallet_address"].apply(short_wallet)
                     fig = make_h_bar(trader_cnt, "trades", "wallet", title="By Trade Count", color="#EC4899")
                     st.plotly_chart(fig, use_container_width=True)
+            else:
+                st.info("No trade data for this period.")
         else:
             st.info("No trade data for this period.")
 
@@ -754,95 +759,249 @@ with tab_trades:
             tdf["hour"] = tdf["ts"].dt.hour
             tdf["dow"] = tdf["ts"].dt.dayofweek
 
-        total_vol = tdf["amount_usd"].sum() if "amount_usd" in tdf.columns else 0
-        total_trades = len(tdf)
-        unique_traders = tdf["wallet_address"].nunique() if "wallet_address" in tdf.columns else 0
+        # Split by type
+        swap_df = tdf[tdf["type"] == "swap"] if "type" in tdf.columns else tdf.copy()
+        perps_df = tdf[tdf["type"] == "perps"] if "type" in tdf.columns else pd.DataFrame()
+        deposit_df = tdf[tdf["type"] == "deposit"] if "type" in tdf.columns else pd.DataFrame()
+        trades_only = pd.concat([swap_df, perps_df], ignore_index=True)  # exclude deposits
+
+        # --- Top-level metrics (swaps + perps only) ---
+        total_vol = trades_only["amount_usd"].sum() if "amount_usd" in trades_only.columns and not trades_only.empty else 0
+        total_trades = len(trades_only)
+        unique_traders = trades_only["wallet_address"].nunique() if "wallet_address" in trades_only.columns and not trades_only.empty else 0
         avg_trade = total_vol / total_trades if total_trades > 0 else 0
 
         col1, col2, col3, col4 = st.columns(4)
-        col1.metric("Total Volume", f"${fmt_number(total_vol)}")
+        col1.metric("Trading Volume", f"${fmt_number(total_vol)}")
         col2.metric("Total Trades", fmt_number(total_trades))
         col3.metric("Unique Traders", fmt_number(unique_traders))
         col4.metric("Avg Trade Size", f"${avg_trade:,.0f}")
 
+        # Type breakdown row
+        swap_vol = swap_df["amount_usd"].sum() if not swap_df.empty and "amount_usd" in swap_df.columns else 0
+        perps_vol = perps_df["amount_usd"].sum() if not perps_df.empty and "amount_usd" in perps_df.columns else 0
+        deposit_vol = deposit_df["amount_usd"].sum() if not deposit_df.empty and "amount_usd" in deposit_df.columns else 0
+        cb1, cb2, cb3 = st.columns(3)
+        cb1.metric("Swap Volume", f"${fmt_number(swap_vol)}", delta=f"{len(swap_df)} swaps")
+        cb2.metric("Perps Volume", f"${fmt_number(perps_vol)}", delta=f"{len(perps_df)} orders")
+        cb3.metric("Deposit Volume", f"${fmt_number(deposit_vol)}", delta=f"{len(deposit_df)} deposits")
+
+        # ============================
+        # SWAPS SECTION
+        # ============================
         st.markdown("---")
+        st.subheader("Swaps")
 
-        # Daily volume
-        if "trade_date" in tdf.columns and "amount_usd" in tdf.columns:
-            daily_vol = tdf.groupby("trade_date")["amount_usd"].sum().reset_index()
-            daily_vol.columns = ["date", "volume"]
-            fig = make_time_series(daily_vol, "date", "volume", title="Daily Volume ($)", color=ACCENT, kind="bar")
-            st.plotly_chart(fig, use_container_width=True)
-
-        st.markdown("---")
-
-        # Volume by token + Count by token side by side
-        col_vol, col_cnt = st.columns(2)
-
-        with col_vol:
-            if "to_token" in tdf.columns and "amount_usd" in tdf.columns:
-                vbt = tdf.groupby("to_token")["amount_usd"].sum().sort_values(ascending=False).head(15).reset_index()
-                vbt.columns = ["token", "volume"]
-                vbt["volume"] = vbt["volume"].round(0)
-                fig = make_h_bar(vbt, "volume", "token", title="Volume by Token (Top 15)", color=ACCENT_WARN, x_prefix="$")
+        if swap_df.empty:
+            st.info("No swap data for this period.")
+        else:
+            # Daily swap volume
+            if "trade_date" in swap_df.columns and "amount_usd" in swap_df.columns:
+                daily_vol = swap_df.groupby("trade_date")["amount_usd"].sum().reset_index()
+                daily_vol.columns = ["date", "volume"]
+                fig = make_time_series(daily_vol, "date", "volume", title="Daily Swap Volume ($)", color=ACCENT, kind="bar")
                 st.plotly_chart(fig, use_container_width=True)
 
-        with col_cnt:
-            if "to_token" in tdf.columns:
-                cbt = tdf["to_token"].value_counts().head(15).reset_index()
-                cbt.columns = ["token", "trades"]
-                fig = make_h_bar(cbt, "trades", "token", title="Trades by Token (Top 15)", color="#EC4899")
+            # Volume by token + Count by token
+            col_vol, col_cnt = st.columns(2)
+
+            with col_vol:
+                if "to_token" in swap_df.columns and "amount_usd" in swap_df.columns:
+                    vbt = swap_df.groupby("to_token")["amount_usd"].sum().sort_values(ascending=False).head(15).reset_index()
+                    vbt.columns = ["token", "volume"]
+                    vbt["volume"] = vbt["volume"].round(0)
+                    fig = make_h_bar(vbt, "volume", "token", title="Swap Volume by Token (Top 15)", color=ACCENT_WARN, x_prefix="$")
+                    st.plotly_chart(fig, use_container_width=True)
+
+            with col_cnt:
+                if "to_token" in swap_df.columns:
+                    cbt = swap_df["to_token"].value_counts().head(15).reset_index()
+                    cbt.columns = ["token", "trades"]
+                    fig = make_h_bar(cbt, "trades", "token", title="Swaps by Token (Top 15)", color="#EC4899")
+                    st.plotly_chart(fig, use_container_width=True)
+
+            # Hour + DOW
+            col_h, col_d = st.columns(2)
+
+            with col_h:
+                if "hour" in swap_df.columns:
+                    bh = swap_df.groupby("hour").size().reindex(range(24), fill_value=0).reset_index()
+                    bh.columns = ["hour", "trades"]
+                    bh["label"] = bh["hour"].apply(lambda h: f"{h:02d}:00")
+                    fig = px.bar(bh, x="label", y="trades", title="Swaps by Hour (UTC)")
+                    fig.update_traces(marker_color=BRAND, hovertemplate="<b>%{x}</b><br>%{y} swaps<extra></extra>")
+                    fig.update_layout(**PLOTLY_LAYOUT, height=320)
+                    fig.update_xaxes(title="", tickangle=-45)
+                    fig.update_yaxes(title="")
+                    st.plotly_chart(fig, use_container_width=True)
+
+            with col_d:
+                if "dow" in swap_df.columns:
+                    dow_labels = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+                    bd = swap_df.groupby("dow").size().reindex(range(7), fill_value=0).reset_index()
+                    bd.columns = ["dow", "trades"]
+                    bd["day"] = bd["dow"].map(lambda i: dow_labels[int(i)] if pd.notna(i) and int(i) < 7 else "?")
+                    fig = px.bar(bd, x="day", y="trades", title="Swaps by Day of Week")
+                    fig.update_traces(marker_color=ACCENT, hovertemplate="<b>%{x}</b><br>%{y} swaps<extra></extra>")
+                    fig.update_layout(**PLOTLY_LAYOUT, height=320)
+                    fig.update_xaxes(title="")
+                    fig.update_yaxes(title="")
+                    st.plotly_chart(fig, use_container_width=True)
+
+            # Swap source pie
+            if "source" in swap_df.columns:
+                st.subheader("Swap Source")
+                src = swap_df["source"].value_counts().reset_index()
+                src.columns = ["source", "count"]
+                fig = px.pie(src, values="count", names="source", hole=0.5, color_discrete_sequence=CHART_COLORS)
+                fig.update_traces(textinfo="label+percent", textfont=dict(size=13, color="white"))
+                fig.update_layout(**PLOTLY_LAYOUT, height=350, showlegend=False)
                 st.plotly_chart(fig, use_container_width=True)
 
+            # Recent swaps table
+            st.subheader("Recent Swaps")
+            swap_cols = [c for c in ["timestamp", "wallet_address", "from_token", "to_token", "amount_usd", "status", "source"] if c in swap_df.columns]
+            recent_swaps = swap_df[swap_cols].sort_values("timestamp", ascending=False).head(50).copy()
+            if "wallet_address" in recent_swaps.columns:
+                recent_swaps["wallet_address"] = recent_swaps["wallet_address"].apply(short_wallet)
+            st.dataframe(recent_swaps, use_container_width=True, hide_index=True)
+
+        # ============================
+        # PERPS SECTION
+        # ============================
         st.markdown("---")
+        st.subheader("Perpetuals")
 
-        # Hour + DOW side by side
-        col_h, col_d = st.columns(2)
+        if perps_df.empty:
+            st.info("No perps data for this period.")
+        else:
+            # Perps metrics
+            perps_total_vol = perps_df["amount_usd"].sum() if "amount_usd" in perps_df.columns else 0
+            perps_total_orders = len(perps_df)
+            perps_unique = perps_df["wallet_address"].nunique() if "wallet_address" in perps_df.columns else 0
+            perps_avg = perps_total_vol / perps_total_orders if perps_total_orders > 0 else 0
 
-        with col_h:
-            if "hour" in tdf.columns:
-                bh = tdf.groupby("hour").size().reindex(range(24), fill_value=0).reset_index()
-                bh.columns = ["hour", "trades"]
-                bh["label"] = bh["hour"].apply(lambda h: f"{h:02d}:00")
-                fig = px.bar(bh, x="label", y="trades", title="Trades by Hour (UTC)")
-                fig.update_traces(marker_color=BRAND, hovertemplate="<b>%{x}</b><br>%{y} trades<extra></extra>")
-                fig.update_layout(**PLOTLY_LAYOUT, height=320)
-                fig.update_xaxes(title="", tickangle=-45)
-                fig.update_yaxes(title="")
+            pc1, pc2, pc3, pc4 = st.columns(4)
+            pc1.metric("Perps Volume", f"${fmt_number(perps_total_vol)}")
+            pc2.metric("Total Orders", fmt_number(perps_total_orders))
+            pc3.metric("Unique Perps Traders", fmt_number(perps_unique))
+            pc4.metric("Avg Order Size", f"${perps_avg:,.0f}")
+
+            # Daily perps volume
+            if "trade_date" in perps_df.columns and "amount_usd" in perps_df.columns:
+                daily_perps = perps_df.groupby("trade_date")["amount_usd"].sum().reset_index()
+                daily_perps.columns = ["date", "volume"]
+                fig = make_time_series(daily_perps, "date", "volume", title="Daily Perps Volume ($)", color="#8B5CF6", kind="bar")
                 st.plotly_chart(fig, use_container_width=True)
 
-        with col_d:
-            if "dow" in tdf.columns:
-                dow_labels = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
-                bd = tdf.groupby("dow").size().reindex(range(7), fill_value=0).reset_index()
-                bd.columns = ["dow", "trades"]
-                bd["day"] = bd["dow"].map(lambda i: dow_labels[int(i)] if pd.notna(i) and int(i) < 7 else "?")
-                fig = px.bar(bd, x="day", y="trades", title="Trades by Day of Week")
-                fig.update_traces(marker_color=ACCENT, hovertemplate="<b>%{x}</b><br>%{y} trades<extra></extra>")
-                fig.update_layout(**PLOTLY_LAYOUT, height=320)
+            # Volume by Asset + Orders by Asset
+            col_pv, col_po = st.columns(2)
+
+            with col_pv:
+                if "asset" in perps_df.columns and "amount_usd" in perps_df.columns:
+                    pva = perps_df.groupby("asset")["amount_usd"].sum().sort_values(ascending=False).head(15).reset_index()
+                    pva.columns = ["asset", "volume"]
+                    pva["volume"] = pva["volume"].round(0)
+                    fig = make_h_bar(pva, "volume", "asset", title="Volume by Asset", color="#8B5CF6", x_prefix="$")
+                    st.plotly_chart(fig, use_container_width=True)
+
+            with col_po:
+                if "asset" in perps_df.columns:
+                    poa = perps_df["asset"].value_counts().head(15).reset_index()
+                    poa.columns = ["asset", "orders"]
+                    fig = make_h_bar(poa, "orders", "asset", title="Orders by Asset", color="#06B6D4")
+                    st.plotly_chart(fig, use_container_width=True)
+
+            # Long vs Short + Leverage distribution
+            col_ls, col_lev = st.columns(2)
+
+            with col_ls:
+                if "side" in perps_df.columns:
+                    side_counts = perps_df["side"].value_counts().reset_index()
+                    side_counts.columns = ["side", "count"]
+                    colors = {"Long": ACCENT, "Short": ACCENT_RED, "long": ACCENT, "short": ACCENT_RED}
+                    fig = px.pie(
+                        side_counts, values="count", names="side", hole=0.5,
+                        color="side", color_discrete_map=colors,
+                    )
+                    fig.update_traces(textinfo="label+percent+value", textfont=dict(size=13, color="white"))
+                    fig.update_layout(**PLOTLY_LAYOUT, title="Long vs Short", height=350, showlegend=False)
+                    st.plotly_chart(fig, use_container_width=True)
+
+            with col_lev:
+                if "leverage" in perps_df.columns:
+                    lev_data = pd.to_numeric(perps_df["leverage"], errors="coerce").dropna()
+                    if not lev_data.empty:
+                        fig = px.histogram(lev_data, nbins=20, title="Leverage Distribution")
+                        fig.update_traces(marker_color="#F59E0B")
+                        fig.update_layout(**PLOTLY_LAYOUT, height=350)
+                        fig.update_xaxes(title="Leverage", **AXIS_DEFAULTS)
+                        fig.update_yaxes(title="Count", **AXIS_DEFAULTS)
+                        st.plotly_chart(fig, use_container_width=True)
+
+            # Open vs Close
+            if "is_close" in perps_df.columns:
+                oc_data = perps_df["is_close"].map(lambda x: "Close" if x else "Open").value_counts().reset_index()
+                oc_data.columns = ["type", "count"]
+                fig = px.bar(oc_data, x="type", y="count", title="Open vs Close Orders", color="type",
+                             color_discrete_map={"Open": BRAND, "Close": ACCENT_WARN})
+                fig.update_layout(**PLOTLY_LAYOUT, height=320, showlegend=False)
                 fig.update_xaxes(title="")
-                fig.update_yaxes(title="")
+                fig.update_yaxes(title="Count", **AXIS_DEFAULTS)
                 st.plotly_chart(fig, use_container_width=True)
 
-        # Trade source
-        if "source" in tdf.columns:
-            st.markdown("---")
-            st.subheader("Trade Source")
-            src = tdf["source"].value_counts().reset_index()
-            src.columns = ["source", "count"]
-            fig = px.pie(src, values="count", names="source", hole=0.5, color_discrete_sequence=CHART_COLORS)
-            fig.update_traces(textinfo="label+percent", textfont=dict(size=13, color="white"))
-            fig.update_layout(**PLOTLY_LAYOUT, height=350, showlegend=False)
-            st.plotly_chart(fig, use_container_width=True)
+            # Recent perps table
+            st.subheader("Recent Perps Orders")
+            perps_cols = [c for c in ["timestamp", "wallet_address", "asset", "side", "size", "price", "leverage", "amount_usd", "order_type", "is_close"] if c in perps_df.columns]
+            recent_perps = perps_df[perps_cols].sort_values("timestamp", ascending=False).head(50).copy()
+            if "wallet_address" in recent_perps.columns:
+                recent_perps["wallet_address"] = recent_perps["wallet_address"].apply(short_wallet)
+            st.dataframe(recent_perps, use_container_width=True, hide_index=True)
 
-        # Recent trades
+        # ============================
+        # DEPOSITS SECTION
+        # ============================
         st.markdown("---")
-        st.subheader("Recent Trades")
-        display_cols = [c for c in ["timestamp", "wallet_address", "from_token", "to_token", "amount_usd", "status", "source", "type"] if c in tdf.columns]
-        recent = tdf[display_cols].sort_values("timestamp", ascending=False).head(50).copy()
-        if "wallet_address" in recent.columns:
-            recent["wallet_address"] = recent["wallet_address"].apply(short_wallet)
-        st.dataframe(recent, use_container_width=True, hide_index=True)
+        st.subheader("Deposits")
+
+        if deposit_df.empty:
+            st.info("No deposit data for this period.")
+        else:
+            dep_total_vol = deposit_df["amount_usd"].sum() if "amount_usd" in deposit_df.columns else 0
+            dep_total = len(deposit_df)
+            dep_unique = deposit_df["wallet_address"].nunique() if "wallet_address" in deposit_df.columns else 0
+            dep_avg = dep_total_vol / dep_total if dep_total > 0 else 0
+
+            dc1, dc2, dc3, dc4 = st.columns(4)
+            dc1.metric("Total Deposits", fmt_number(dep_total))
+            dc2.metric("Deposit Volume", f"${fmt_number(dep_total_vol)}")
+            dc3.metric("Unique Depositors", fmt_number(dep_unique))
+            dc4.metric("Avg Deposit", f"${dep_avg:,.0f}")
+
+            # Deposits by Provider + Daily Deposit Volume
+            col_dp, col_dv = st.columns(2)
+
+            with col_dp:
+                if "source" in deposit_df.columns:
+                    prov = deposit_df["source"].value_counts().reset_index()
+                    prov.columns = ["provider", "count"]
+                    fig = make_h_bar(prov, "count", "provider", title="Deposits by Provider", color=ACCENT)
+                    st.plotly_chart(fig, use_container_width=True)
+
+            with col_dv:
+                if "trade_date" in deposit_df.columns and "amount_usd" in deposit_df.columns:
+                    daily_dep = deposit_df.groupby("trade_date")["amount_usd"].sum().reset_index()
+                    daily_dep.columns = ["date", "volume"]
+                    fig = make_time_series(daily_dep, "date", "volume", title="Daily Deposit Volume ($)", color=ACCENT_WARN, kind="bar")
+                    st.plotly_chart(fig, use_container_width=True)
+
+            # Recent deposits table
+            st.subheader("Recent Deposits")
+            dep_cols = [c for c in ["timestamp", "wallet_address", "amount_usd", "source"] if c in deposit_df.columns]
+            recent_deps = deposit_df[dep_cols].sort_values("timestamp", ascending=False).head(50).copy()
+            if "wallet_address" in recent_deps.columns:
+                recent_deps["wallet_address"] = recent_deps["wallet_address"].apply(short_wallet)
+            st.dataframe(recent_deps, use_container_width=True, hide_index=True)
 
 
 # =====================
