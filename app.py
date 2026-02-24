@@ -5,6 +5,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 from datetime import datetime, timedelta
 from decimal import Decimal
+from zoneinfo import ZoneInfo
 from boto3.dynamodb.conditions import Key
 
 st.set_page_config(page_title="Freeport Analytics", page_icon="📊", layout="wide")
@@ -111,6 +112,22 @@ def decimal_to_float(obj):
     return obj
 
 
+def fmt_hour(h):
+    if h == 0: return "12 AM"
+    if h < 12: return f"{h} AM"
+    if h == 12: return "12 PM"
+    return f"{h - 12} PM"
+
+
+def apply_perps_leverage(frame):
+    """Multiply perps amount_usd by leverage so volume reflects notional value."""
+    if "leverage" in frame.columns and "type" in frame.columns and "amount_usd" in frame.columns:
+        frame["leverage"] = pd.to_numeric(frame["leverage"], errors="coerce").fillna(1)
+        mask = frame["type"] == "perps"
+        frame.loc[mask, "amount_usd"] = frame.loc[mask, "amount_usd"] * frame.loc[mask, "leverage"]
+    return frame
+
+
 def make_h_bar(data, x_col, y_col, title="", color=BRAND, x_prefix="", x_suffix=""):
     fig = px.bar(
         data, x=x_col, y=y_col, orientation="h",
@@ -142,7 +159,7 @@ def make_time_series(data, x_col, y_col, title="", color=BRAND, kind="area"):
         fig = px.bar(data, x=x_col, y=y_col)
         fig.update_traces(marker_color=color)
     fig.update_layout(**PLOTLY_LAYOUT, title=title, showlegend=False, height=350)
-    fig.update_xaxes(title="", **AXIS_DEFAULTS)
+    fig.update_xaxes(title="", tickformat="%b %d", **AXIS_DEFAULTS)
     fig.update_yaxes(title="", **AXIS_DEFAULTS)
     return fig
 
@@ -221,11 +238,19 @@ def events_to_df(events: list) -> pd.DataFrame:
         return pd.DataFrame()
     df = pd.DataFrame(events)
     if "timestamp" in df.columns:
-        df["ts"] = pd.to_datetime(df["timestamp"], errors="coerce")
-    if "hour" in df.columns:
-        df["hour"] = pd.to_numeric(df["hour"], errors="coerce")
-    if "day_of_week" in df.columns:
-        df["day_of_week"] = pd.to_numeric(df["day_of_week"], errors="coerce")
+        ts = pd.to_datetime(df["timestamp"], errors="coerce")
+        if ts.dt.tz is None:
+            ts = ts.dt.tz_localize("UTC")
+        df["ts"] = ts.dt.tz_convert("America/New_York")
+        # Re-derive hour and day_of_week in EST
+        df["hour"] = df["ts"].dt.hour
+        # 0=Sunday convention: pandas dayofweek 0=Mon..6=Sun → shift to 0=Sun
+        df["day_of_week"] = (df["ts"].dt.dayofweek + 1) % 7
+    else:
+        if "hour" in df.columns:
+            df["hour"] = pd.to_numeric(df["hour"], errors="coerce")
+        if "day_of_week" in df.columns:
+            df["day_of_week"] = pd.to_numeric(df["day_of_week"], errors="coerce")
     return df
 
 
@@ -339,6 +364,31 @@ with tab_overview:
         fig = make_time_series(daily_users, "date", "users", title="Daily Active Users", color=BRAND)
         st.plotly_chart(fig, use_container_width=True)
 
+        # Concurrent views over time (5-min intervals, smooth curve)
+        if "ts" in user_df.columns:
+            cv_df = user_df.dropna(subset=["ts"]).copy()
+            if not cv_df.empty:
+                cv_df["bucket"] = cv_df["ts"].dt.floor("5min")
+                concurrent = cv_df.groupby("bucket")["wallet_address"].nunique().reset_index()
+                concurrent.columns = ["time", "viewers"]
+                concurrent = concurrent.sort_values("time")
+                # Smooth with rolling average for a cleaner curve
+                concurrent["viewers_smooth"] = concurrent["viewers"].rolling(window=3, center=True, min_periods=1).mean()
+
+                fig = go.Figure()
+                fig.add_trace(go.Scatter(
+                    x=concurrent["time"], y=concurrent["viewers_smooth"],
+                    mode="lines",
+                    line=dict(color=BRAND, width=2.5, shape="spline"),
+                    fill="tozeroy",
+                    fillcolor="rgba(79, 70, 229, 0.15)",
+                    hovertemplate="<b>%{x|%b %d, %I:%M %p}</b><br>%{y:.0f} viewers<extra></extra>",
+                ))
+                fig.update_layout(**PLOTLY_LAYOUT, title="Concurrent Views (5-min intervals, EST)", height=350)
+                fig.update_xaxes(title="", tickformat="%b %d, %I %p", **AXIS_DEFAULTS)
+                fig.update_yaxes(title="Active Users", **AXIS_DEFAULTS)
+                st.plotly_chart(fig, use_container_width=True)
+
         # WAU / MAU side by side
         col_w, col_m = st.columns(2)
         wau = user_df[user_df["date"] >= (today - timedelta(days=7)).strftime("%Y-%m-%d")]["wallet_address"].nunique()
@@ -371,8 +421,8 @@ with tab_overview:
             if "hour" in user_df.columns:
                 hourly = user_df.groupby("hour").size().reindex(range(24), fill_value=0).reset_index()
                 hourly.columns = ["hour", "events"]
-                hourly["label"] = hourly["hour"].apply(lambda h: f"{h:02d}:00")
-                fig = px.bar(hourly, x="label", y="events", title="Hourly Activity (UTC)")
+                hourly["label"] = hourly["hour"].apply(fmt_hour)
+                fig = px.bar(hourly, x="label", y="events", title="Hourly Activity (EST)")
                 fig.update_traces(marker_color=BRAND, hovertemplate="<b>%{x}</b><br>%{y:,} events<extra></extra>")
                 fig.update_layout(**PLOTLY_LAYOUT, height=320)
                 fig.update_xaxes(title="", tickangle=-45)
@@ -466,6 +516,7 @@ with tab_users:
                 tdf = tdf[tdf["type"] != "deposit"]
             if not tdf.empty and "amount_usd" in tdf.columns and "wallet_address" in tdf.columns:
                 tdf["amount_usd"] = pd.to_numeric(tdf["amount_usd"], errors="coerce")
+                tdf = apply_perps_leverage(tdf)
 
                 col_vol, col_count = st.columns(2)
 
@@ -500,13 +551,13 @@ with tab_users:
 
             fig = go.Figure(data=go.Heatmap(
                 z=heatmap.values,
-                x=[f"{h:02d}:00" for h in range(24)],
+                x=[fmt_hour(h) for h in range(24)],
                 y=dow_labels,
                 colorscale=[[0, "#1a1a2e"], [0.5, BRAND], [1, "#EC4899"]],
                 hovertemplate="<b>%{y} %{x}</b><br>%{z} events<extra></extra>",
             ))
             fig.update_layout(
-                **PLOTLY_LAYOUT, title="Events by Hour & Day of Week", height=300,
+                **PLOTLY_LAYOUT, title="Events by Hour & Day of Week (EST)", height=300,
             )
             fig.update_yaxes(autorange="reversed", gridcolor="rgba(0,0,0,0)")
             fig.update_xaxes(gridcolor="rgba(0,0,0,0)")
@@ -549,9 +600,13 @@ with tab_users:
                     utdf = pd.DataFrame(user_trades)
                     if "amount_usd" in utdf.columns:
                         utdf["amount_usd"] = pd.to_numeric(utdf["amount_usd"], errors="coerce")
+                        utdf = apply_perps_leverage(utdf)
                         st.markdown(f"**Trades:** {len(utdf)} trades | **${utdf['amount_usd'].sum():,.2f}** total volume")
                         display_cols = [c for c in ["timestamp", "from_token", "to_token", "amount_usd", "status", "source"] if c in utdf.columns]
-                        st.dataframe(utdf[display_cols].sort_values("timestamp", ascending=False), use_container_width=True, hide_index=True)
+                        display_df = utdf[display_cols].sort_values("timestamp", ascending=False).copy()
+                        if "timestamp" in display_df.columns:
+                            display_df["timestamp"] = pd.to_datetime(display_df["timestamp"], errors="coerce").dt.tz_localize("UTC").dt.tz_convert("America/New_York").dt.strftime("%b %d, %I:%M %p")
+                        st.dataframe(display_df, use_container_width=True, hide_index=True)
 
 
 # =====================
@@ -754,15 +809,24 @@ with tab_trades:
         if "amount_usd" in tdf.columns:
             tdf["amount_usd"] = pd.to_numeric(tdf["amount_usd"], errors="coerce")
         if "timestamp" in tdf.columns:
-            tdf["ts"] = pd.to_datetime(tdf["timestamp"], errors="coerce")
+            ts = pd.to_datetime(tdf["timestamp"], errors="coerce")
+            if ts.dt.tz is None:
+                ts = ts.dt.tz_localize("UTC")
+            tdf["ts"] = ts.dt.tz_convert("America/New_York")
             tdf["trade_date"] = tdf["ts"].dt.strftime("%Y-%m-%d")
             tdf["hour"] = tdf["ts"].dt.hour
             tdf["dow"] = tdf["ts"].dt.dayofweek
 
         # Split by type
-        swap_df = tdf[tdf["type"] == "swap"] if "type" in tdf.columns else tdf.copy()
-        perps_df = tdf[tdf["type"] == "perps"] if "type" in tdf.columns else pd.DataFrame()
-        deposit_df = tdf[tdf["type"] == "deposit"] if "type" in tdf.columns else pd.DataFrame()
+        swap_df = tdf[tdf["type"] == "swap"].copy() if "type" in tdf.columns else tdf.copy()
+        perps_df = tdf[tdf["type"] == "perps"].copy() if "type" in tdf.columns else pd.DataFrame()
+        deposit_df = tdf[tdf["type"] == "deposit"].copy() if "type" in tdf.columns else pd.DataFrame()
+
+        # Apply leverage to perps so volume = amount × leverage (notional value)
+        if not perps_df.empty and "leverage" in perps_df.columns and "amount_usd" in perps_df.columns:
+            perps_df["leverage"] = pd.to_numeric(perps_df["leverage"], errors="coerce").fillna(1)
+            perps_df["amount_usd"] = perps_df["amount_usd"] * perps_df["leverage"]
+
         trades_only = pd.concat([swap_df, perps_df], ignore_index=True)  # exclude deposits
 
         # --- Top-level metrics (swaps + perps only) ---
@@ -827,8 +891,8 @@ with tab_trades:
                 if "hour" in swap_df.columns:
                     bh = swap_df.groupby("hour").size().reindex(range(24), fill_value=0).reset_index()
                     bh.columns = ["hour", "trades"]
-                    bh["label"] = bh["hour"].apply(lambda h: f"{h:02d}:00")
-                    fig = px.bar(bh, x="label", y="trades", title="Swaps by Hour (UTC)")
+                    bh["label"] = bh["hour"].apply(fmt_hour)
+                    fig = px.bar(bh, x="label", y="trades", title="Swaps by Hour (EST)")
                     fig.update_traces(marker_color=BRAND, hovertemplate="<b>%{x}</b><br>%{y} swaps<extra></extra>")
                     fig.update_layout(**PLOTLY_LAYOUT, height=320)
                     fig.update_xaxes(title="", tickangle=-45)
@@ -864,6 +928,8 @@ with tab_trades:
             recent_swaps = swap_df[swap_cols].sort_values("timestamp", ascending=False).head(50).copy()
             if "wallet_address" in recent_swaps.columns:
                 recent_swaps["wallet_address"] = recent_swaps["wallet_address"].apply(short_wallet)
+            if "timestamp" in recent_swaps.columns:
+                recent_swaps["timestamp"] = pd.to_datetime(recent_swaps["timestamp"], errors="coerce").dt.tz_localize("UTC").dt.tz_convert("America/New_York").dt.strftime("%b %d, %I:%M %p")
             st.dataframe(recent_swaps, use_container_width=True, hide_index=True)
 
         # ============================
@@ -956,6 +1022,8 @@ with tab_trades:
             recent_perps = perps_df[perps_cols].sort_values("timestamp", ascending=False).head(50).copy()
             if "wallet_address" in recent_perps.columns:
                 recent_perps["wallet_address"] = recent_perps["wallet_address"].apply(short_wallet)
+            if "timestamp" in recent_perps.columns:
+                recent_perps["timestamp"] = pd.to_datetime(recent_perps["timestamp"], errors="coerce").dt.tz_localize("UTC").dt.tz_convert("America/New_York").dt.strftime("%b %d, %I:%M %p")
             st.dataframe(recent_perps, use_container_width=True, hide_index=True)
 
         # ============================
@@ -1001,6 +1069,8 @@ with tab_trades:
             recent_deps = deposit_df[dep_cols].sort_values("timestamp", ascending=False).head(50).copy()
             if "wallet_address" in recent_deps.columns:
                 recent_deps["wallet_address"] = recent_deps["wallet_address"].apply(short_wallet)
+            if "timestamp" in recent_deps.columns:
+                recent_deps["timestamp"] = pd.to_datetime(recent_deps["timestamp"], errors="coerce").dt.tz_localize("UTC").dt.tz_convert("America/New_York").dt.strftime("%b %d, %I:%M %p")
             st.dataframe(recent_deps, use_container_width=True, hide_index=True)
 
 
