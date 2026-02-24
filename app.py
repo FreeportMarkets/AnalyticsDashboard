@@ -120,11 +120,27 @@ def fmt_hour(h):
 
 
 def apply_perps_leverage(frame):
-    """Multiply perps amount_usd by leverage so volume reflects notional value."""
-    if "leverage" in frame.columns and "type" in frame.columns and "amount_usd" in frame.columns:
+    """Adjust perps volume: opens = amount*leverage, closes = size*price (position notional)."""
+    if "type" not in frame.columns or "amount_usd" not in frame.columns:
+        return frame
+    perps_mask = frame["type"] == "perps"
+    if not perps_mask.any():
+        return frame
+    # Determine which perps are closes
+    if "is_close" in frame.columns:
+        close_mask = perps_mask & frame["is_close"].astype(bool)
+    else:
+        close_mask = pd.Series(False, index=frame.index)
+    open_mask = perps_mask & ~close_mask
+    # Opens: collateral × leverage = notional
+    if "leverage" in frame.columns:
         frame["leverage"] = pd.to_numeric(frame["leverage"], errors="coerce").fillna(1)
-        mask = frame["type"] == "perps"
-        frame.loc[mask, "amount_usd"] = frame.loc[mask, "amount_usd"] * frame.loc[mask, "leverage"]
+        frame.loc[open_mask, "amount_usd"] = frame.loc[open_mask, "amount_usd"] * frame.loc[open_mask, "leverage"]
+    # Closes: size × price = full position notional
+    if "size" in frame.columns and "price" in frame.columns:
+        frame["size"] = pd.to_numeric(frame["size"], errors="coerce").fillna(0)
+        frame["price"] = pd.to_numeric(frame["price"], errors="coerce").fillna(0)
+        frame.loc[close_mask, "amount_usd"] = frame.loc[close_mask, "size"].abs() * frame.loc[close_mask, "price"]
     return frame
 
 
@@ -822,10 +838,24 @@ with tab_trades:
         perps_df = tdf[tdf["type"] == "perps"].copy() if "type" in tdf.columns else pd.DataFrame()
         deposit_df = tdf[tdf["type"] == "deposit"].copy() if "type" in tdf.columns else pd.DataFrame()
 
-        # Apply leverage to perps so volume = amount × leverage (notional value)
-        if not perps_df.empty and "leverage" in perps_df.columns and "amount_usd" in perps_df.columns:
-            perps_df["leverage"] = pd.to_numeric(perps_df["leverage"], errors="coerce").fillna(1)
-            perps_df["amount_usd"] = perps_df["amount_usd"] * perps_df["leverage"]
+        # Compute notional volume: opens = amount*leverage, closes = size*price
+        if not perps_df.empty and "amount_usd" in perps_df.columns:
+            if "leverage" in perps_df.columns:
+                perps_df["leverage"] = pd.to_numeric(perps_df["leverage"], errors="coerce").fillna(1)
+            if "size" in perps_df.columns:
+                perps_df["size"] = pd.to_numeric(perps_df["size"], errors="coerce").fillna(0)
+            if "price" in perps_df.columns:
+                perps_df["price"] = pd.to_numeric(perps_df["price"], errors="coerce").fillna(0)
+
+            close_mask = perps_df["is_close"].astype(bool) if "is_close" in perps_df.columns else pd.Series(False, index=perps_df.index)
+            open_mask = ~close_mask
+
+            # Opens: collateral × leverage
+            if "leverage" in perps_df.columns:
+                perps_df.loc[open_mask, "amount_usd"] = perps_df.loc[open_mask, "amount_usd"] * perps_df.loc[open_mask, "leverage"]
+            # Closes: size × price (full position notional)
+            if "size" in perps_df.columns and "price" in perps_df.columns:
+                perps_df.loc[close_mask, "amount_usd"] = perps_df.loc[close_mask, "size"].abs() * perps_df.loc[close_mask, "price"]
 
         trades_only = pd.concat([swap_df, perps_df], ignore_index=True)  # exclude deposits
 
@@ -1005,16 +1035,32 @@ with tab_trades:
                         fig.update_yaxes(title="Count", **AXIS_DEFAULTS)
                         st.plotly_chart(fig, use_container_width=True)
 
-            # Open vs Close
+            # Open vs Close — volume & count
             if "is_close" in perps_df.columns:
-                oc_data = perps_df["is_close"].map(lambda x: "Close" if x else "Open").value_counts().reset_index()
-                oc_data.columns = ["type", "count"]
-                fig = px.bar(oc_data, x="type", y="count", title="Open vs Close Orders", color="type",
-                             color_discrete_map={"Open": BRAND, "Close": ACCENT_WARN})
-                fig.update_layout(**PLOTLY_LAYOUT, height=320, showlegend=False)
-                fig.update_xaxes(title="")
-                fig.update_yaxes(title="Count", **AXIS_DEFAULTS)
-                st.plotly_chart(fig, use_container_width=True)
+                perps_df["order_side"] = perps_df["is_close"].map(lambda x: "Close" if x else "Open")
+                oc_agg = perps_df.groupby("order_side").agg(
+                    volume=("amount_usd", "sum"), count=("amount_usd", "size"),
+                ).reset_index()
+                oc_agg.columns = ["type", "volume", "count"]
+
+                col_oc_vol, col_oc_cnt = st.columns(2)
+                with col_oc_vol:
+                    fig = px.bar(oc_agg, x="type", y="volume", title="Open vs Close Volume ($)", color="type",
+                                 color_discrete_map={"Open": BRAND, "Close": ACCENT_WARN},
+                                 text=[f"${fmt_number(v)}" for v in oc_agg["volume"]])
+                    fig.update_traces(textposition="auto", textfont=dict(size=13, color="white"))
+                    fig.update_layout(**PLOTLY_LAYOUT, height=320, showlegend=False)
+                    fig.update_xaxes(title="")
+                    fig.update_yaxes(title="Volume ($)", **AXIS_DEFAULTS)
+                    st.plotly_chart(fig, use_container_width=True)
+
+                with col_oc_cnt:
+                    fig = px.bar(oc_agg, x="type", y="count", title="Open vs Close Orders", color="type",
+                                 color_discrete_map={"Open": BRAND, "Close": ACCENT_WARN})
+                    fig.update_layout(**PLOTLY_LAYOUT, height=320, showlegend=False)
+                    fig.update_xaxes(title="")
+                    fig.update_yaxes(title="Count", **AXIS_DEFAULTS)
+                    st.plotly_chart(fig, use_container_width=True)
 
             # Recent perps table
             st.subheader("Recent Perps Orders")
