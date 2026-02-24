@@ -605,7 +605,7 @@ with tab_users:
                         display_cols = [c for c in ["timestamp", "from_token", "to_token", "amount_usd", "status", "source"] if c in utdf.columns]
                         display_df = utdf[display_cols].sort_values("timestamp", ascending=False).copy()
                         if "timestamp" in display_df.columns:
-                            display_df["timestamp"] = pd.to_datetime(display_df["timestamp"], errors="coerce").dt.tz_localize("UTC").dt.tz_convert("America/New_York").dt.strftime("%b %d, %I:%M %p")
+                            display_df["timestamp"] = pd.to_datetime(display_df["timestamp"], errors="coerce", utc=True).dt.tz_convert("America/New_York").dt.strftime("%b %d, %I:%M %p")
                         st.dataframe(display_df, use_container_width=True, hide_index=True)
 
 
@@ -929,7 +929,7 @@ with tab_trades:
             if "wallet_address" in recent_swaps.columns:
                 recent_swaps["wallet_address"] = recent_swaps["wallet_address"].apply(short_wallet)
             if "timestamp" in recent_swaps.columns:
-                recent_swaps["timestamp"] = pd.to_datetime(recent_swaps["timestamp"], errors="coerce").dt.tz_localize("UTC").dt.tz_convert("America/New_York").dt.strftime("%b %d, %I:%M %p")
+                recent_swaps["timestamp"] = pd.to_datetime(recent_swaps["timestamp"], errors="coerce", utc=True).dt.tz_convert("America/New_York").dt.strftime("%b %d, %I:%M %p")
             st.dataframe(recent_swaps, use_container_width=True, hide_index=True)
 
         # ============================
@@ -1023,7 +1023,7 @@ with tab_trades:
             if "wallet_address" in recent_perps.columns:
                 recent_perps["wallet_address"] = recent_perps["wallet_address"].apply(short_wallet)
             if "timestamp" in recent_perps.columns:
-                recent_perps["timestamp"] = pd.to_datetime(recent_perps["timestamp"], errors="coerce").dt.tz_localize("UTC").dt.tz_convert("America/New_York").dt.strftime("%b %d, %I:%M %p")
+                recent_perps["timestamp"] = pd.to_datetime(recent_perps["timestamp"], errors="coerce", utc=True).dt.tz_convert("America/New_York").dt.strftime("%b %d, %I:%M %p")
             st.dataframe(recent_perps, use_container_width=True, hide_index=True)
 
         # ============================
@@ -1070,7 +1070,7 @@ with tab_trades:
             if "wallet_address" in recent_deps.columns:
                 recent_deps["wallet_address"] = recent_deps["wallet_address"].apply(short_wallet)
             if "timestamp" in recent_deps.columns:
-                recent_deps["timestamp"] = pd.to_datetime(recent_deps["timestamp"], errors="coerce").dt.tz_localize("UTC").dt.tz_convert("America/New_York").dt.strftime("%b %d, %I:%M %p")
+                recent_deps["timestamp"] = pd.to_datetime(recent_deps["timestamp"], errors="coerce", utc=True).dt.tz_convert("America/New_York").dt.strftime("%b %d, %I:%M %p")
             st.dataframe(recent_deps, use_container_width=True, hide_index=True)
 
 
