@@ -1454,6 +1454,104 @@ with tab_backend:
         fig = make_time_series(route_lat_s, "timestamp", "value", title="Fund Route Latency (seconds)", color=ACCENT, kind="area")
         st.plotly_chart(fig, use_container_width=True)
 
+    # --- Venue Read Performance ---
+    st.markdown("---")
+    st.markdown("### Venue Read Performance")
+    venue_read_df = load_cw_metric_by_dims("Venue.ReadLatency", "Venue", ["hyperliquid", "lighter", "ostium"],
+                                            stat="Average", period=bh_period, hours=bh_hours)
+    venue_err_df = load_cw_metric_by_dims("Venue.ReadError", "Venue", ["hyperliquid", "lighter", "ostium"],
+                                           stat="Sum", period=bh_period, hours=bh_hours)
+
+    if not venue_read_df.empty:
+        col_v1, col_v2, col_v3 = st.columns(3)
+        for col, venue in [(col_v1, "hyperliquid"), (col_v2, "lighter"), (col_v3, "ostium")]:
+            vdf = venue_read_df[venue_read_df["dimension"] == venue]
+            avg = vdf["value"].mean() if not vdf.empty else 0
+            edf = venue_err_df[venue_err_df["dimension"] == venue] if not venue_err_df.empty else pd.DataFrame()
+            errs = int(edf["value"].sum()) if not edf.empty else 0
+            col.metric(f"{venue.title()} Read", f"{avg:.0f} ms", delta=f"{errs} errors" if errs > 0 else None,
+                       delta_color="inverse" if errs > 0 else "off")
+        fig = px.line(venue_read_df, x="timestamp", y="value", color="dimension",
+                      title="Venue Read Latency (ms)", color_discrete_sequence=[BRAND, ACCENT, ACCENT_WARN])
+        fig.update_layout(**PLOTLY_LAYOUT, height=350)
+        fig.update_xaxes(title="", tickformat="%b %d %H:%M", **AXIS_DEFAULTS)
+        fig.update_yaxes(title="ms", **AXIS_DEFAULTS)
+        st.plotly_chart(fig, use_container_width=True)
+
+    # --- Cache Performance ---
+    st.markdown("---")
+    st.markdown("### Cache Performance")
+    cache_hit = load_cw_metric("Cache.Hit", stat="Sum", period=bh_period, hours=bh_hours)
+    cache_miss = load_cw_metric("Cache.Miss", stat="Sum", period=bh_period, hours=bh_hours)
+
+    hits = int(cache_hit["value"].sum()) if not cache_hit.empty else 0
+    misses = int(cache_miss["value"].sum()) if not cache_miss.empty else 0
+    total_cache = hits + misses
+    hit_rate = (hits / total_cache * 100) if total_cache > 0 else 0
+
+    col_hr, col_h, col_m = st.columns(3)
+    col_hr.metric("Hit Rate", f"{hit_rate:.1f}%")
+    col_h.metric("Cache Hits", fmt_number(hits))
+    col_m.metric("Cache Misses", fmt_number(misses))
+
+    if not cache_hit.empty or not cache_miss.empty:
+        cache_frames = []
+        if not cache_hit.empty:
+            h = cache_hit.copy()
+            h["type"] = "Hit"
+            cache_frames.append(h)
+        if not cache_miss.empty:
+            m = cache_miss.copy()
+            m["type"] = "Miss"
+            cache_frames.append(m)
+        if cache_frames:
+            cdf = pd.concat(cache_frames, ignore_index=True)
+            fig = px.bar(cdf, x="timestamp", y="value", color="type",
+                         title="Cache Hits vs Misses", color_discrete_sequence=[ACCENT, ACCENT_RED], barmode="stack")
+            fig.update_layout(**PLOTLY_LAYOUT, height=300)
+            fig.update_xaxes(title="", tickformat="%b %d %H:%M", **AXIS_DEFAULTS)
+            fig.update_yaxes(title="", **AXIS_DEFAULTS)
+            st.plotly_chart(fig, use_container_width=True)
+
+    # --- WebSocket ---
+    st.markdown("---")
+    st.markdown("### WebSocket Fan-out")
+    ws_conns = load_cw_metric("WS.ActiveConnections", stat="Maximum", period=bh_period, hours=bh_hours)
+    ws_sent = load_cw_metric("WS.MessageSent", stat="Sum", period=bh_period, hours=bh_hours)
+    ws_recv = load_cw_metric("WS.MessageReceived", stat="Sum", period=bh_period, hours=bh_hours)
+
+    col_wc, col_ws, col_wr = st.columns(3)
+    col_wc.metric("Peak Connections", f"{int(ws_conns['value'].max())}" if not ws_conns.empty else "0")
+    col_ws.metric("Messages Sent", fmt_number(int(ws_sent["value"].sum())) if not ws_sent.empty else "0")
+    col_wr.metric("Messages Received", fmt_number(int(ws_recv["value"].sum())) if not ws_recv.empty else "0")
+
+    if not ws_conns.empty:
+        fig = make_time_series(ws_conns, "timestamp", "value", title="Active WS Connections", color=BRAND_LIGHT, kind="area")
+        st.plotly_chart(fig, use_container_width=True)
+
+    # --- Privy Signing ---
+    st.markdown("---")
+    st.markdown("### Privy Signing")
+    privy_lat = load_cw_metric("Privy.SigningLatency", stat="Average", period=bh_period, hours=bh_hours)
+
+    col_pl, col_pc = st.columns(2)
+    col_pl.metric("Avg Signing Latency", f"{privy_lat['value'].mean():.0f} ms" if not privy_lat.empty else "N/A")
+    col_pc.metric("Total Signings", f"{len(privy_lat)}" if not privy_lat.empty else "0")
+
+    if not privy_lat.empty:
+        fig = make_time_series(privy_lat, "timestamp", "value", title="Privy Signing Latency (ms)", color="#8B5CF6", kind="area")
+        st.plotly_chart(fig, use_container_width=True)
+
+    # --- Account Snapshot ---
+    st.markdown("---")
+    st.markdown("### Account Snapshots")
+    acct_lat = load_cw_metric("Account.SnapshotLatency", stat="Average", period=bh_period, hours=bh_hours)
+
+    if not acct_lat.empty:
+        st.metric("Avg Multi-Venue Snapshot", f"{acct_lat['value'].mean():.0f} ms")
+        fig = make_time_series(acct_lat, "timestamp", "value", title="Account Snapshot Latency (ms)", color="#06B6D4", kind="area")
+        st.plotly_chart(fig, use_container_width=True)
+
     # --- Alarms status ---
     st.markdown("---")
     st.markdown("### Active Alarms")
