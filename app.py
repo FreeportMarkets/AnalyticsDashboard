@@ -220,29 +220,32 @@ CW_ENVIRONMENT = "dev"
 @st.cache_data(ttl=300)
 def load_cw_metric(metric_name, stat="Average", period=300, hours=24, dimensions=None):
     """Fetch a single CloudWatch metric time series."""
-    cw = get_cloudwatch()
-    end = datetime.utcnow()
-    start = end - timedelta(hours=hours)
-    dims = [{"Name": "Environment", "Value": CW_ENVIRONMENT}]
-    if dimensions:
-        for k, v in dimensions.items():
-            dims.append({"Name": k, "Value": v})
-    resp = cw.get_metric_statistics(
-        Namespace=CW_NAMESPACE,
-        MetricName=metric_name,
-        Dimensions=dims,
-        StartTime=start,
-        EndTime=end,
-        Period=period,
-        Statistics=[stat],
-    )
-    points = resp.get("Datapoints", [])
-    if not points:
+    try:
+        cw = get_cloudwatch()
+        end = datetime.utcnow()
+        start = end - timedelta(hours=hours)
+        dims = [{"Name": "Environment", "Value": CW_ENVIRONMENT}]
+        if dimensions:
+            for k, v in dimensions.items():
+                dims.append({"Name": k, "Value": v})
+        resp = cw.get_metric_statistics(
+            Namespace=CW_NAMESPACE,
+            MetricName=metric_name,
+            Dimensions=dims,
+            StartTime=start,
+            EndTime=end,
+            Period=period,
+            Statistics=[stat],
+        )
+        points = resp.get("Datapoints", [])
+        if not points:
+            return pd.DataFrame(columns=["timestamp", "value"])
+        df = pd.DataFrame(points)
+        df["timestamp"] = pd.to_datetime(df["Timestamp"])
+        df["value"] = df[stat]
+        return df[["timestamp", "value"]].sort_values("timestamp").reset_index(drop=True)
+    except Exception:
         return pd.DataFrame(columns=["timestamp", "value"])
-    df = pd.DataFrame(points)
-    df["timestamp"] = pd.to_datetime(df["Timestamp"])
-    df["value"] = df[stat]
-    return df[["timestamp", "value"]].sort_values("timestamp").reset_index(drop=True)
 
 
 @st.cache_data(ttl=300)
