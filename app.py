@@ -203,6 +203,60 @@ def get_dynamodb():
     )
 
 
+@st.cache_resource
+def get_cloudwatch():
+    return boto3.client(
+        "cloudwatch",
+        region_name=st.secrets["aws"]["region"],
+        aws_access_key_id=st.secrets["aws"]["aws_access_key_id"],
+        aws_secret_access_key=st.secrets["aws"]["aws_secret_access_key"],
+    )
+
+
+CW_NAMESPACE = "Freeport/TradingBackend"
+CW_ENVIRONMENT = "dev"
+
+
+@st.cache_data(ttl=300)
+def load_cw_metric(metric_name, stat="Average", period=300, hours=24, dimensions=None):
+    """Fetch a single CloudWatch metric time series."""
+    cw = get_cloudwatch()
+    end = datetime.utcnow()
+    start = end - timedelta(hours=hours)
+    dims = [{"Name": "Environment", "Value": CW_ENVIRONMENT}]
+    if dimensions:
+        for k, v in dimensions.items():
+            dims.append({"Name": k, "Value": v})
+    resp = cw.get_metric_statistics(
+        Namespace=CW_NAMESPACE,
+        MetricName=metric_name,
+        Dimensions=dims,
+        StartTime=start,
+        EndTime=end,
+        Period=period,
+        Statistics=[stat],
+    )
+    points = resp.get("Datapoints", [])
+    if not points:
+        return pd.DataFrame(columns=["timestamp", "value"])
+    df = pd.DataFrame(points)
+    df["timestamp"] = pd.to_datetime(df["Timestamp"])
+    df["value"] = df[stat]
+    return df[["timestamp", "value"]].sort_values("timestamp").reset_index(drop=True)
+
+
+@st.cache_data(ttl=300)
+def load_cw_metric_by_dims(metric_name, dim_name, dim_values, stat="Sum", period=300, hours=24):
+    """Fetch a CloudWatch metric broken down by a dimension."""
+    frames = []
+    for val in dim_values:
+        df = load_cw_metric(metric_name, stat=stat, period=period, hours=hours, dimensions={dim_name: val})
+        if not df.empty:
+            df["dimension"] = val
+            frames.append(df)
+    return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(columns=["timestamp", "value", "dimension"])
+
+
 ANALYTICS_TABLE = "freeport-analytics-events"
 TRADES_TABLE = "freeport-trades-history"
 
@@ -332,8 +386,8 @@ st.sidebar.markdown("---")
 st.sidebar.caption("Data refreshes every 5 minutes")
 
 # --- Tabs ---
-tab_overview, tab_users, tab_retention, tab_funnels, tab_trades, tab_notifications = st.tabs(
-    ["Overview", "Top Users", "Retention", "Funnels", "Trades", "Notifications"]
+tab_overview, tab_users, tab_retention, tab_funnels, tab_trades, tab_notifications, tab_backend = st.tabs(
+    ["Overview", "Top Users", "Retention", "Funnels", "Trades", "Notifications", "Backend Health"]
 )
 
 
@@ -1262,3 +1316,155 @@ with tab_notifications:
                 tt["wallet"] = tt["wallet_address"].apply(short_wallet)
                 fig = make_h_bar(tt, "taps", "wallet", title="Top Notification Tappers", color="#EC4899")
                 st.plotly_chart(fig, use_container_width=True)
+
+
+# =====================
+# TAB 7: Backend Health
+# =====================
+with tab_backend:
+    st.subheader("Trading Backend — CloudWatch Metrics")
+
+    bh_hours = st.selectbox("Lookback", [6, 12, 24, 48, 72], index=2, key="bh_hours")
+    bh_period = 300 if bh_hours <= 24 else 900
+
+    # --- Fee Payer Balance (critical) ---
+    st.markdown("### Gas Sponsorship")
+    fee_df = load_cw_metric("Gas.FeePayerBalanceETH", stat="Minimum", period=bh_period, hours=bh_hours)
+    if not fee_df.empty:
+        latest_balance = fee_df.iloc[-1]["value"]
+        col_bal, col_fund, col_rl = st.columns(3)
+        col_bal.metric("Fee Payer ETH Balance", f"{latest_balance:.4f} ETH",
+                       delta=f"{'LOW' if latest_balance < 0.005 else 'OK'}",
+                       delta_color="inverse" if latest_balance < 0.005 else "normal")
+
+        fund_success = load_cw_metric("Gas.FundingSuccess", stat="Sum", period=bh_period, hours=bh_hours)
+        col_fund.metric("Gas Fundings", f"{int(fund_success['value'].sum()) if not fund_success.empty else 0}")
+
+        rate_limits = load_cw_metric("Gas.RateLimitHit", stat="Sum", period=bh_period, hours=bh_hours)
+        col_rl.metric("Rate Limit Hits", f"{int(rate_limits['value'].sum()) if not rate_limits.empty else 0}")
+
+        fig = make_time_series(fee_df, "timestamp", "value", title="Fee Payer ETH Balance", color=ACCENT_WARN, kind="area")
+        fig.add_hline(y=0.005, line_dash="dash", line_color=ACCENT_RED, annotation_text="Alarm threshold")
+        st.plotly_chart(fig, use_container_width=True)
+
+        fund_lat = load_cw_metric("Gas.FundingLatency", stat="Average", period=bh_period, hours=bh_hours)
+        if not fund_lat.empty:
+            fig = make_time_series(fund_lat, "timestamp", "value", title="Gas Funding Latency (ms)", color=BRAND_LIGHT, kind="area")
+            st.plotly_chart(fig, use_container_width=True)
+    else:
+        st.info("No fee payer balance data yet. Metrics will appear once ENABLE_METRICS=true is deployed.")
+
+    st.markdown("---")
+
+    # --- API Health ---
+    st.markdown("### API Health")
+    api_latency = load_cw_metric("API.Latency", stat="Average", period=bh_period, hours=bh_hours)
+    api_requests = load_cw_metric("API.Request", stat="Sum", period=bh_period, hours=bh_hours)
+    api_errors = load_cw_metric("API.Error", stat="Sum", period=bh_period, hours=bh_hours)
+
+    col_req, col_lat, col_err = st.columns(3)
+    total_reqs = int(api_requests["value"].sum()) if not api_requests.empty else 0
+    avg_lat = api_latency["value"].mean() if not api_latency.empty else 0
+    total_errs = int(api_errors["value"].sum()) if not api_errors.empty else 0
+    col_req.metric("Total Requests", fmt_number(total_reqs))
+    col_lat.metric("Avg Latency", f"{avg_lat:.0f} ms")
+    col_err.metric("Errors (4xx+5xx)", fmt_number(total_errs))
+
+    if not api_latency.empty:
+        fig = make_time_series(api_latency, "timestamp", "value", title="API Latency (ms)", color=BRAND, kind="area")
+        st.plotly_chart(fig, use_container_width=True)
+
+    if not api_requests.empty:
+        fig = make_time_series(api_requests, "timestamp", "value", title="Request Volume", color=ACCENT, kind="bar")
+        st.plotly_chart(fig, use_container_width=True)
+
+    if not api_errors.empty and total_errs > 0:
+        fig = make_time_series(api_errors, "timestamp", "value", title="API Errors", color=ACCENT_RED, kind="bar")
+        st.plotly_chart(fig, use_container_width=True)
+
+    st.markdown("---")
+
+    # --- Order Latency by Venue ---
+    st.markdown("### Order Execution")
+    venues = ["hyperliquid", "ostium"]
+    order_lat_df = load_cw_metric_by_dims("Order.PlaceLatency", "Venue", venues, stat="Average", period=bh_period, hours=bh_hours)
+
+    if not order_lat_df.empty:
+        col_hl, col_os = st.columns(2)
+        for col, venue in [(col_hl, "hyperliquid"), (col_os, "ostium")]:
+            vdf = order_lat_df[order_lat_df["dimension"] == venue]
+            avg = vdf["value"].mean() if not vdf.empty else 0
+            col.metric(f"{venue.title()} Avg Latency", f"{avg:.0f} ms")
+        fig = px.line(order_lat_df, x="timestamp", y="value", color="dimension",
+                      title="Order Placement Latency by Venue (ms)",
+                      color_discrete_sequence=[BRAND, ACCENT])
+        fig.update_layout(**PLOTLY_LAYOUT, height=350)
+        fig.update_xaxes(title="", tickformat="%b %d %H:%M", **AXIS_DEFAULTS)
+        fig.update_yaxes(title="ms", **AXIS_DEFAULTS)
+        st.plotly_chart(fig, use_container_width=True)
+
+    cancel_lat = load_cw_metric("Order.CancelLatency", stat="Average", period=bh_period, hours=bh_hours)
+    withdraw_lat = load_cw_metric("Withdraw.Latency", stat="Average", period=bh_period, hours=bh_hours)
+
+    col_cl, col_wl = st.columns(2)
+    col_cl.metric("Avg Cancel Latency", f"{cancel_lat['value'].mean():.0f} ms" if not cancel_lat.empty else "N/A")
+    col_wl.metric("Avg Withdraw Latency", f"{withdraw_lat['value'].mean():.0f} ms" if not withdraw_lat.empty else "N/A")
+
+    st.markdown("---")
+
+    # --- Bridge Orchestrator ---
+    st.markdown("### Bridge Orchestrator")
+    bridge_success = load_cw_metric("Bridge.Success", stat="Sum", period=bh_period, hours=bh_hours)
+    bridge_fail = load_cw_metric("Bridge.Failure", stat="Sum", period=bh_period, hours=bh_hours)
+    bridge_dur = load_cw_metric("Bridge.TotalDuration", stat="Average", period=bh_period, hours=bh_hours)
+    bridge_fill = load_cw_metric("Bridge.FillTime", stat="Average", period=bh_period, hours=bh_hours)
+
+    col_bs, col_bf, col_bd, col_bfi = st.columns(4)
+    s_total = int(bridge_success["value"].sum()) if not bridge_success.empty else 0
+    f_total = int(bridge_fail["value"].sum()) if not bridge_fail.empty else 0
+    col_bs.metric("Successful Bridges", s_total)
+    col_bf.metric("Failed Bridges", f_total)
+    avg_dur = bridge_dur["value"].mean() / 1000 if not bridge_dur.empty else 0
+    col_bd.metric("Avg Duration", f"{avg_dur:.0f}s")
+    avg_fill = bridge_fill["value"].mean() / 1000 if not bridge_fill.empty else 0
+    col_bfi.metric("Avg Fill Time", f"{avg_fill:.0f}s")
+
+    if not bridge_dur.empty:
+        bridge_dur_s = bridge_dur.copy()
+        bridge_dur_s["value"] = bridge_dur_s["value"] / 1000
+        fig = make_time_series(bridge_dur_s, "timestamp", "value", title="Bridge Total Duration (seconds)", color=BRAND_LIGHT, kind="area")
+        st.plotly_chart(fig, use_container_width=True)
+
+    st.markdown("---")
+
+    # --- Fund Router ---
+    st.markdown("### Fund Router (Arb <> HL)")
+    route_lat = load_cw_metric("FundRouter.RouteLatency", stat="Average", period=bh_period, hours=bh_hours)
+    rev_lat = load_cw_metric("FundRouter.ReverseRouteLatency", stat="Average", period=bh_period, hours=bh_hours)
+    settle_timeout = load_cw_metric("FundRouter.SettlementTimeout", stat="Sum", period=bh_period, hours=bh_hours)
+
+    col_rl2, col_rr, col_st2 = st.columns(3)
+    col_rl2.metric("Avg Route Latency (Arb>HL)", f"{route_lat['value'].mean() / 1000:.1f}s" if not route_lat.empty else "N/A")
+    col_rr.metric("Avg Reverse Route (HL>Arb)", f"{rev_lat['value'].mean() / 1000:.1f}s" if not rev_lat.empty else "N/A")
+    col_st2.metric("Settlement Timeouts", f"{int(settle_timeout['value'].sum())}" if not settle_timeout.empty else "0")
+
+    if not route_lat.empty:
+        route_lat_s = route_lat.copy()
+        route_lat_s["value"] = route_lat_s["value"] / 1000
+        fig = make_time_series(route_lat_s, "timestamp", "value", title="Fund Route Latency (seconds)", color=ACCENT, kind="area")
+        st.plotly_chart(fig, use_container_width=True)
+
+    # --- Alarms status ---
+    st.markdown("---")
+    st.markdown("### Active Alarms")
+    try:
+        cw = get_cloudwatch()
+        alarms_resp = cw.describe_alarms(StateValue="ALARM")
+        alarm_list = alarms_resp.get("MetricAlarms", [])
+        if alarm_list:
+            for alarm in alarm_list:
+                st.error(f"**{alarm['AlarmName']}** — {alarm.get('AlarmDescription', 'No description')}")
+        else:
+            st.success("All alarms OK — no active alerts")
+    except Exception as e:
+        st.warning(f"Could not fetch alarms: {e}")
