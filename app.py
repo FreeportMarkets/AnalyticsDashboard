@@ -1327,8 +1327,9 @@ with tab_notifications:
 with tab_backend:
     st.subheader("Trading Backend — CloudWatch Metrics")
 
-    bh_hours = st.selectbox("Lookback", [6, 12, 24, 48, 72], index=2, key="bh_hours")
-    bh_period = 300 if bh_hours <= 24 else 900
+    bh_hours = st.selectbox("Lookback", [6, 12, 24, 48, 72, 168], index=2, key="bh_hours",
+                             format_func=lambda h: f"{h}h" if h < 168 else "7 days")
+    bh_period = 300 if bh_hours <= 24 else (900 if bh_hours <= 72 else 3600)
 
     # --- Fee Payer Balance (critical) ---
     st.markdown("### Gas Sponsorship")
