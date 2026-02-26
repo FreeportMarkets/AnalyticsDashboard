@@ -1355,7 +1355,7 @@ with tab_backend:
             fig = make_time_series(fund_lat, "timestamp", "value", title="Gas Funding Latency (ms)", color=BRAND_LIGHT, kind="area")
             st.plotly_chart(fig, use_container_width=True)
     else:
-        st.info("No fee payer balance data yet. Metrics will appear once ENABLE_METRICS=true is deployed.")
+        st.info("No fee payer balance data yet. This metric is emitted during bridge deposits that require gas funding.")
 
     st.markdown("---")
 
