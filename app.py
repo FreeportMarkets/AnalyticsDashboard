@@ -214,7 +214,7 @@ def get_cloudwatch():
 
 
 CW_NAMESPACE = "Freeport/TradingBackend"
-CW_ENVIRONMENT = "dev"
+CW_ENVIRONMENT = "development"
 
 
 @st.cache_data(ttl=300)
