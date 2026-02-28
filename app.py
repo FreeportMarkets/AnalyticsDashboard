@@ -283,7 +283,8 @@ def load_events_for_date(date_str: str) -> list:
 def load_events_range(start_date: str, end_date: str) -> list:
     all_items = []
     current = datetime.strptime(start_date, "%Y-%m-%d")
-    end = datetime.strptime(end_date, "%Y-%m-%d")
+    # Fetch one extra UTC day so late-EST events (stored under next UTC date) are included
+    end = datetime.strptime(end_date, "%Y-%m-%d") + timedelta(days=1)
     while current <= end:
         all_items.extend(load_events_for_date(current.strftime("%Y-%m-%d")))
         current += timedelta(days=1)
@@ -315,7 +316,8 @@ def events_to_df(events: list) -> pd.DataFrame:
         if ts.dt.tz is None:
             ts = ts.dt.tz_localize("UTC")
         df["ts"] = ts.dt.tz_convert("America/New_York")
-        # Re-derive hour and day_of_week in EST
+        # Re-derive date, hour, and day_of_week in EST
+        df["date"] = df["ts"].dt.strftime("%Y-%m-%d")
         df["hour"] = df["ts"].dt.hour
         # 0=Sunday convention: pandas dayofweek 0=Mon..6=Sun → shift to 0=Sun
         df["day_of_week"] = (df["ts"].dt.dayofweek + 1) % 7
@@ -350,7 +352,7 @@ def extract_session_durations(df: pd.DataFrame) -> pd.DataFrame:
 st.sidebar.markdown("## Freeport Analytics")
 st.sidebar.markdown("---")
 
-today = datetime.utcnow().date()
+today = datetime.now(tz=ZoneInfo("America/New_York")).date()
 date_range = st.sidebar.date_input(
     "Date range",
     value=(today - timedelta(days=7), today),
