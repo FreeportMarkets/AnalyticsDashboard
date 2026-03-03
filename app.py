@@ -3,6 +3,8 @@ import boto3
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
+import urllib.request
+import json
 from datetime import datetime, timedelta
 from decimal import Decimal
 from zoneinfo import ZoneInfo
@@ -316,6 +318,50 @@ def load_trades_range(start_date: str, end_date: str) -> list:
             break
         params["ExclusiveStartKey"] = resp["LastEvaluatedKey"]
     return [decimal_to_float(i) for i in items]
+
+
+EVM_FEE_PAYER = "0xe39244f14AFB106255754538Cc718cAdFC0A9905"
+SOL_FEE_PAYER = "DWgK5KazKbiSPKR75zm8CaoR3KebZHnSEmJxWjVvnNkr"
+
+
+@st.cache_data(ttl=120)
+def fetch_evm_balance(address: str) -> float | None:
+    """Fetch ETH balance on Arbitrum via public RPC."""
+    try:
+        payload = json.dumps({
+            "jsonrpc": "2.0", "id": 1, "method": "eth_getBalance",
+            "params": [address, "latest"],
+        }).encode()
+        req = urllib.request.Request(
+            "https://arb1.arbitrum.io/rpc",
+            data=payload,
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            result = json.loads(resp.read())
+        return int(result["result"], 16) / 1e18
+    except Exception:
+        return None
+
+
+@st.cache_data(ttl=120)
+def fetch_sol_balance(address: str) -> float | None:
+    """Fetch SOL balance via Solana public RPC."""
+    try:
+        payload = json.dumps({
+            "jsonrpc": "2.0", "id": 1, "method": "getBalance",
+            "params": [address],
+        }).encode()
+        req = urllib.request.Request(
+            "https://api.mainnet-beta.solana.com",
+            data=payload,
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            result = json.loads(resp.read())
+        return result["result"]["value"] / 1e9
+    except Exception:
+        return None
 
 
 def events_to_df(events: list) -> pd.DataFrame:
@@ -1355,32 +1401,34 @@ with tab_backend:
                              format_func=lambda h: f"{h}h" if h < 168 else "7 days")
     bh_period = 300 if bh_hours <= 24 else (900 if bh_hours <= 72 else 3600)
 
-    # --- Fee Payer Balance (critical) ---
+    # --- Fee Payer Balance (critical) — live RPC ---
     st.markdown("### Gas Sponsorship")
+    evm_bal = fetch_evm_balance(EVM_FEE_PAYER)
+    sol_bal = fetch_sol_balance(SOL_FEE_PAYER)
+
+    col_evm, col_sol = st.columns(2)
+    if evm_bal is not None:
+        evm_low = evm_bal < 0.005
+        col_evm.metric("EVM Fee Payer (Arbitrum)", f"{evm_bal:.6f} ETH",
+                        delta="LOW" if evm_low else "OK",
+                        delta_color="inverse" if evm_low else "normal")
+    else:
+        col_evm.metric("EVM Fee Payer (Arbitrum)", "RPC error")
+
+    if sol_bal is not None:
+        sol_low = sol_bal < 0.5
+        col_sol.metric("SOL Fee Payer", f"{sol_bal:.4f} SOL",
+                        delta="LOW" if sol_low else "OK",
+                        delta_color="inverse" if sol_low else "normal")
+    else:
+        col_sol.metric("SOL Fee Payer", "RPC error")
+
+    # CloudWatch history (bonus — shows if data exists)
     fee_df = load_cw_metric("Gas.FeePayerBalanceETH", stat="Minimum", period=bh_period, hours=bh_hours)
     if not fee_df.empty:
-        latest_balance = fee_df.iloc[-1]["value"]
-        col_bal, col_fund, col_rl = st.columns(3)
-        col_bal.metric("Fee Payer ETH Balance", f"{latest_balance:.4f} ETH",
-                       delta=f"{'LOW' if latest_balance < 0.005 else 'OK'}",
-                       delta_color="inverse" if latest_balance < 0.005 else "normal")
-
-        fund_success = load_cw_metric("Gas.FundingSuccess", stat="Sum", period=bh_period, hours=bh_hours)
-        col_fund.metric("Gas Fundings", f"{int(fund_success['value'].sum()) if not fund_success.empty else 0}")
-
-        rate_limits = load_cw_metric("Gas.RateLimitHit", stat="Sum", period=bh_period, hours=bh_hours)
-        col_rl.metric("Rate Limit Hits", f"{int(rate_limits['value'].sum()) if not rate_limits.empty else 0}")
-
-        fig = make_time_series(fee_df, "timestamp", "value", title="Fee Payer ETH Balance", color=ACCENT_WARN, kind="area")
+        fig = make_time_series(fee_df, "timestamp", "value", title="Fee Payer ETH Balance (CloudWatch)", color=ACCENT_WARN, kind="area")
         fig.add_hline(y=0.005, line_dash="dash", line_color=ACCENT_RED, annotation_text="Alarm threshold")
         st.plotly_chart(fig, use_container_width=True)
-
-        fund_lat = load_cw_metric("Gas.FundingLatency", stat="Average", period=bh_period, hours=bh_hours)
-        if not fund_lat.empty:
-            fig = make_time_series(fund_lat, "timestamp", "value", title="Gas Funding Latency (ms)", color=BRAND_LIGHT, kind="area")
-            st.plotly_chart(fig, use_container_width=True)
-    else:
-        st.info("No fee payer balance data yet. This metric is emitted during bridge deposits that require gas funding.")
 
     st.markdown("---")
 
