@@ -132,15 +132,26 @@ def apply_perps_leverage(frame):
     else:
         close_mask = pd.Series(False, index=frame.index)
     open_mask = perps_mask & ~close_mask
-    # Opens: collateral × leverage = notional
+    # Opens: collateral × leverage = notional (except Ostium where amount_usd is already notional)
     if "leverage" in frame.columns:
         frame["leverage"] = pd.to_numeric(frame["leverage"], errors="coerce").fillna(1)
-        frame.loc[open_mask, "amount_usd"] = frame.loc[open_mask, "amount_usd"] * frame.loc[open_mask, "leverage"]
-    # Closes: size × price = full position notional
+        if "category" in frame.columns:
+            ostium_open = open_mask & (frame["category"] == "ostium")
+            other_open = open_mask & (frame["category"] != "ostium")
+            frame.loc[other_open, "amount_usd"] = frame.loc[other_open, "amount_usd"] * frame.loc[other_open, "leverage"]
+        else:
+            frame.loc[open_mask, "amount_usd"] = frame.loc[open_mask, "amount_usd"] * frame.loc[open_mask, "leverage"]
+    # Closes: size × price = full position notional (except Ostium where size IS USD notional)
     if "size" in frame.columns and "price" in frame.columns:
         frame["size"] = pd.to_numeric(frame["size"], errors="coerce").fillna(0)
         frame["price"] = pd.to_numeric(frame["price"], errors="coerce").fillna(0)
-        frame.loc[close_mask, "amount_usd"] = frame.loc[close_mask, "size"].abs() * frame.loc[close_mask, "price"]
+        if "category" in frame.columns:
+            ostium_close = close_mask & (frame["category"] == "ostium")
+            other_close = close_mask & (frame["category"] != "ostium")
+            frame.loc[other_close, "amount_usd"] = frame.loc[other_close, "size"].abs() * frame.loc[other_close, "price"]
+            frame.loc[ostium_close, "amount_usd"] = frame.loc[ostium_close, "size"].abs()
+        else:
+            frame.loc[close_mask, "amount_usd"] = frame.loc[close_mask, "size"].abs() * frame.loc[close_mask, "price"]
     return frame
 
 
@@ -909,12 +920,23 @@ with tab_trades:
             close_mask = perps_df["is_close"].astype(bool) if "is_close" in perps_df.columns else pd.Series(False, index=perps_df.index)
             open_mask = ~close_mask
 
-            # Opens: collateral × leverage
+            # Opens: collateral × leverage (except Ostium where amount_usd is already notional)
             if "leverage" in perps_df.columns:
-                perps_df.loc[open_mask, "amount_usd"] = perps_df.loc[open_mask, "amount_usd"] * perps_df.loc[open_mask, "leverage"]
-            # Closes: size × price (full position notional)
+                if "category" in perps_df.columns:
+                    ostium_open = open_mask & (perps_df["category"] == "ostium")
+                    other_open = open_mask & (perps_df["category"] != "ostium")
+                    perps_df.loc[other_open, "amount_usd"] = perps_df.loc[other_open, "amount_usd"] * perps_df.loc[other_open, "leverage"]
+                else:
+                    perps_df.loc[open_mask, "amount_usd"] = perps_df.loc[open_mask, "amount_usd"] * perps_df.loc[open_mask, "leverage"]
+            # Closes: size × price (full position notional) — except Ostium where size IS USD notional
             if "size" in perps_df.columns and "price" in perps_df.columns:
-                perps_df.loc[close_mask, "amount_usd"] = perps_df.loc[close_mask, "size"].abs() * perps_df.loc[close_mask, "price"]
+                if "category" in perps_df.columns:
+                    ostium_close = close_mask & (perps_df["category"] == "ostium")
+                    other_close = close_mask & (perps_df["category"] != "ostium")
+                    perps_df.loc[other_close, "amount_usd"] = perps_df.loc[other_close, "size"].abs() * perps_df.loc[other_close, "price"]
+                    perps_df.loc[ostium_close, "amount_usd"] = perps_df.loc[ostium_close, "size"].abs()
+                else:
+                    perps_df.loc[close_mask, "amount_usd"] = perps_df.loc[close_mask, "size"].abs() * perps_df.loc[close_mask, "price"]
 
         trades_only = pd.concat([swap_df, perps_df], ignore_index=True)  # exclude deposits
 
