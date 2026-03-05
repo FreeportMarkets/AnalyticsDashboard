@@ -4,6 +4,7 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import urllib.request
+import requests as _requests
 import json
 from datetime import datetime, timedelta
 from decimal import Decimal
@@ -325,28 +326,24 @@ SOL_FEE_PAYER = "DWgK5KazKbiSPKR75zm8CaoR3KebZHnSEmJxWjVvnNkr"
 
 
 ARB_RPC_URLS = [
-    "https://arb1.arbitrum.io/rpc",
     "https://arbitrum-one-rpc.publicnode.com",
+    "https://arbitrum.meowrpc.com",
     "https://1rpc.io/arb",
+    "https://arb1.arbitrum.io/rpc",
 ]
 
 
 @st.cache_data(ttl=120)
 def fetch_evm_balance(address: str) -> float | None:
     """Fetch ETH balance on Arbitrum via public RPC (with fallbacks)."""
-    payload = json.dumps({
+    payload = {
         "jsonrpc": "2.0", "id": 1, "method": "eth_getBalance",
         "params": [address, "latest"],
-    }).encode()
+    }
     for rpc_url in ARB_RPC_URLS:
         try:
-            req = urllib.request.Request(
-                rpc_url,
-                data=payload,
-                headers={"Content-Type": "application/json"},
-            )
-            with urllib.request.urlopen(req, timeout=10) as resp:
-                result = json.loads(resp.read())
+            resp = _requests.post(rpc_url, json=payload, timeout=10)
+            result = resp.json()
             if "result" in result:
                 return int(result["result"], 16) / 1e18
         except Exception:
