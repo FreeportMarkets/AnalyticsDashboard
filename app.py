@@ -324,24 +324,34 @@ EVM_FEE_PAYER = "0xe39244f14AFB106255754538Cc718cAdFC0A9905"
 SOL_FEE_PAYER = "DWgK5KazKbiSPKR75zm8CaoR3KebZHnSEmJxWjVvnNkr"
 
 
+ARB_RPC_URLS = [
+    "https://arb1.arbitrum.io/rpc",
+    "https://arbitrum-one-rpc.publicnode.com",
+    "https://1rpc.io/arb",
+]
+
+
 @st.cache_data(ttl=120)
 def fetch_evm_balance(address: str) -> float | None:
-    """Fetch ETH balance on Arbitrum via public RPC."""
-    try:
-        payload = json.dumps({
-            "jsonrpc": "2.0", "id": 1, "method": "eth_getBalance",
-            "params": [address, "latest"],
-        }).encode()
-        req = urllib.request.Request(
-            "https://arb1.arbitrum.io/rpc",
-            data=payload,
-            headers={"Content-Type": "application/json"},
-        )
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            result = json.loads(resp.read())
-        return int(result["result"], 16) / 1e18
-    except Exception:
-        return None
+    """Fetch ETH balance on Arbitrum via public RPC (with fallbacks)."""
+    payload = json.dumps({
+        "jsonrpc": "2.0", "id": 1, "method": "eth_getBalance",
+        "params": [address, "latest"],
+    }).encode()
+    for rpc_url in ARB_RPC_URLS:
+        try:
+            req = urllib.request.Request(
+                rpc_url,
+                data=payload,
+                headers={"Content-Type": "application/json"},
+            )
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                result = json.loads(resp.read())
+            if "result" in result:
+                return int(result["result"], 16) / 1e18
+        except Exception:
+            continue
+    return None
 
 
 @st.cache_data(ttl=120)
