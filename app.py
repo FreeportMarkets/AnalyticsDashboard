@@ -573,14 +573,99 @@ with tab_overview:
         nu2.metric("Returning Users", fmt_number(returning_users))
         nu3.metric("Events / User", f"{avg_events_per_user:.1f}")
 
-        # Platform breakdown
+        # --- iOS vs Android Comparison ---
         if "platform" in user_df.columns:
-            plat_counts = user_df.groupby("platform")["wallet_address"].nunique()
-            plat_counts = plat_counts[plat_counts.index != "server"].sort_values(ascending=False)
-            if not plat_counts.empty:
-                plat_cols = st.columns(len(plat_counts))
-                for col, (plat, count) in zip(plat_cols, plat_counts.items()):
-                    col.metric(f"{plat.title()}", f"{count} users")
+            platforms = user_df["platform"].str.lower().unique()
+            has_ios = "ios" in platforms
+            has_android = "android" in platforms
+
+            if has_ios or has_android:
+                st.subheader("iOS vs Android")
+
+                ios_df = user_df[user_df["platform"].str.lower() == "ios"]
+                android_df = user_df[user_df["platform"].str.lower() == "android"]
+
+                ios_users = ios_df["wallet_address"].nunique()
+                android_users = android_df["wallet_address"].nunique()
+
+                ios_sessions = extract_session_durations(ios_df)
+                android_sessions = extract_session_durations(android_df)
+                ios_avg_sess = ios_sessions["duration_ms"].mean() / 1000 if not ios_sessions.empty else 0
+                android_avg_sess = android_sessions["duration_ms"].mean() / 1000 if not android_sessions.empty else 0
+
+                ios_events_per = len(ios_df) / ios_users if ios_users > 0 else 0
+                android_events_per = len(android_df) / android_users if android_users > 0 else 0
+
+                # Metric comparison row
+                mc1, mc2, mc3, mc4 = st.columns(4)
+                mc1.metric("iOS Users", fmt_number(ios_users))
+                mc2.metric("Android Users", fmt_number(android_users))
+                mc3.metric("iOS Avg Session", f"{ios_avg_sess:.0f}s")
+                mc4.metric("Android Avg Session", f"{android_avg_sess:.0f}s")
+
+                mc5, mc6, mc7, mc8 = st.columns(4)
+                mc5.metric("iOS Events/User", f"{ios_events_per:.1f}")
+                mc6.metric("Android Events/User", f"{android_events_per:.1f}")
+                mc7.metric("iOS Sessions", fmt_number(len(ios_sessions)))
+                mc8.metric("Android Sessions", fmt_number(len(android_sessions)))
+
+                # DAU by platform over time
+                if not ios_df.empty or not android_df.empty:
+                    ios_dau = ios_df.groupby("date")["wallet_address"].nunique().reset_index(name="iOS")
+                    android_dau = android_df.groupby("date")["wallet_address"].nunique().reset_index(name="Android")
+                    dau_merged = pd.merge(ios_dau, android_dau, on="date", how="outer").fillna(0).sort_values("date")
+
+                    fig = go.Figure()
+                    fig.add_trace(go.Scatter(x=dau_merged["date"], y=dau_merged["iOS"], name="iOS",
+                                            mode="lines+markers", line=dict(color=BRAND, width=2.5),
+                                            marker=dict(size=6)))
+                    fig.add_trace(go.Scatter(x=dau_merged["date"], y=dau_merged["Android"], name="Android",
+                                            mode="lines+markers", line=dict(color=ACCENT, width=2.5),
+                                            marker=dict(size=6)))
+                    fig.update_layout(**PLOTLY_LAYOUT, title="Daily Active Users by Platform", height=350,
+                                      legend=dict(orientation="h", y=-0.15))
+                    fig.update_xaxes(title="", tickformat="%b %d", **AXIS_DEFAULTS)
+                    fig.update_yaxes(title="Users", **AXIS_DEFAULTS)
+                    st.plotly_chart(fig, use_container_width=True)
+
+                # Top events comparison side by side
+                col_ios_ev, col_and_ev = st.columns(2)
+                with col_ios_ev:
+                    if not ios_df.empty:
+                        ios_top = ios_df["event"].value_counts().head(10).reset_index()
+                        ios_top.columns = ["event", "count"]
+                        fig = make_h_bar(ios_top, "count", "event", title="Top iOS Events", color=BRAND)
+                        st.plotly_chart(fig, use_container_width=True)
+                with col_and_ev:
+                    if not android_df.empty:
+                        and_top = android_df["event"].value_counts().head(10).reset_index()
+                        and_top.columns = ["event", "count"]
+                        fig = make_h_bar(and_top, "count", "event", title="Top Android Events", color=ACCENT)
+                        st.plotly_chart(fig, use_container_width=True)
+
+                # Trading comparison
+                if trades:
+                    ios_wallets = set(ios_df["wallet_address"].unique())
+                    android_wallets = set(android_df["wallet_address"].unique())
+                    tdf_plat = pd.DataFrame(trades)
+                    if "amount_usd" in tdf_plat.columns and "wallet_address" in tdf_plat.columns:
+                        tdf_plat["amount_usd"] = pd.to_numeric(tdf_plat["amount_usd"], errors="coerce")
+                        tdf_plat = apply_perps_leverage(tdf_plat)
+                        trade_only = tdf_plat[tdf_plat["type"].isin(["swap", "perps"])] if "type" in tdf_plat.columns else tdf_plat
+
+                        ios_trades = trade_only[trade_only["wallet_address"].isin(ios_wallets)]
+                        android_trades = trade_only[trade_only["wallet_address"].isin(android_wallets)]
+
+                        ios_vol = ios_trades["amount_usd"].sum() if not ios_trades.empty else 0
+                        android_vol = android_trades["amount_usd"].sum() if not android_trades.empty else 0
+                        ios_trade_ct = len(ios_trades)
+                        android_trade_ct = len(android_trades)
+
+                        tc1, tc2, tc3, tc4 = st.columns(4)
+                        tc1.metric("iOS Volume", f"${fmt_number(ios_vol)}")
+                        tc2.metric("Android Volume", f"${fmt_number(android_vol)}")
+                        tc3.metric("iOS Trades", fmt_number(ios_trade_ct))
+                        tc4.metric("Android Trades", fmt_number(android_trade_ct))
 
         st.markdown("---")
 
