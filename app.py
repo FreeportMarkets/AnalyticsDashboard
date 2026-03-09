@@ -10,6 +10,8 @@ from datetime import datetime, timedelta
 from decimal import Decimal
 from zoneinfo import ZoneInfo
 from boto3.dynamodb.conditions import Key
+import requests
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 st.set_page_config(page_title="Freeport Analytics", page_icon="📊", layout="wide")
 
@@ -371,6 +373,35 @@ def fetch_sol_balance(address: str) -> float | None:
         return None
 
 
+@st.cache_data(ttl=300)
+def get_wallet_balance_usd(wallet_address: str) -> float:
+    """Fetch total USD value of all tokens in a wallet on Arbitrum + Solana via Ankr."""
+    try:
+        resp = requests.post("https://rpc.ankr.com/multichain", json={
+            "jsonrpc": "2.0",
+            "method": "ankr_getAccountBalance",
+            "params": {"walletAddress": wallet_address, "blockchain": ["arbitrum", "solana"]},
+            "id": 1,
+        }, timeout=15)
+        data = resp.json()
+        assets = data.get("result", {}).get("assets", [])
+        return sum(float(a.get("balanceUsd", 0)) for a in assets)
+    except Exception:
+        return 0.0
+
+
+@st.cache_data(ttl=300)
+def get_all_wallet_balances(wallet_addresses: tuple) -> dict:
+    """Fetch USD balances for multiple wallets concurrently."""
+    balances = {}
+    with ThreadPoolExecutor(max_workers=10) as executor:
+        futures = {executor.submit(get_wallet_balance_usd, addr): addr for addr in wallet_addresses}
+        for future in as_completed(futures):
+            addr = futures[future]
+            balances[addr] = future.result()
+    return balances
+
+
 def events_to_df(events: list) -> pd.DataFrame:
     if not events:
         return pd.DataFrame()
@@ -534,6 +565,40 @@ with tab_overview:
         mau = user_df[user_df["date"] >= (today - timedelta(days=30)).strftime("%Y-%m-%d")]["wallet_address"].nunique()
         col_w.metric("WAU (7d)", fmt_number(wau))
         col_m.metric("MAU (30d)", fmt_number(mau))
+
+        st.markdown("---")
+
+        # --- On-Chain Wallet Balances ---
+        st.subheader("Wallet Balances (Arbitrum + Solana)")
+        all_wallets = tuple(sorted(user_df["wallet_address"].unique()))
+        with st.spinner(f"Fetching on-chain balances for {len(all_wallets)} wallets..."):
+            balances = get_all_wallet_balances(all_wallets)
+
+        total_value = sum(balances.values())
+        wallets_with_balance = {k: v for k, v in balances.items() if v > 0}
+        num_funded = len(wallets_with_balance)
+        avg_balance = total_value / num_funded if num_funded > 0 else 0
+
+        wb1, wb2, wb3 = st.columns(3)
+        wb1.metric("Total Value (All Wallets)", f"${total_value:,.2f}")
+        wb2.metric("Funded Wallets", f"{num_funded} / {len(all_wallets)}")
+        wb3.metric("Avg Balance", f"${avg_balance:,.2f}")
+
+        with st.expander(f"View all wallet balances ({num_funded} funded)"):
+            bal_rows = [{"wallet_address": addr, "balance_usd": bal} for addr, bal in balances.items() if bal > 0]
+            if bal_rows:
+                bal_df = pd.DataFrame(bal_rows).sort_values("balance_usd", ascending=False).reset_index(drop=True)
+                bal_df["wallet_short"] = bal_df["wallet_address"].apply(short_wallet)
+                bal_df["balance_usd"] = bal_df["balance_usd"].round(2)
+                st.dataframe(
+                    bal_df[["wallet_short", "wallet_address", "balance_usd"]].rename(columns={
+                        "wallet_short": "Wallet", "wallet_address": "Full Address",
+                        "balance_usd": "Balance ($)",
+                    }),
+                    use_container_width=True, hide_index=True,
+                )
+            else:
+                st.info("No wallets with a balance found.")
 
         st.markdown("---")
 
