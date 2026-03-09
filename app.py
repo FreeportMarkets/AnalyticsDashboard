@@ -10,8 +10,6 @@ from datetime import datetime, timedelta
 from decimal import Decimal
 from zoneinfo import ZoneInfo
 from boto3.dynamodb.conditions import Key
-import requests
-from concurrent.futures import ThreadPoolExecutor, as_completed
 
 st.set_page_config(page_title="Freeport Analytics", page_icon="📊", layout="wide")
 
@@ -373,34 +371,6 @@ def fetch_sol_balance(address: str) -> float | None:
         return None
 
 
-@st.cache_data(ttl=300)
-def get_wallet_balance_usd(wallet_address: str) -> float:
-    """Fetch total USD value of all tokens in a wallet on Arbitrum + Solana via Ankr."""
-    try:
-        resp = requests.post("https://rpc.ankr.com/multichain", json={
-            "jsonrpc": "2.0",
-            "method": "ankr_getAccountBalance",
-            "params": {"walletAddress": wallet_address, "blockchain": ["arbitrum", "solana"]},
-            "id": 1,
-        }, timeout=15)
-        data = resp.json()
-        assets = data.get("result", {}).get("assets", [])
-        return sum(float(a.get("balanceUsd", 0)) for a in assets)
-    except Exception:
-        return 0.0
-
-
-@st.cache_data(ttl=300)
-def get_all_wallet_balances(wallet_addresses: tuple) -> dict:
-    """Fetch USD balances for multiple wallets concurrently."""
-    balances = {}
-    with ThreadPoolExecutor(max_workers=10) as executor:
-        futures = {executor.submit(get_wallet_balance_usd, addr): addr for addr in wallet_addresses}
-        for future in as_completed(futures):
-            addr = futures[future]
-            balances[addr] = future.result()
-    return balances
-
 
 def events_to_df(events: list) -> pd.DataFrame:
     if not events:
@@ -463,9 +433,10 @@ start_str = start_date.strftime("%Y-%m-%d")
 end_str = end_date.strftime("%Y-%m-%d")
 num_days = (end_date - start_date).days + 1
 
-with st.spinner("Loading analytics data..."):
+with st.spinner("Loading data..."):
     events = load_events_range(start_str, end_str)
     df = events_to_df(events)
+    trades = load_trades_range(start_str, end_str)
 
 # Filter out server/system entries from user metrics
 SYSTEM_WALLETS = {"server", "unknown", "system", ""}
@@ -568,37 +539,48 @@ with tab_overview:
 
         st.markdown("---")
 
-        # --- On-Chain Wallet Balances ---
-        st.subheader("Wallet Balances (Arbitrum + Solana)")
-        all_wallets = tuple(sorted(user_df["wallet_address"].unique()))
-        with st.spinner(f"Fetching on-chain balances for {len(all_wallets)} wallets..."):
-            balances = get_all_wallet_balances(all_wallets)
+        # --- Trading Snapshot + User Insights ---
+        if trades:
+            tdf_ov = pd.DataFrame(trades)
+            if "amount_usd" in tdf_ov.columns:
+                tdf_ov["amount_usd"] = pd.to_numeric(tdf_ov["amount_usd"], errors="coerce")
+            tdf_ov = apply_perps_leverage(tdf_ov)
+            trades_only_ov = tdf_ov[tdf_ov["type"].isin(["swap", "perps"])] if "type" in tdf_ov.columns else tdf_ov
+            deposits_ov = tdf_ov[tdf_ov["type"] == "deposit"] if "type" in tdf_ov.columns else pd.DataFrame()
 
-        total_value = sum(balances.values())
-        wallets_with_balance = {k: v for k, v in balances.items() if v > 0}
-        num_funded = len(wallets_with_balance)
-        avg_balance = total_value / num_funded if num_funded > 0 else 0
+            trade_vol = trades_only_ov["amount_usd"].sum() if not trades_only_ov.empty and "amount_usd" in trades_only_ov.columns else 0
+            dep_vol = deposits_ov["amount_usd"].sum() if not deposits_ov.empty and "amount_usd" in deposits_ov.columns else 0
+            num_traders = trades_only_ov["wallet_address"].nunique() if not trades_only_ov.empty and "wallet_address" in trades_only_ov.columns else 0
+            trader_pct = (num_traders / total_unique * 100) if total_unique > 0 else 0
 
-        wb1, wb2, wb3 = st.columns(3)
-        wb1.metric("Total Value (All Wallets)", f"${total_value:,.2f}")
-        wb2.metric("Funded Wallets", f"{num_funded} / {len(all_wallets)}")
-        wb3.metric("Avg Balance", f"${avg_balance:,.2f}")
+            tv1, tv2, tv3, tv4 = st.columns(4)
+            tv1.metric("Trading Volume", f"${fmt_number(trade_vol)}")
+            tv2.metric("Deposit Volume", f"${fmt_number(dep_vol)}")
+            tv3.metric("Active Traders", fmt_number(num_traders))
+            tv4.metric("Trader %", f"{trader_pct:.0f}%")
 
-        with st.expander(f"View all wallet balances ({num_funded} funded)"):
-            bal_rows = [{"wallet_address": addr, "balance_usd": bal} for addr, bal in balances.items() if bal > 0]
-            if bal_rows:
-                bal_df = pd.DataFrame(bal_rows).sort_values("balance_usd", ascending=False).reset_index(drop=True)
-                bal_df["wallet_short"] = bal_df["wallet_address"].apply(short_wallet)
-                bal_df["balance_usd"] = bal_df["balance_usd"].round(2)
-                st.dataframe(
-                    bal_df[["wallet_short", "wallet_address", "balance_usd"]].rename(columns={
-                        "wallet_short": "Wallet", "wallet_address": "Full Address",
-                        "balance_usd": "Balance ($)",
-                    }),
-                    use_container_width=True, hide_index=True,
-                )
-            else:
-                st.info("No wallets with a balance found.")
+        # New vs Returning users
+        # Users whose first-ever event is within this date range = new
+        first_seen_dates = user_df.groupby("wallet_address")["date"].min()
+        new_users = first_seen_dates[first_seen_dates >= start_str].count()
+        returning_users = total_unique - new_users
+
+        # Events per user
+        avg_events_per_user = len(user_df) / total_unique if total_unique > 0 else 0
+
+        nu1, nu2, nu3 = st.columns(3)
+        nu1.metric("New Users", fmt_number(new_users), delta=f"{new_users / total_unique * 100:.0f}% of total" if total_unique > 0 else None)
+        nu2.metric("Returning Users", fmt_number(returning_users))
+        nu3.metric("Events / User", f"{avg_events_per_user:.1f}")
+
+        # Platform breakdown
+        if "platform" in user_df.columns:
+            plat_counts = user_df.groupby("platform")["wallet_address"].nunique()
+            plat_counts = plat_counts[plat_counts.index != "server"].sort_values(ascending=False)
+            if not plat_counts.empty:
+                plat_cols = st.columns(len(plat_counts))
+                for col, (plat, count) in zip(plat_cols, plat_counts.items()):
+                    col.metric(f"{plat.title()}", f"{count} users")
 
         st.markdown("---")
 
@@ -710,9 +692,6 @@ with tab_users:
 
         # --- Top Traders ---
         st.subheader("Top Traders")
-        with st.spinner("Loading trade data..."):
-            trades = load_trades_range(start_str, end_str)
-
         if trades:
             tdf = pd.DataFrame(trades)
             # Exclude deposits from trader leaderboards
@@ -1003,9 +982,6 @@ with tab_funnels:
 # TAB 5: Trades
 # =====================
 with tab_trades:
-    with st.spinner("Loading trade data..."):
-        trades = load_trades_range(start_str, end_str)
-
     if not trades:
         st.info("No trades found for this date range.")
     else:
