@@ -667,6 +667,84 @@ with tab_overview:
                         tc3.metric("iOS Trades", fmt_number(ios_trade_ct))
                         tc4.metric("Android Trades", fmt_number(android_trade_ct))
 
+                        # Perps breakdown by platform
+                        if "type" in tdf_plat.columns:
+                            perps_all = tdf_plat[tdf_plat["type"] == "perps"]
+                            if not perps_all.empty:
+                                ios_perps = perps_all[perps_all["wallet_address"].isin(ios_wallets)]
+                                android_perps = perps_all[perps_all["wallet_address"].isin(android_wallets)]
+
+                                ios_p_vol = ios_perps["amount_usd"].sum() if not ios_perps.empty else 0
+                                android_p_vol = android_perps["amount_usd"].sum() if not android_perps.empty else 0
+                                ios_p_ct = len(ios_perps)
+                                android_p_ct = len(android_perps)
+                                ios_p_traders = ios_perps["wallet_address"].nunique() if not ios_perps.empty else 0
+                                android_p_traders = android_perps["wallet_address"].nunique() if not android_perps.empty else 0
+                                ios_p_avg = ios_p_vol / ios_p_ct if ios_p_ct > 0 else 0
+                                android_p_avg = android_p_vol / android_p_ct if android_p_ct > 0 else 0
+
+                                st.markdown("**Perpetuals**")
+                                pp1, pp2, pp3, pp4 = st.columns(4)
+                                pp1.metric("iOS Perps Volume", f"${fmt_number(ios_p_vol)}")
+                                pp2.metric("Android Perps Volume", f"${fmt_number(android_p_vol)}")
+                                pp3.metric("iOS Perps Traders", fmt_number(ios_p_traders))
+                                pp4.metric("Android Perps Traders", fmt_number(android_p_traders))
+
+                                pp5, pp6, pp7, pp8 = st.columns(4)
+                                pp5.metric("iOS Orders", fmt_number(ios_p_ct))
+                                pp6.metric("Android Orders", fmt_number(android_p_ct))
+                                pp7.metric("iOS Avg Order", f"${ios_p_avg:,.0f}")
+                                pp8.metric("Android Avg Order", f"${android_p_avg:,.0f}")
+
+                                # Leverage comparison
+                                if "leverage" in perps_all.columns:
+                                    ios_lev = pd.to_numeric(ios_perps["leverage"], errors="coerce").dropna() if not ios_perps.empty else pd.Series(dtype=float)
+                                    and_lev = pd.to_numeric(android_perps["leverage"], errors="coerce").dropna() if not android_perps.empty else pd.Series(dtype=float)
+                                    lv1, lv2 = st.columns(2)
+                                    lv1.metric("iOS Avg Leverage", f"{ios_lev.mean():.1f}x" if not ios_lev.empty else "N/A")
+                                    lv2.metric("Android Avg Leverage", f"{and_lev.mean():.1f}x" if not and_lev.empty else "N/A")
+
+                                # Long/Short split per platform
+                                if "side" in perps_all.columns:
+                                    col_ios_ls, col_and_ls = st.columns(2)
+                                    with col_ios_ls:
+                                        if not ios_perps.empty:
+                                            ios_sides = ios_perps["side"].value_counts().reset_index()
+                                            ios_sides.columns = ["side", "count"]
+                                            colors = {"Long": ACCENT, "Short": ACCENT_RED, "long": ACCENT, "short": ACCENT_RED}
+                                            fig = px.pie(ios_sides, values="count", names="side", hole=0.5,
+                                                         color="side", color_discrete_map=colors)
+                                            fig.update_traces(textinfo="label+percent+value", textfont=dict(size=13, color="white"))
+                                            fig.update_layout(**PLOTLY_LAYOUT, title="iOS Long vs Short", height=300, showlegend=False)
+                                            st.plotly_chart(fig, use_container_width=True)
+                                    with col_and_ls:
+                                        if not android_perps.empty:
+                                            and_sides = android_perps["side"].value_counts().reset_index()
+                                            and_sides.columns = ["side", "count"]
+                                            fig = px.pie(and_sides, values="count", names="side", hole=0.5,
+                                                         color="side", color_discrete_map=colors)
+                                            fig.update_traces(textinfo="label+percent+value", textfont=dict(size=13, color="white"))
+                                            fig.update_layout(**PLOTLY_LAYOUT, title="Android Long vs Short", height=300, showlegend=False)
+                                            st.plotly_chart(fig, use_container_width=True)
+
+                                # Top assets per platform
+                                if "asset" in perps_all.columns:
+                                    col_ios_a, col_and_a = st.columns(2)
+                                    with col_ios_a:
+                                        if not ios_perps.empty and "amount_usd" in ios_perps.columns:
+                                            ios_assets = ios_perps.groupby("asset")["amount_usd"].sum().sort_values(ascending=False).head(10).reset_index()
+                                            ios_assets.columns = ["asset", "volume"]
+                                            ios_assets["volume"] = ios_assets["volume"].round(0)
+                                            fig = make_h_bar(ios_assets, "volume", "asset", title="iOS Top Assets", color=BRAND, x_prefix="$")
+                                            st.plotly_chart(fig, use_container_width=True)
+                                    with col_and_a:
+                                        if not android_perps.empty and "amount_usd" in android_perps.columns:
+                                            and_assets = android_perps.groupby("asset")["amount_usd"].sum().sort_values(ascending=False).head(10).reset_index()
+                                            and_assets.columns = ["asset", "volume"]
+                                            and_assets["volume"] = and_assets["volume"].round(0)
+                                            fig = make_h_bar(and_assets, "volume", "asset", title="Android Top Assets", color=ACCENT, x_prefix="$")
+                                            st.plotly_chart(fig, use_container_width=True)
+
         st.markdown("---")
 
         # Events by day + Top events side by side
