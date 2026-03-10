@@ -122,6 +122,15 @@ def fmt_hour(h):
     return f"{h - 12} PM"
 
 
+def _detect_ostium(frame, mask):
+    """Detect Ostium rows by checking category, source, or venue fields."""
+    ostium = pd.Series(False, index=frame.index)
+    for col in ("category", "source", "venue"):
+        if col in frame.columns:
+            ostium = ostium | (frame[col].str.lower() == "ostium")
+    return mask & ostium
+
+
 def apply_perps_leverage(frame):
     """Adjust perps volume: opens = amount*leverage, closes = size*price (position notional)."""
     if "type" not in frame.columns or "amount_usd" not in frame.columns:
@@ -135,26 +144,21 @@ def apply_perps_leverage(frame):
     else:
         close_mask = pd.Series(False, index=frame.index)
     open_mask = perps_mask & ~close_mask
+    # Detect Ostium rows — amount_usd is already notional, size is already USD
+    ostium_mask = _detect_ostium(frame, perps_mask)
     # Opens: collateral × leverage = notional (except Ostium where amount_usd is already notional)
     if "leverage" in frame.columns:
         frame["leverage"] = pd.to_numeric(frame["leverage"], errors="coerce").fillna(1)
-        if "category" in frame.columns:
-            ostium_open = open_mask & (frame["category"] == "ostium")
-            other_open = open_mask & (frame["category"] != "ostium")
-            frame.loc[other_open, "amount_usd"] = frame.loc[other_open, "amount_usd"] * frame.loc[other_open, "leverage"]
-        else:
-            frame.loc[open_mask, "amount_usd"] = frame.loc[open_mask, "amount_usd"] * frame.loc[open_mask, "leverage"]
+        non_ostium_open = open_mask & ~ostium_mask
+        frame.loc[non_ostium_open, "amount_usd"] = frame.loc[non_ostium_open, "amount_usd"] * frame.loc[non_ostium_open, "leverage"]
     # Closes: size × price = full position notional (except Ostium where size IS USD notional)
     if "size" in frame.columns and "price" in frame.columns:
         frame["size"] = pd.to_numeric(frame["size"], errors="coerce").fillna(0)
         frame["price"] = pd.to_numeric(frame["price"], errors="coerce").fillna(0)
-        if "category" in frame.columns:
-            ostium_close = close_mask & (frame["category"] == "ostium")
-            other_close = close_mask & (frame["category"] != "ostium")
-            frame.loc[other_close, "amount_usd"] = frame.loc[other_close, "size"].abs() * frame.loc[other_close, "price"]
-            frame.loc[ostium_close, "amount_usd"] = frame.loc[ostium_close, "size"].abs()
-        else:
-            frame.loc[close_mask, "amount_usd"] = frame.loc[close_mask, "size"].abs() * frame.loc[close_mask, "price"]
+        non_ostium_close = close_mask & ~ostium_mask
+        ostium_close = close_mask & ostium_mask
+        frame.loc[non_ostium_close, "amount_usd"] = frame.loc[non_ostium_close, "size"].abs() * frame.loc[non_ostium_close, "price"]
+        frame.loc[ostium_close, "amount_usd"] = frame.loc[ostium_close, "size"].abs()
     return frame
 
 
@@ -1353,35 +1357,9 @@ with tab_trades:
         perps_df = tdf[tdf["type"] == "perps"].copy() if "type" in tdf.columns else pd.DataFrame()
         deposit_df = tdf[tdf["type"] == "deposit"].copy() if "type" in tdf.columns else pd.DataFrame()
 
-        # Compute notional volume: opens = amount*leverage, closes = size*price
-        if not perps_df.empty and "amount_usd" in perps_df.columns:
-            if "leverage" in perps_df.columns:
-                perps_df["leverage"] = pd.to_numeric(perps_df["leverage"], errors="coerce").fillna(1)
-            if "size" in perps_df.columns:
-                perps_df["size"] = pd.to_numeric(perps_df["size"], errors="coerce").fillna(0)
-            if "price" in perps_df.columns:
-                perps_df["price"] = pd.to_numeric(perps_df["price"], errors="coerce").fillna(0)
-
-            close_mask = perps_df["is_close"].astype(bool) if "is_close" in perps_df.columns else pd.Series(False, index=perps_df.index)
-            open_mask = ~close_mask
-
-            # Opens: collateral × leverage (except Ostium where amount_usd is already notional)
-            if "leverage" in perps_df.columns:
-                if "category" in perps_df.columns:
-                    ostium_open = open_mask & (perps_df["category"] == "ostium")
-                    other_open = open_mask & (perps_df["category"] != "ostium")
-                    perps_df.loc[other_open, "amount_usd"] = perps_df.loc[other_open, "amount_usd"] * perps_df.loc[other_open, "leverage"]
-                else:
-                    perps_df.loc[open_mask, "amount_usd"] = perps_df.loc[open_mask, "amount_usd"] * perps_df.loc[open_mask, "leverage"]
-            # Closes: size × price (full position notional) — except Ostium where size IS USD notional
-            if "size" in perps_df.columns and "price" in perps_df.columns:
-                if "category" in perps_df.columns:
-                    ostium_close = close_mask & (perps_df["category"] == "ostium")
-                    other_close = close_mask & (perps_df["category"] != "ostium")
-                    perps_df.loc[other_close, "amount_usd"] = perps_df.loc[other_close, "size"].abs() * perps_df.loc[other_close, "price"]
-                    perps_df.loc[ostium_close, "amount_usd"] = perps_df.loc[ostium_close, "size"].abs()
-                else:
-                    perps_df.loc[close_mask, "amount_usd"] = perps_df.loc[close_mask, "size"].abs() * perps_df.loc[close_mask, "price"]
+        # Compute notional volume (reuse shared helper — handles Ostium exception)
+        if not perps_df.empty:
+            perps_df = apply_perps_leverage(perps_df)
 
         trades_only = pd.concat([swap_df, perps_df], ignore_index=True)  # exclude deposits
 
