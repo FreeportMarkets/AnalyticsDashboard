@@ -2254,54 +2254,74 @@ with tab_services:
                 st.plotly_chart(fig, use_container_width=True)
 
     # ============================================================
-    # SECTION 3: Log-Derived Insights (aggregated from syslog)
+    # SECTION 3: Error Dashboard (syslog priority-based)
     # ============================================================
     st.markdown("---")
-    st.markdown("### Service Activity Insights")
-    st.caption("Aggregated from service logs via CloudWatch Insights")
+    st.markdown("### Error Dashboard")
+    st.caption("Errors detected via syslog priority level `<3>` (error) — parsed from all Render services")
 
     insight_hours = min(sh_hours, 24)  # Insights queries capped at 24h for speed
 
-    # --- Error breakdown by service ---
+    # --- Errors by service (syslog priority 3 = error) ---
     err_by_svc = query_render_logs_stats(
-        'filter @message like /(?i)(error|exception|fatal|crash|fail|ECONNREFUSED|ETIMEDOUT|500)/'
-        ' | parse @message /(?<svc_host>[a-z]+-[a-z]+(-[a-z]+)?)/'
-        ' | stats count(*) as errors by svc_host'
+        'parse @message /^<(?<pri>\\d+)>/'
+        ' | filter pri == 3'
+        ' | parse @message /^<\\d+>\\d+ \\S+ (?<svc>\\S+)/'
+        ' | stats count(*) as errors by svc'
         ' | sort errors desc'
-        ' | limit 10',
+        ' | limit 15',
         hours=insight_hours,
     )
 
-    # --- Error timeline ---
+    # --- Error timeline by hour ---
     err_timeline = query_render_logs_stats(
-        'filter @message like /(?i)(error|exception|fatal|crash|fail|500)/'
+        'parse @message /^<(?<pri>\\d+)>/'
+        ' | filter pri == 3'
         ' | stats count(*) as errors by bin(1h) as hour'
         ' | sort hour asc',
         hours=insight_hours,
     )
 
-    # --- HTTP status breakdown ---
-    http_status = query_render_logs_stats(
-        'filter @message like /HTTP/'
-        ' | parse @message /(?<status_code>[245]\\d{2})/'
-        ' | stats count(*) as cnt by status_code'
+    # --- Top error messages (extract error field or full body) ---
+    err_messages = query_render_logs_stats(
+        'parse @message /^<(?<pri>\\d+)>/'
+        ' | filter pri == 3'
+        ' | parse @message /^<\\d+>\\d+ \\S+ (?<svc>\\S+) \\S+ \\d+ \\S+ - (?<body>.*)/'
+        ' | parse body /"error":"(?<err_msg>[^"]+)"/'
+        ' | stats count(*) as cnt by svc, err_msg'
         ' | sort cnt desc'
-        ' | limit 10',
+        ' | limit 20',
         hours=insight_hours,
     )
 
-    # --- Log volume by service ---
-    log_volume = query_render_logs_stats(
-        'parse @message /(?<svc_host>[a-z]+-[a-z]+(-[a-z]+)?)/'
-        ' | stats count(*) as log_count by svc_host'
-        ' | sort log_count desc'
-        ' | limit 10',
+    # --- Recent errors (individual entries) ---
+    recent_errors = query_render_logs_stats(
+        'parse @message /^<(?<pri>\\d+)>/'
+        ' | filter pri == 3'
+        ' | parse @message /^<\\d+>\\d+ (?<ts>\\S+) (?<svc>\\S+) \\S+ \\d+ \\S+ - (?<body>.*)/'
+        ' | fields ts, svc, body'
+        ' | sort @timestamp desc'
+        ' | limit 30',
         hours=insight_hours,
     )
 
-    col_errs, col_vol = st.columns(2)
+    # --- Summary banner ---
+    total_errors = 0
+    if not err_by_svc.empty and "errors" in err_by_svc.columns:
+        err_by_svc["errors"] = pd.to_numeric(err_by_svc["errors"], errors="coerce")
+        total_errors = int(err_by_svc["errors"].sum())
 
-    with col_errs:
+    if total_errors > 0:
+        top_svc = err_by_svc.iloc[0]["svc"] if "svc" in err_by_svc.columns else "unknown"
+        top_cnt = int(err_by_svc.iloc[0]["errors"])
+        st.error(f"**{total_errors} errors** in the last {insight_hours}h — most from **{top_svc}** ({top_cnt})")
+    else:
+        st.success(f"No errors in the last {insight_hours}h")
+
+    # --- Charts row 1: Error timeline + Errors by service ---
+    col_timeline, col_svc = st.columns(2)
+
+    with col_timeline:
         if not err_timeline.empty and "errors" in err_timeline.columns:
             err_timeline["errors"] = pd.to_numeric(err_timeline["errors"], errors="coerce")
             if "hour" in err_timeline.columns:
@@ -2312,35 +2332,15 @@ with tab_services:
                 marker_color=ACCENT_RED,
                 hovertemplate="<b>%{x}</b><br>%{y} errors<extra></extra>",
             ))
-            fig.update_layout(**PLOTLY_LAYOUT, title=f"Errors per Hour (last {insight_hours}h)", height=300)
+            fig.update_layout(**PLOTLY_LAYOUT, title="Errors per Hour", height=300)
             fig.update_xaxes(title="", tickformat="%H:%M", **AXIS_DEFAULTS)
             fig.update_yaxes(title="errors", **AXIS_DEFAULTS)
             st.plotly_chart(fig, use_container_width=True)
-        else:
-            st.success(f"No errors detected in the last {insight_hours}h")
 
-    with col_vol:
-        if not log_volume.empty and "log_count" in log_volume.columns and "svc_host" in log_volume.columns:
-            log_volume["log_count"] = pd.to_numeric(log_volume["log_count"], errors="coerce")
+    with col_svc:
+        if not err_by_svc.empty and "svc" in err_by_svc.columns:
             fig = go.Figure(go.Bar(
-                y=log_volume["svc_host"], x=log_volume["log_count"],
-                orientation="h", marker_color=BRAND,
-                text=[fmt_number(v) for v in log_volume["log_count"]],
-                textposition="auto",
-                hovertemplate="<b>%{y}</b><br>%{x:,.0f} logs<extra></extra>",
-            ))
-            fig.update_layout(**PLOTLY_LAYOUT, title=f"Log Volume by Service (last {insight_hours}h)", height=300,
-                              yaxis=dict(autorange="reversed", gridcolor="rgba(0,0,0,0)"))
-            fig.update_xaxes(title="", **AXIS_DEFAULTS)
-            st.plotly_chart(fig, use_container_width=True)
-
-    col_errsvc, col_httpstatus = st.columns(2)
-
-    with col_errsvc:
-        if not err_by_svc.empty and "errors" in err_by_svc.columns and "svc_host" in err_by_svc.columns:
-            err_by_svc["errors"] = pd.to_numeric(err_by_svc["errors"], errors="coerce")
-            fig = go.Figure(go.Bar(
-                y=err_by_svc["svc_host"], x=err_by_svc["errors"],
+                y=err_by_svc["svc"], x=err_by_svc["errors"],
                 orientation="h", marker_color=ACCENT_RED,
                 text=[fmt_number(v) for v in err_by_svc["errors"]],
                 textposition="auto",
@@ -2351,30 +2351,170 @@ with tab_services:
             fig.update_xaxes(title="", **AXIS_DEFAULTS)
             st.plotly_chart(fig, use_container_width=True)
 
-    with col_httpstatus:
-        if not http_status.empty and "cnt" in http_status.columns and "status_code" in http_status.columns:
-            http_status["cnt"] = pd.to_numeric(http_status["cnt"], errors="coerce")
-            # Color by status code category
-            status_colors = []
-            for code in http_status["status_code"]:
-                if str(code).startswith("2"):
-                    status_colors.append(ACCENT)
-                elif str(code).startswith("4"):
-                    status_colors.append(ACCENT_WARN)
-                elif str(code).startswith("5"):
-                    status_colors.append(ACCENT_RED)
-                else:
-                    status_colors.append(TEXT_MUTED)
+    # --- Top error messages table ---
+    if not err_messages.empty and "cnt" in err_messages.columns:
+        st.markdown("#### Top Error Messages")
+        err_messages["cnt"] = pd.to_numeric(err_messages["cnt"], errors="coerce")
+        # Fill missing err_msg with a generic label
+        if "err_msg" in err_messages.columns:
+            err_messages["err_msg"] = err_messages["err_msg"].fillna("(unstructured error)")
+        display_df = err_messages[["svc", "err_msg", "cnt"]].rename(
+            columns={"svc": "Service", "err_msg": "Error Message", "cnt": "Count"}
+        ) if "svc" in err_messages.columns and "err_msg" in err_messages.columns else err_messages
+        st.dataframe(display_df, use_container_width=True, hide_index=True, height=300)
+
+    # --- Recent errors table ---
+    if not recent_errors.empty:
+        st.markdown("#### Recent Errors")
+        display_cols = [c for c in ["ts", "svc", "body"] if c in recent_errors.columns]
+        if display_cols:
+            recent_display = recent_errors[display_cols].rename(
+                columns={"ts": "Time", "svc": "Service", "body": "Error Details"}
+            )
+            st.dataframe(recent_display, use_container_width=True, hide_index=True, height=400)
+
+    # --- Swap server specific: order errors ---
+    st.markdown("---")
+    st.markdown("### Swap Server — Order Errors")
+    st.caption("Jupiter/swap order failures parsed from swap-server-1 logs")
+
+    swap_errors = query_render_logs_stats(
+        'filter @message like /swap-server/ and @message like /Order error/'
+        ' | parse @message /^<\\d+>\\d+ (?<ts>\\S+) \\S+ \\S+ \\d+ \\S+ - \\[(?<provider>[^\\]]+)\\] Order error: HTTP (?<status>\\d+) - (?<from_token>\\S+) -> (?<to_token>\\S+) .*"error":"(?<err_msg>[^"]+)"/'
+        ' | stats count(*) as cnt by err_msg, provider'
+        ' | sort cnt desc',
+        hours=insight_hours,
+    )
+
+    swap_errors_timeline = query_render_logs_stats(
+        'filter @message like /swap-server/ and @message like /Order error/'
+        ' | stats count(*) as errors by bin(1h) as hour'
+        ' | sort hour asc',
+        hours=insight_hours,
+    )
+
+    swap_recent = query_render_logs_stats(
+        'filter @message like /swap-server/ and @message like /Order error/'
+        ' | parse @message /^<\\d+>\\d+ (?<ts>\\S+) \\S+ \\S+ \\d+ \\S+ - \\[(?<provider>[^\\]]+)\\] Order error: HTTP (?<status>\\d+) - (?<from_mint>\\S+) -> (?<to_mint>\\S+) .*"error":"(?<err_msg>[^"]+)"/'
+        ' | fields ts, provider, status, from_mint, to_mint, err_msg'
+        ' | sort @timestamp desc'
+        ' | limit 20',
+        hours=insight_hours,
+    )
+
+    col_swap_chart, col_swap_breakdown = st.columns(2)
+    with col_swap_chart:
+        if not swap_errors_timeline.empty and "errors" in swap_errors_timeline.columns:
+            swap_errors_timeline["errors"] = pd.to_numeric(swap_errors_timeline["errors"], errors="coerce")
+            if "hour" in swap_errors_timeline.columns:
+                swap_errors_timeline["hour"] = pd.to_datetime(swap_errors_timeline["hour"], errors="coerce")
             fig = go.Figure(go.Bar(
-                x=http_status["status_code"], y=http_status["cnt"],
-                marker_color=status_colors,
-                text=[fmt_number(v) for v in http_status["cnt"]],
-                textposition="auto",
-                hovertemplate="<b>HTTP %{x}</b><br>%{y:,.0f} responses<extra></extra>",
+                x=swap_errors_timeline.get("hour", swap_errors_timeline.index),
+                y=swap_errors_timeline["errors"],
+                marker_color=ACCENT_WARN,
+                hovertemplate="<b>%{x}</b><br>%{y} swap errors<extra></extra>",
             ))
-            fig.update_layout(**PLOTLY_LAYOUT, title="HTTP Status Codes", height=300)
+            fig.update_layout(**PLOTLY_LAYOUT, title="Swap Order Errors per Hour", height=280)
+            fig.update_xaxes(title="", tickformat="%H:%M", **AXIS_DEFAULTS)
+            fig.update_yaxes(title="errors", **AXIS_DEFAULTS)
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.success("No swap order errors")
+
+    with col_swap_breakdown:
+        if not swap_errors.empty and "cnt" in swap_errors.columns:
+            swap_errors["cnt"] = pd.to_numeric(swap_errors["cnt"], errors="coerce")
+            labels = []
+            for _, r in swap_errors.iterrows():
+                provider = r.get("provider", "")
+                msg = r.get("err_msg", "unknown")
+                labels.append(f"[{provider}] {msg}" if provider else msg)
+            fig = go.Figure(go.Bar(
+                y=labels, x=swap_errors["cnt"],
+                orientation="h", marker_color=ACCENT_WARN,
+                text=[str(int(v)) for v in swap_errors["cnt"]],
+                textposition="auto",
+                hovertemplate="<b>%{y}</b><br>%{x} occurrences<extra></extra>",
+            ))
+            fig.update_layout(**PLOTLY_LAYOUT, title="Swap Error Types", height=280,
+                              yaxis=dict(autorange="reversed", gridcolor="rgba(0,0,0,0)"))
             fig.update_xaxes(title="", **AXIS_DEFAULTS)
-            fig.update_yaxes(title="count", **AXIS_DEFAULTS)
+            st.plotly_chart(fig, use_container_width=True)
+
+    if not swap_recent.empty:
+        display_cols = [c for c in ["ts", "provider", "status", "from_mint", "to_mint", "err_msg"] if c in swap_recent.columns]
+        if display_cols:
+            swap_display = swap_recent[display_cols].copy()
+            # Shorten mint addresses for readability
+            for col in ["from_mint", "to_mint"]:
+                if col in swap_display.columns:
+                    swap_display[col] = swap_display[col].apply(
+                        lambda x: f"{x[:6]}...{x[-4:]}" if isinstance(x, str) and len(x) > 12 else x
+                    )
+            swap_display = swap_display.rename(columns={
+                "ts": "Time", "provider": "Provider", "status": "HTTP",
+                "from_mint": "From Token", "to_mint": "To Token", "err_msg": "Error",
+            })
+            st.dataframe(swap_display, use_container_width=True, hide_index=True)
+
+    # --- Twitter scraper: rejection stats ---
+    st.markdown("---")
+    st.markdown("### Twitter Scraper — Signal Analysis")
+
+    scraper_stats = query_render_logs_stats(
+        'filter @message like /twitter-scraper/'
+        ' | parse @message />>> (?<outcome>\\S+)/'
+        ' | filter outcome in ["SIGNAL:", "Not", "Written"]'
+        ' | stats count(*) as cnt by outcome'
+        ' | sort cnt desc',
+        hours=insight_hours,
+    )
+
+    scraper_signals = query_render_logs_stats(
+        'filter @message like /twitter-scraper/ and @message like /SIGNAL:/'
+        ' | parse @message />>> SIGNAL: (?<ticker>\\S+) (?<direction>\\S+)/'
+        ' | stats count(*) as cnt by ticker, direction'
+        ' | sort cnt desc'
+        ' | limit 15',
+        hours=insight_hours,
+    )
+
+    col_scrape_pie, col_scrape_signals = st.columns(2)
+    with col_scrape_pie:
+        if not scraper_stats.empty and "cnt" in scraper_stats.columns and "outcome" in scraper_stats.columns:
+            scraper_stats["cnt"] = pd.to_numeric(scraper_stats["cnt"], errors="coerce")
+            # Map outcome labels
+            label_map = {"SIGNAL:": "Signals Generated", "Not": "Rejected (Not Tradable)", "Written": "Written to DB/Sheet"}
+            scraper_stats["label"] = scraper_stats["outcome"].map(label_map).fillna(scraper_stats["outcome"])
+            color_map = {"Signals Generated": ACCENT, "Rejected (Not Tradable)": ACCENT_WARN, "Written to DB/Sheet": BRAND}
+            colors = [color_map.get(l, TEXT_MUTED) for l in scraper_stats["label"]]
+            fig = go.Figure(go.Pie(
+                labels=scraper_stats["label"], values=scraper_stats["cnt"],
+                marker=dict(colors=colors),
+                textinfo="label+value", hole=0.4,
+                hovertemplate="<b>%{label}</b><br>%{value:,} (%{percent})<extra></extra>",
+            ))
+            fig.update_layout(**PLOTLY_LAYOUT, title="Tweet Analysis Outcomes", height=300, showlegend=False)
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.info("No scraper data available")
+
+    with col_scrape_signals:
+        if not scraper_signals.empty and "cnt" in scraper_signals.columns and "ticker" in scraper_signals.columns:
+            scraper_signals["cnt"] = pd.to_numeric(scraper_signals["cnt"], errors="coerce")
+            direction = scraper_signals.get("direction", pd.Series([""] * len(scraper_signals)))
+            colors = [ACCENT if d == "BUY" else ACCENT_RED if d == "SELL" else TEXT_MUTED for d in direction]
+            labels = [f"{r.get('ticker', '?')} {r.get('direction', '')}" for _, r in scraper_signals.iterrows()]
+            fig = go.Figure(go.Bar(
+                y=labels, x=scraper_signals["cnt"],
+                orientation="h", marker_color=colors,
+                text=[str(int(v)) for v in scraper_signals["cnt"]],
+                textposition="auto",
+                hovertemplate="<b>%{y}</b><br>%{x} signals<extra></extra>",
+            ))
+            fig.update_layout(**PLOTLY_LAYOUT, title="Trade Signals Generated", height=300,
+                              yaxis=dict(autorange="reversed", gridcolor="rgba(0,0,0,0)"))
+            fig.update_xaxes(title="", **AXIS_DEFAULTS)
             st.plotly_chart(fig, use_container_width=True)
 
     # ============================================================
