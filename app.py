@@ -232,6 +232,7 @@ CW_ENVIRONMENT = "development"
 
 RENDER_CW_NAMESPACE = "Render"
 RENDER_SERVICES = ["twitter-scraper", "recommender", "swap-server", "trade-news-server", "payments-server"]
+CF_NAMESPACE = "AWS/CloudFront"
 
 
 @st.cache_data(ttl=300)
@@ -360,6 +361,92 @@ def query_render_logs(log_group, query, hours=1, limit=50):
         )
         query_id = resp["queryId"]
         # Poll for results (max 10s)
+        import time
+        for _ in range(20):
+            result = logs.get_query_results(queryId=query_id)
+            if result["status"] == "Complete":
+                rows = []
+                for r in result["results"]:
+                    row = {f["field"]: f["value"] for f in r}
+                    rows.append(row)
+                return pd.DataFrame(rows) if rows else pd.DataFrame()
+            time.sleep(0.5)
+        return pd.DataFrame()
+    except Exception:
+        return pd.DataFrame()
+
+
+@st.cache_data(ttl=300)
+def load_cloudfront_metric(metric_name, stat="Sum", period=300, hours=24, dist_id=None):
+    """Fetch a CloudFront metric. Discovers distribution ID if not provided."""
+    try:
+        cw = get_cloudwatch()
+        if not dist_id:
+            # Discover distribution IDs
+            listed = cw.list_metrics(Namespace=CF_NAMESPACE, MetricName="Requests")
+            dist_ids = sorted(set(
+                d["Value"] for m in listed.get("Metrics", [])
+                for d in m.get("Dimensions", []) if d["Name"] == "DistributionId"
+            ))
+            if not dist_ids:
+                return pd.DataFrame(columns=["timestamp", "value"])
+            dist_id = dist_ids[0]  # Use first distribution
+        end = datetime.utcnow()
+        start = end - timedelta(hours=hours)
+        dims = [
+            {"Name": "DistributionId", "Value": dist_id},
+            {"Name": "Region", "Value": "Global"},
+        ]
+        resp = cw.get_metric_statistics(
+            Namespace=CF_NAMESPACE,
+            MetricName=metric_name,
+            Dimensions=dims,
+            StartTime=start,
+            EndTime=end,
+            Period=period,
+            Statistics=[stat],
+        )
+        points = resp.get("Datapoints", [])
+        if not points:
+            return pd.DataFrame(columns=["timestamp", "value"])
+        df = pd.DataFrame(points)
+        df["timestamp"] = pd.to_datetime(df["Timestamp"])
+        df["value"] = df[stat]
+        return df[["timestamp", "value"]].sort_values("timestamp").reset_index(drop=True)
+    except Exception:
+        return pd.DataFrame(columns=["timestamp", "value"])
+
+
+@st.cache_data(ttl=300)
+def get_cloudfront_dist_id():
+    """Discover the CloudFront distribution ID from CloudWatch."""
+    try:
+        cw = get_cloudwatch()
+        listed = cw.list_metrics(Namespace=CF_NAMESPACE, MetricName="Requests")
+        dist_ids = sorted(set(
+            d["Value"] for m in listed.get("Metrics", [])
+            for d in m.get("Dimensions", []) if d["Name"] == "DistributionId"
+        ))
+        return dist_ids[0] if dist_ids else None
+    except Exception:
+        return None
+
+
+@st.cache_data(ttl=120)
+def query_render_logs_stats(query, hours=1):
+    """Run a CloudWatch Insights aggregation query, return DataFrame of results."""
+    try:
+        logs = get_logs_client()
+        end = datetime.utcnow()
+        start = end - timedelta(hours=hours)
+        resp = logs.start_query(
+            logGroupName="/render/logs",
+            startTime=int(start.timestamp()),
+            endTime=int(end.timestamp()),
+            queryString=query,
+            limit=1000,
+        )
+        query_id = resp["queryId"]
         import time
         for _ in range(20):
             result = logs.get_query_results(queryId=query_id)
@@ -2002,21 +2089,16 @@ with tab_backend:
 
 
 # =====================
-# TAB 8: Services Health (Render → OTel → CloudWatch)
+# TAB 8: Services Health (Render + CloudFront + Logs)
 # =====================
 with tab_services:
-    st.subheader("Render Services — Metrics & Logs")
-    st.caption("Twitter Scraper, Recommender, Swap Server, Trade News Server, Payments Server")
-    st.caption("Metrics: `Render` namespace in CloudWatch | Logs: `/render/logs` log group | Differentiated by `service.name` dimension")
+    st.subheader("Infrastructure Health")
 
     sh_hours = st.selectbox("Lookback", [1, 6, 12, 24, 48, 72, 168], index=3, key="sh_hours",
                              format_func=lambda h: f"{h}h" if h < 168 else "7 days")
     sh_period = 300 if sh_hours <= 24 else (900 if sh_hours <= 72 else 3600)
 
-    # --- Service Status Overview ---
-    st.markdown("### Service Overview")
-
-    # Discover all services reporting metrics (not just our hardcoded list)
+    # --- Discover services ---
     try:
         cw = get_cloudwatch()
         all_svc_metrics = cw.list_metrics(Namespace=RENDER_CW_NAMESPACE, MetricName="render.service.memory.usage")
@@ -2026,105 +2108,375 @@ with tab_services:
         ))
     except Exception:
         discovered_services = []
-
     if not discovered_services:
         discovered_services = RENDER_SERVICES
 
-    # Load key metrics per service
+    # --- Load metrics ---
     mem_df = load_render_metric_by_service("render.service.memory.usage", stat="Average", period=sh_period, hours=sh_hours)
     cpu_df = load_render_metric_by_service("render.service.cpu.time", stat="Average", period=sh_period, hours=sh_hours)
     http_df = load_render_metric_by_service("render.service.http.requests.total", stat="Sum", period=sh_period, hours=sh_hours)
     net_tx_df = load_render_metric_by_service("render.service.network.transmit.bytes", stat="Sum", period=sh_period, hours=sh_hours)
     latency_df = load_render_metric_by_service("render.service.http.requests.latency", stat="Average", period=sh_period, hours=sh_hours)
+    mem_limit_df = load_render_metric_by_service("render.service.memory.limit", stat="Maximum", period=sh_period, hours=sh_hours)
 
     has_metrics = not mem_df.empty or not cpu_df.empty or not http_df.empty
+
+    # ============================================================
+    # SECTION 1: Service Health Status (at-a-glance)
+    # ============================================================
+    st.markdown("### Service Health Status")
 
     if not has_metrics:
         st.info(
             "No Render metrics yet. Ensure Render Metrics Stream is configured:\n\n"
-            "- **Provider**: Custom\n"
-            "- **Endpoint**: `https://otel.freeportmarkets.com`\n"
-            "- **Token**: any value (e.g. `render-metrics`)\n\n"
-            "Metrics appear within ~5 minutes of configuration."
+            "- **Provider**: Custom | **Endpoint**: `https://otel.freeportmarkets.com` | **Token**: any value\n\n"
+            "Metrics appear within ~5 minutes."
         )
     else:
-        # Summary cards per service
+        # Build health status per service
         svc_cols = st.columns(min(len(discovered_services), 5))
         for i, svc in enumerate(discovered_services[:5]):
             svc_mem = mem_df[mem_df["service"] == svc] if not mem_df.empty else pd.DataFrame()
+            svc_limit = mem_limit_df[mem_limit_df["service"] == svc] if not mem_limit_df.empty else pd.DataFrame()
             svc_http = http_df[http_df["service"] == svc] if not http_df.empty else pd.DataFrame()
-            avg_mem_mb = svc_mem["value"].mean() / (1024 * 1024) if not svc_mem.empty else 0
-            total_http = int(svc_http["value"].sum()) if not svc_http.empty else 0
+
+            avg_mem = svc_mem["value"].mean() if not svc_mem.empty else 0
+            mem_limit = svc_limit["value"].max() if not svc_limit.empty else 0
+            mem_pct = (avg_mem / mem_limit * 100) if mem_limit > 0 else 0
+            total_reqs = int(svc_http["value"].sum()) if not svc_http.empty else 0
+            has_recent = not svc_mem.empty and len(svc_mem) > 2  # getting data points
+
+            # Determine health color
+            if not has_recent:
+                status, color = "NO DATA", "#6B7280"
+            elif mem_pct > 85:
+                status, color = "CRITICAL", ACCENT_RED
+            elif mem_pct > 70:
+                status, color = "WARNING", ACCENT_WARN
+            else:
+                status, color = "HEALTHY", ACCENT
+
             label = svc.replace("-", " ").title()
-            svc_cols[i].metric(label, f"{avg_mem_mb:.0f} MB mem",
-                               delta=f"{fmt_number(total_http)} reqs")
+            with svc_cols[i]:
+                st.markdown(
+                    f'<div style="border:2px solid {color};border-radius:12px;padding:12px;text-align:center;">'
+                    f'<div style="color:{color};font-weight:700;font-size:0.8rem;letter-spacing:0.05em;">{status}</div>'
+                    f'<div style="font-size:1.1rem;font-weight:600;margin:4px 0;">{label}</div>'
+                    f'<div style="color:{TEXT_MUTED};font-size:0.85rem;">'
+                    f'{avg_mem / (1024*1024):.0f} MB ({mem_pct:.0f}% limit)<br>'
+                    f'{fmt_number(total_reqs)} requests</div></div>',
+                    unsafe_allow_html=True,
+                )
 
+        # Error rate from logs (quick Insights query)
+        error_stats = query_render_logs_stats(
+            'filter @message like /(?i)(error|exception|fatal|crash|ECONNREFUSED)/'
+            ' | stats count(*) as errors by bin(1h) as hour'
+            ' | sort hour desc',
+            hours=sh_hours if sh_hours <= 24 else 24,
+        )
+        if not error_stats.empty and "errors" in error_stats.columns:
+            total_errors = pd.to_numeric(error_stats["errors"], errors="coerce").sum()
+            if total_errors > 0:
+                st.warning(f"**{int(total_errors)} errors** detected across all services in the last {min(sh_hours, 24)}h")
+
+    # ============================================================
+    # SECTION 2: Render Service Metrics (visual charts)
+    # ============================================================
+    if has_metrics:
         st.markdown("---")
+        st.markdown("### Render Service Metrics")
 
-        # Memory usage (primary health indicator)
+        # --- Memory Usage with limit lines ---
         if not mem_df.empty:
-            st.markdown("### Memory Usage")
             mem_df["value_mb"] = mem_df["value"] / (1024 * 1024)
-            fig = px.area(mem_df, x="timestamp", y="value_mb", color="service",
-                          title="Memory Usage by Service (MB)", template="plotly_dark")
-            fig.update_layout(**PLOTLY_LAYOUT, height=350, legend=dict(orientation="h", y=-0.2))
-            st.plotly_chart(fig, use_container_width=True)
-
-            # Memory limits for context
-            mem_limit_df = load_render_metric_by_service("render.service.memory.limit", stat="Maximum", period=sh_period, hours=sh_hours)
-            if not mem_limit_df.empty:
-                limit_summary = mem_limit_df.groupby("service")["value"].max().reset_index()
-                limit_summary["limit_mb"] = limit_summary["value"] / (1024 * 1024)
-                st.caption("Memory limits: " + ", ".join(
-                    f"**{r['service']}**: {r['limit_mb']:.0f} MB" for _, r in limit_summary.iterrows()
+            fig = go.Figure()
+            colors = {svc: CHART_COLORS[i % len(CHART_COLORS)] for i, svc in enumerate(mem_df["service"].unique())}
+            for svc in mem_df["service"].unique():
+                sdf = mem_df[mem_df["service"] == svc]
+                fig.add_trace(go.Scatter(
+                    x=sdf["timestamp"], y=sdf["value_mb"], name=svc,
+                    mode="lines", fill="tozeroy",
+                    line=dict(color=colors[svc], width=2),
+                    fillcolor=f"rgba({int(colors[svc][1:3],16)},{int(colors[svc][3:5],16)},{int(colors[svc][5:7],16)},0.1)",
                 ))
-
-        # CPU usage
-        if not cpu_df.empty:
-            st.markdown("### CPU Usage")
-            fig = px.line(cpu_df, x="timestamp", y="value", color="service",
-                          title="CPU Time by Service (cumulative seconds — use rate for load)", template="plotly_dark")
-            fig.update_layout(**PLOTLY_LAYOUT, height=350, legend=dict(orientation="h", y=-0.2))
+            # Add limit lines if available
+            if not mem_limit_df.empty:
+                for svc in mem_limit_df["service"].unique():
+                    lim = mem_limit_df[mem_limit_df["service"] == svc]["value"].max() / (1024 * 1024)
+                    fig.add_hline(y=lim, line_dash="dot", line_color="rgba(239,68,68,0.4)",
+                                 annotation_text=f"{svc} limit", annotation_font_size=10)
+            fig.update_layout(**PLOTLY_LAYOUT, title="Memory Usage by Service (MB)", height=350,
+                              legend=dict(orientation="h", y=-0.2))
+            fig.update_xaxes(title="", tickformat="%b %d %H:%M", **AXIS_DEFAULTS)
+            fig.update_yaxes(title="MB", **AXIS_DEFAULTS)
             st.plotly_chart(fig, use_container_width=True)
 
-        # HTTP requests
-        if not http_df.empty:
-            st.markdown("### HTTP Requests")
-            fig = px.bar(http_df, x="timestamp", y="value", color="service",
-                         title="HTTP Requests by Service (cumulative)", template="plotly_dark", barmode="stack")
-            fig.update_layout(**PLOTLY_LAYOUT, height=350, legend=dict(orientation="h", y=-0.2))
-            st.plotly_chart(fig, use_container_width=True)
+        # --- CPU + HTTP side by side ---
+        col_cpu, col_http = st.columns(2)
+        with col_cpu:
+            if not cpu_df.empty:
+                fig = px.line(cpu_df, x="timestamp", y="value", color="service",
+                              title="CPU Time by Service", color_discrete_sequence=CHART_COLORS)
+                fig.update_layout(**PLOTLY_LAYOUT, height=300, legend=dict(orientation="h", y=-0.25))
+                fig.update_xaxes(title="", tickformat="%H:%M", **AXIS_DEFAULTS)
+                fig.update_yaxes(title="seconds", **AXIS_DEFAULTS)
+                st.plotly_chart(fig, use_container_width=True)
 
-        # HTTP latency
-        if not latency_df.empty:
-            st.markdown("### HTTP Latency")
-            fig = px.line(latency_df, x="timestamp", y="value", color="service",
-                          title="HTTP Request Latency by Service", template="plotly_dark")
-            fig.update_layout(**PLOTLY_LAYOUT, height=350, legend=dict(orientation="h", y=-0.2))
-            st.plotly_chart(fig, use_container_width=True)
+        with col_http:
+            if not http_df.empty:
+                fig = px.bar(http_df, x="timestamp", y="value", color="service",
+                             title="HTTP Requests by Service", color_discrete_sequence=CHART_COLORS, barmode="stack")
+                fig.update_layout(**PLOTLY_LAYOUT, height=300, legend=dict(orientation="h", y=-0.25))
+                fig.update_xaxes(title="", tickformat="%H:%M", **AXIS_DEFAULTS)
+                fig.update_yaxes(title="requests", **AXIS_DEFAULTS)
+                st.plotly_chart(fig, use_container_width=True)
 
-        # Network
-        if not net_tx_df.empty:
-            st.markdown("### Network Traffic")
-            net_tx_df["value_kb"] = net_tx_df["value"] / 1024
-            fig = px.area(net_tx_df, x="timestamp", y="value_kb", color="service",
-                          title="Network Transmit by Service (KB)", template="plotly_dark")
-            fig.update_layout(**PLOTLY_LAYOUT, height=350, legend=dict(orientation="h", y=-0.2))
-            st.plotly_chart(fig, use_container_width=True)
+        # --- Latency + Network side by side ---
+        col_lat, col_net = st.columns(2)
+        with col_lat:
+            if not latency_df.empty:
+                fig = px.line(latency_df, x="timestamp", y="value", color="service",
+                              title="HTTP Latency by Service", color_discrete_sequence=CHART_COLORS)
+                fig.update_layout(**PLOTLY_LAYOUT, height=300, legend=dict(orientation="h", y=-0.25))
+                fig.update_xaxes(title="", tickformat="%H:%M", **AXIS_DEFAULTS)
+                fig.update_yaxes(title="ms", **AXIS_DEFAULTS)
+                st.plotly_chart(fig, use_container_width=True)
 
-    # --- Recent Logs ---
+        with col_net:
+            if not net_tx_df.empty:
+                net_tx_df["value_kb"] = net_tx_df["value"] / 1024
+                fig = px.area(net_tx_df, x="timestamp", y="value_kb", color="service",
+                              title="Network Transmit by Service (KB)", color_discrete_sequence=CHART_COLORS)
+                fig.update_layout(**PLOTLY_LAYOUT, height=300, legend=dict(orientation="h", y=-0.25))
+                fig.update_xaxes(title="", tickformat="%H:%M", **AXIS_DEFAULTS)
+                fig.update_yaxes(title="KB", **AXIS_DEFAULTS)
+                st.plotly_chart(fig, use_container_width=True)
+
+    # ============================================================
+    # SECTION 3: Log-Derived Insights (aggregated from syslog)
+    # ============================================================
     st.markdown("---")
-    st.markdown("### Recent Logs")
-    st.caption("Logs streamed via syslog from Render → OTel Collector → `/render/logs`. Service name is in syslog hostname field.")
+    st.markdown("### Service Activity Insights")
+    st.caption("Aggregated from service logs via CloudWatch Insights")
 
-    log_svc = st.selectbox("Service", ["all"] + RENDER_SERVICES, key="log_svc")
-    log_level = st.selectbox("Level", ["all", "errors only", "warnings+"], key="log_level")
-    log_hours = st.selectbox("Log lookback", [1, 6, 12, 24], index=0, key="log_hours",
-                              format_func=lambda h: f"{h}h")
+    insight_hours = min(sh_hours, 24)  # Insights queries capped at 24h for speed
+
+    # --- Error breakdown by service ---
+    err_by_svc = query_render_logs_stats(
+        'filter @message like /(?i)(error|exception|fatal|crash|fail|ECONNREFUSED|ETIMEDOUT|500)/'
+        ' | parse @message /(?<svc_host>[a-z]+-[a-z]+(-[a-z]+)?)/'
+        ' | stats count(*) as errors by svc_host'
+        ' | sort errors desc'
+        ' | limit 10',
+        hours=insight_hours,
+    )
+
+    # --- Error timeline ---
+    err_timeline = query_render_logs_stats(
+        'filter @message like /(?i)(error|exception|fatal|crash|fail|500)/'
+        ' | stats count(*) as errors by bin(1h) as hour'
+        ' | sort hour asc',
+        hours=insight_hours,
+    )
+
+    # --- HTTP status breakdown ---
+    http_status = query_render_logs_stats(
+        'filter @message like /HTTP/'
+        ' | parse @message /(?<status_code>[245]\\d{2})/'
+        ' | stats count(*) as cnt by status_code'
+        ' | sort cnt desc'
+        ' | limit 10',
+        hours=insight_hours,
+    )
+
+    # --- Log volume by service ---
+    log_volume = query_render_logs_stats(
+        'parse @message /(?<svc_host>[a-z]+-[a-z]+(-[a-z]+)?)/'
+        ' | stats count(*) as log_count by svc_host'
+        ' | sort log_count desc'
+        ' | limit 10',
+        hours=insight_hours,
+    )
+
+    col_errs, col_vol = st.columns(2)
+
+    with col_errs:
+        if not err_timeline.empty and "errors" in err_timeline.columns:
+            err_timeline["errors"] = pd.to_numeric(err_timeline["errors"], errors="coerce")
+            if "hour" in err_timeline.columns:
+                err_timeline["hour"] = pd.to_datetime(err_timeline["hour"], errors="coerce")
+            fig = go.Figure(go.Bar(
+                x=err_timeline.get("hour", err_timeline.index),
+                y=err_timeline["errors"],
+                marker_color=ACCENT_RED,
+                hovertemplate="<b>%{x}</b><br>%{y} errors<extra></extra>",
+            ))
+            fig.update_layout(**PLOTLY_LAYOUT, title=f"Errors per Hour (last {insight_hours}h)", height=300)
+            fig.update_xaxes(title="", tickformat="%H:%M", **AXIS_DEFAULTS)
+            fig.update_yaxes(title="errors", **AXIS_DEFAULTS)
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.success(f"No errors detected in the last {insight_hours}h")
+
+    with col_vol:
+        if not log_volume.empty and "log_count" in log_volume.columns and "svc_host" in log_volume.columns:
+            log_volume["log_count"] = pd.to_numeric(log_volume["log_count"], errors="coerce")
+            fig = go.Figure(go.Bar(
+                y=log_volume["svc_host"], x=log_volume["log_count"],
+                orientation="h", marker_color=BRAND,
+                text=[fmt_number(v) for v in log_volume["log_count"]],
+                textposition="auto",
+                hovertemplate="<b>%{y}</b><br>%{x:,.0f} logs<extra></extra>",
+            ))
+            fig.update_layout(**PLOTLY_LAYOUT, title=f"Log Volume by Service (last {insight_hours}h)", height=300,
+                              yaxis=dict(autorange="reversed", gridcolor="rgba(0,0,0,0)"))
+            fig.update_xaxes(title="", **AXIS_DEFAULTS)
+            st.plotly_chart(fig, use_container_width=True)
+
+    col_errsvc, col_httpstatus = st.columns(2)
+
+    with col_errsvc:
+        if not err_by_svc.empty and "errors" in err_by_svc.columns and "svc_host" in err_by_svc.columns:
+            err_by_svc["errors"] = pd.to_numeric(err_by_svc["errors"], errors="coerce")
+            fig = go.Figure(go.Bar(
+                y=err_by_svc["svc_host"], x=err_by_svc["errors"],
+                orientation="h", marker_color=ACCENT_RED,
+                text=[fmt_number(v) for v in err_by_svc["errors"]],
+                textposition="auto",
+                hovertemplate="<b>%{y}</b><br>%{x:,.0f} errors<extra></extra>",
+            ))
+            fig.update_layout(**PLOTLY_LAYOUT, title="Errors by Service", height=300,
+                              yaxis=dict(autorange="reversed", gridcolor="rgba(0,0,0,0)"))
+            fig.update_xaxes(title="", **AXIS_DEFAULTS)
+            st.plotly_chart(fig, use_container_width=True)
+
+    with col_httpstatus:
+        if not http_status.empty and "cnt" in http_status.columns and "status_code" in http_status.columns:
+            http_status["cnt"] = pd.to_numeric(http_status["cnt"], errors="coerce")
+            # Color by status code category
+            status_colors = []
+            for code in http_status["status_code"]:
+                if str(code).startswith("2"):
+                    status_colors.append(ACCENT)
+                elif str(code).startswith("4"):
+                    status_colors.append(ACCENT_WARN)
+                elif str(code).startswith("5"):
+                    status_colors.append(ACCENT_RED)
+                else:
+                    status_colors.append(TEXT_MUTED)
+            fig = go.Figure(go.Bar(
+                x=http_status["status_code"], y=http_status["cnt"],
+                marker_color=status_colors,
+                text=[fmt_number(v) for v in http_status["cnt"]],
+                textposition="auto",
+                hovertemplate="<b>HTTP %{x}</b><br>%{y:,.0f} responses<extra></extra>",
+            ))
+            fig.update_layout(**PLOTLY_LAYOUT, title="HTTP Status Codes", height=300)
+            fig.update_xaxes(title="", **AXIS_DEFAULTS)
+            fig.update_yaxes(title="count", **AXIS_DEFAULTS)
+            st.plotly_chart(fig, use_container_width=True)
+
+    # ============================================================
+    # SECTION 4: CloudFront CDN
+    # ============================================================
+    st.markdown("---")
+    st.markdown("### CloudFront CDN")
+    st.caption("Trade feed CDN — serves /trades and /top-trades to all app clients")
+
+    cf_dist = get_cloudfront_dist_id()
+    if cf_dist:
+        cf_requests = load_cloudfront_metric("Requests", stat="Sum", period=sh_period, hours=sh_hours, dist_id=cf_dist)
+        cf_bytes = load_cloudfront_metric("BytesDownloaded", stat="Sum", period=sh_period, hours=sh_hours, dist_id=cf_dist)
+        cf_4xx = load_cloudfront_metric("4xxErrorRate", stat="Average", period=sh_period, hours=sh_hours, dist_id=cf_dist)
+        cf_5xx = load_cloudfront_metric("5xxErrorRate", stat="Average", period=sh_period, hours=sh_hours, dist_id=cf_dist)
+        cf_total_hit = load_cloudfront_metric("CacheHitRate", stat="Average", period=sh_period, hours=sh_hours, dist_id=cf_dist)
+
+        has_cf = not cf_requests.empty or not cf_bytes.empty
+
+        if has_cf:
+            # Summary metrics
+            total_cf_reqs = int(cf_requests["value"].sum()) if not cf_requests.empty else 0
+            total_cf_bytes_gb = cf_bytes["value"].sum() / (1024**3) if not cf_bytes.empty else 0
+            avg_4xx = cf_4xx["value"].mean() if not cf_4xx.empty else 0
+            avg_5xx = cf_5xx["value"].mean() if not cf_5xx.empty else 0
+            avg_cache_hit = cf_total_hit["value"].mean() if not cf_total_hit.empty else 0
+
+            c1, c2, c3, c4, c5 = st.columns(5)
+            c1.metric("Total Requests", fmt_number(total_cf_reqs))
+            c2.metric("Data Served", f"{total_cf_bytes_gb:.2f} GB")
+            c3.metric("Cache Hit Rate", f"{avg_cache_hit:.1f}%")
+            c4.metric("4xx Error Rate", f"{avg_4xx:.2f}%",
+                       delta=f"{avg_4xx:.2f}%" if avg_4xx > 1 else None, delta_color="inverse")
+            c5.metric("5xx Error Rate", f"{avg_5xx:.2f}%",
+                       delta=f"{avg_5xx:.2f}%" if avg_5xx > 0.5 else None, delta_color="inverse")
+
+            # Charts side by side
+            col_cf_req, col_cf_bytes = st.columns(2)
+            with col_cf_req:
+                if not cf_requests.empty:
+                    fig = make_time_series(cf_requests, "timestamp", "value",
+                                           title="CDN Requests", color=BRAND, kind="bar")
+                    st.plotly_chart(fig, use_container_width=True)
+            with col_cf_bytes:
+                if not cf_bytes.empty:
+                    cf_bytes_mb = cf_bytes.copy()
+                    cf_bytes_mb["value"] = cf_bytes_mb["value"] / (1024 * 1024)
+                    fig = make_time_series(cf_bytes_mb, "timestamp", "value",
+                                           title="Data Downloaded (MB)", color=ACCENT, kind="area")
+                    st.plotly_chart(fig, use_container_width=True)
+
+            col_cf_err, col_cf_cache = st.columns(2)
+            with col_cf_err:
+                # Combined error rate chart
+                err_frames = []
+                if not cf_4xx.empty:
+                    e4 = cf_4xx.copy()
+                    e4["type"] = "4xx"
+                    err_frames.append(e4)
+                if not cf_5xx.empty:
+                    e5 = cf_5xx.copy()
+                    e5["type"] = "5xx"
+                    err_frames.append(e5)
+                if err_frames:
+                    edf = pd.concat(err_frames, ignore_index=True)
+                    fig = px.line(edf, x="timestamp", y="value", color="type",
+                                  title="CDN Error Rates (%)", color_discrete_sequence=[ACCENT_WARN, ACCENT_RED])
+                    fig.update_layout(**PLOTLY_LAYOUT, height=300, legend=dict(orientation="h", y=-0.25))
+                    fig.update_xaxes(title="", tickformat="%H:%M", **AXIS_DEFAULTS)
+                    fig.update_yaxes(title="%", **AXIS_DEFAULTS)
+                    st.plotly_chart(fig, use_container_width=True)
+
+            with col_cf_cache:
+                if not cf_total_hit.empty:
+                    fig = make_time_series(cf_total_hit, "timestamp", "value",
+                                           title="Cache Hit Rate (%)", color="#06B6D4", kind="area")
+                    fig.update_yaxes(range=[0, 100])
+                    st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.info("No CloudFront data available for this period.")
+    else:
+        st.info("No CloudFront distributions found in CloudWatch. CDN metrics will appear once the distribution is active and receiving traffic.")
+
+    # ============================================================
+    # SECTION 5: Log Viewer
+    # ============================================================
+    st.markdown("---")
+    st.markdown("### Log Viewer")
+    st.caption("Syslog from Render → OTel Collector → `/render/logs`")
+
+    col_lf1, col_lf2, col_lf3 = st.columns(3)
+    with col_lf1:
+        log_svc = st.selectbox("Service", ["all"] + RENDER_SERVICES, key="log_svc")
+    with col_lf2:
+        log_level = st.selectbox("Level", ["all", "errors only", "warnings+"], key="log_level")
+    with col_lf3:
+        log_hours = st.selectbox("Log lookback", [1, 6, 12, 24], index=0, key="log_hours",
+                                  format_func=lambda h: f"{h}h")
+
     log_search = st.text_input("Search (optional)", placeholder="error, timeout, 500...", key="log_search")
 
     if st.button("Fetch Logs", key="fetch_logs"):
-        # Build CloudWatch Insights query with filters
         filters = []
         if log_svc != "all":
             filters.append(f'filter @message like /{log_svc}/')
@@ -2144,6 +2496,5 @@ with tab_services:
         if log_df.empty:
             st.info("No logs found for the selected filters.")
         else:
-            # Show count
             st.caption(f"Showing {len(log_df)} log entries")
             st.dataframe(log_df, use_container_width=True, height=500)
