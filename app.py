@@ -231,7 +231,7 @@ CW_NAMESPACE = "Freeport/TradingBackend"
 CW_ENVIRONMENT = "development"
 
 RENDER_CW_NAMESPACE = "Render"
-RENDER_SERVICES = ["twitter-scraper", "recommender", "swap-server", "trade-news-server", "payments-server"]
+RENDER_SERVICES = ["Twitter_scraper", "Recommender", "Swap_Server-1", "TradeNews_serv", "PaymentsServer"]
 CF_NAMESPACE = "AWS/CloudFront"
 
 
