@@ -1806,14 +1806,51 @@ with tab_backend:
     ws_conns = load_cw_metric("WS.ActiveConnections", stat="Maximum", period=bh_period, hours=bh_hours)
     ws_sent = load_cw_metric("WS.MessageSent", stat="Sum", period=bh_period, hours=bh_hours)
     ws_recv = load_cw_metric("WS.MessageReceived", stat="Sum", period=bh_period, hours=bh_hours)
+    ws_slow = load_cw_metric("WS.SlowClientTerminated", stat="Sum", period=bh_period, hours=bh_hours)
 
-    col_wc, col_ws, col_wr = st.columns(3)
+    col_wc, col_ws, col_wr, col_wsl = st.columns(4)
     col_wc.metric("Peak Connections", f"{int(ws_conns['value'].max())}" if not ws_conns.empty else "0")
     col_ws.metric("Messages Sent", fmt_number(int(ws_sent["value"].sum())) if not ws_sent.empty else "0")
     col_wr.metric("Messages Received", fmt_number(int(ws_recv["value"].sum())) if not ws_recv.empty else "0")
+    slow_count = int(ws_slow["value"].sum()) if not ws_slow.empty else 0
+    col_wsl.metric("Slow Clients Killed", str(slow_count), delta=f"{slow_count}" if slow_count > 0 else None,
+                   delta_color="inverse")
 
+    col_chart1, col_chart2 = st.columns(2)
+    with col_chart1:
+        if not ws_conns.empty:
+            fig = make_time_series(ws_conns, "timestamp", "value", title="Active WS Connections", color=BRAND_LIGHT, kind="area")
+            st.plotly_chart(fig, use_container_width=True)
+    with col_chart2:
+        if not ws_sent.empty:
+            fig = make_time_series(ws_sent, "timestamp", "value", title="Messages Sent (fan-out throughput)", color=ACCENT, kind="area")
+            st.plotly_chart(fig, use_container_width=True)
+
+    # Capacity indicator
     if not ws_conns.empty:
-        fig = make_time_series(ws_conns, "timestamp", "value", title="Active WS Connections", color=BRAND_LIGHT, kind="area")
+        peak = int(ws_conns["value"].max())
+        capacity = 6 * 3500  # max_tasks * approx connections per task
+        pct = (peak / capacity) * 100 if capacity > 0 else 0
+        st.progress(min(pct / 100, 1.0), text=f"Capacity: {peak:,} / {capacity:,} ({pct:.1f}%) — auto-scales min 2, max 6 tasks")
+
+    # --- Rate Limiting & Request Health ---
+    st.markdown("---")
+    st.markdown("### Rate Limiting & Request Health")
+    st.caption("REST rate limit: 100 req/min per IP. Throttled requests return 429 and appear in the error count.")
+    api_total = load_cw_metric("API.Request", stat="Sum", period=bh_period, hours=bh_hours)
+    api_err = load_cw_metric("API.Error", stat="Sum", period=bh_period, hours=bh_hours)
+
+    col_rl1, col_rl2, col_rl3 = st.columns(3)
+    total_req = int(api_total["value"].sum()) if not api_total.empty else 0
+    total_err = int(api_err["value"].sum()) if not api_err.empty else 0
+    err_rate = (total_err / total_req * 100) if total_req > 0 else 0
+    col_rl1.metric("Total Requests", fmt_number(total_req))
+    col_rl2.metric("Total Errors (4xx+5xx)", fmt_number(total_err))
+    col_rl3.metric("Error Rate", f"{err_rate:.2f}%",
+                   delta=f"{err_rate:.2f}%" if err_rate > 1 else None, delta_color="inverse")
+
+    if not api_err.empty and api_err["value"].sum() > 0:
+        fig = make_time_series(api_err, "timestamp", "value", title="API Errors Over Time (includes 429 rate limits)", color=ACCENT_RED, kind="bar")
         st.plotly_chart(fig, use_container_width=True)
 
     # --- Privy Signing ---
@@ -1841,15 +1878,23 @@ with tab_backend:
 
     # --- Alarms status ---
     st.markdown("---")
-    st.markdown("### Active Alarms")
+    st.markdown("### Alarm Status")
+    st.caption("CloudWatch alarms for: CPU high (>80%), WS connections high (>3000), transfer queue backlog (>300s), fee payer balance low (<0.005 ETH)")
     try:
         cw = get_cloudwatch()
-        alarms_resp = cw.describe_alarms(StateValue="ALARM")
-        alarm_list = alarms_resp.get("MetricAlarms", [])
-        if alarm_list:
-            for alarm in alarm_list:
-                st.error(f"**{alarm['AlarmName']}** — {alarm.get('AlarmDescription', 'No description')}")
-        else:
-            st.success("All alarms OK — no active alerts")
+        # Fetch all alarms (not just firing) for a full overview
+        all_alarms_resp = cw.describe_alarms()
+        all_alarms = all_alarms_resp.get("MetricAlarms", [])
+        firing = [a for a in all_alarms if a["StateValue"] == "ALARM"]
+        ok_alarms = [a for a in all_alarms if a["StateValue"] == "OK"]
+
+        if firing:
+            for alarm in firing:
+                st.error(f"🔴 **{alarm['AlarmName']}** — {alarm.get('AlarmDescription', 'No description')}")
+        if ok_alarms:
+            alarm_names = ", ".join(a["AlarmName"].split("-")[-1] for a in ok_alarms)
+            st.success(f"All {len(ok_alarms)} alarms OK: {alarm_names}")
+        if not all_alarms:
+            st.info("No alarms configured")
     except Exception as e:
         st.warning(f"Could not fetch alarms: {e}")
