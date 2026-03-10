@@ -2254,18 +2254,21 @@ with tab_services:
                 st.plotly_chart(fig, use_container_width=True)
 
     # ============================================================
-    # SECTION 3: Error Dashboard (syslog priority-based)
+    # SECTION 3: Error Dashboard
     # ============================================================
+    # Render syslog priorities: <3>=error, <4>=warning (HTTP 4xx), <6>=info, <7>=debug
+    # Swap server HTTP errors arrive at priority <4> with JSON body containing "statusCode":4xx
+    # App-level errors (CoinGecko 429, connection pool) arrive at <3> or <4> as plain text
     st.markdown("---")
     st.markdown("### Error Dashboard")
-    st.caption("Errors detected via syslog priority level `<3>` (error) — parsed from all Render services")
+    st.caption("Syslog priority `<3>` (error) + `<4>` (warning/HTTP 4xx) from all Render services")
 
     insight_hours = min(sh_hours, 24)  # Insights queries capped at 24h for speed
 
-    # --- Errors by service (syslog priority 3 = error) ---
+    # --- Errors by service (priority <= 4 catches errors + warnings + HTTP 4xx) ---
     err_by_svc = query_render_logs_stats(
         'parse @message /^<(?<pri>\\d+)>/'
-        ' | filter pri == 3'
+        ' | filter pri <= 4'
         ' | parse @message /^<\\d+>\\d+ \\S+ (?<svc>\\S+)/'
         ' | stats count(*) as errors by svc'
         ' | sort errors desc'
@@ -2276,28 +2279,50 @@ with tab_services:
     # --- Error timeline by hour ---
     err_timeline = query_render_logs_stats(
         'parse @message /^<(?<pri>\\d+)>/'
-        ' | filter pri == 3'
+        ' | filter pri <= 4'
         ' | stats count(*) as errors by bin(1h) as hour'
         ' | sort hour asc',
         hours=insight_hours,
     )
 
-    # --- Top error messages (extract error field or full body) ---
-    err_messages = query_render_logs_stats(
+    # --- Top error messages ---
+    # Two log formats:
+    #   1. HTTP access logs: <4>1 TS svc http-request ... - {"statusCode":400,"path":"/order?..."}
+    #   2. App logs: <3>1 TS svc proc ... - CoinGecko API error: 429
+    # Query them separately and merge for a clean table.
+    err_http = query_render_logs_stats(
         'parse @message /^<(?<pri>\\d+)>/'
-        ' | filter pri == 3'
-        ' | parse @message /^<\\d+>\\d+ \\S+ (?<svc>\\S+) \\S+ \\d+ \\S+ - (?<body>.*)/'
-        ' | parse body /"error":"(?<err_msg>[^"]+)"/'
-        ' | stats count(*) as cnt by svc, err_msg'
+        ' | filter pri <= 4 and @message like /http-request/'
+        ' | parse @message /^<\\d+>\\d+ \\S+ (?<svc>\\S+)/'
+        ' | parse @message /^<\\d+>\\d+ \\S+ \\S+ \\S+ \\d+ \\S+ - (?<body>.*)/'
+        ' | parse body /"statusCode":(?<sc>\\d+)/'
+        ' | filter sc >= 400'
+        ' | parse body /"path":"(?<rawpath>[^"]+)"/'
+        ' | parse rawpath /^\\/(?<endpoint>[^?]+)/'
+        ' | stats count(*) as cnt by svc, concat("HTTP ", sc, " /", endpoint) as detail'
         ' | sort cnt desc'
-        ' | limit 20',
+        ' | limit 15',
         hours=insight_hours,
     )
+    err_app = query_render_logs_stats(
+        'parse @message /^<(?<pri>\\d+)>/'
+        ' | filter pri <= 4 and @message not like /http-request/'
+        ' | parse @message /^<\\d+>\\d+ \\S+ (?<svc>\\S+) \\S+ \\d+ \\S+ - (?<body>.*)/'
+        ' | stats count(*) as cnt by svc, body as detail'
+        ' | sort cnt desc'
+        ' | limit 15',
+        hours=insight_hours,
+    )
+    # Merge HTTP + app errors into one table
+    err_messages = pd.concat([err_http, err_app], ignore_index=True)
+    if not err_messages.empty and "cnt" in err_messages.columns:
+        err_messages["cnt"] = pd.to_numeric(err_messages["cnt"], errors="coerce")
+        err_messages = err_messages.sort_values("cnt", ascending=False).head(25)
 
     # --- Recent errors (individual entries) ---
     recent_errors = query_render_logs_stats(
         'parse @message /^<(?<pri>\\d+)>/'
-        ' | filter pri == 3'
+        ' | filter pri <= 4'
         ' | parse @message /^<\\d+>\\d+ (?<ts>\\S+) (?<svc>\\S+) \\S+ \\d+ \\S+ - (?<body>.*)/'
         ' | fields ts, svc, body'
         ' | sort @timestamp desc'
@@ -2355,12 +2380,16 @@ with tab_services:
     if not err_messages.empty and "cnt" in err_messages.columns:
         st.markdown("#### Top Error Messages")
         err_messages["cnt"] = pd.to_numeric(err_messages["cnt"], errors="coerce")
-        # Fill missing err_msg with a generic label
-        if "err_msg" in err_messages.columns:
-            err_messages["err_msg"] = err_messages["err_msg"].fillna("(unstructured error)")
-        display_df = err_messages[["svc", "err_msg", "cnt"]].rename(
-            columns={"svc": "Service", "err_msg": "Error Message", "cnt": "Count"}
-        ) if "svc" in err_messages.columns and "err_msg" in err_messages.columns else err_messages
+        if "detail" in err_messages.columns:
+            err_messages["detail"] = err_messages["detail"].fillna("(unstructured)")
+            # Truncate long query strings for readability
+            err_messages["detail"] = err_messages["detail"].apply(
+                lambda x: (x[:120] + "...") if isinstance(x, str) and len(x) > 120 else x
+            )
+        display_cols = [c for c in ["svc", "detail", "cnt"] if c in err_messages.columns]
+        display_df = err_messages[display_cols].rename(
+            columns={"svc": "Service", "detail": "Error Detail", "cnt": "Count"}
+        )
         st.dataframe(display_df, use_container_width=True, hide_index=True, height=300)
 
     # --- Recent errors table ---
@@ -2373,32 +2402,55 @@ with tab_services:
             )
             st.dataframe(recent_display, use_container_width=True, hide_index=True, height=400)
 
-    # --- Swap server specific: order errors ---
+    # --- Swap server specific: HTTP 4xx/5xx from structured access logs ---
+    # Actual format: <4>1 TIMESTAMP swap-server-1 http-request 1 http-request - {"statusCode":400,"path":"/order?inputMint=...&outputMint=...","method":"GET",...}
+    # Also catches 499 (client disconnect during /execute) and other non-200 responses
     st.markdown("---")
-    st.markdown("### Swap Server — Order Errors")
-    st.caption("Jupiter/swap order failures parsed from swap-server-1 logs")
+    st.markdown("### Swap Server — Failed Requests")
+    st.caption("HTTP 4xx/5xx from swap-server-1 access logs (parsed from JSON `statusCode` field)")
 
+    # --- Swap errors by status code + endpoint ---
     swap_errors = query_render_logs_stats(
-        'filter @message like /swap-server/ and @message like /Order error/'
-        ' | parse @message /^<\\d+>\\d+ (?<ts>\\S+) \\S+ \\S+ \\d+ \\S+ - \\[(?<provider>[^\\]]+)\\] Order error: HTTP (?<status>\\d+) - (?<from_token>\\S+) -> (?<to_token>\\S+) .*"error":"(?<err_msg>[^"]+)"/'
-        ' | stats count(*) as cnt by err_msg, provider'
-        ' | sort cnt desc',
+        'filter @message like /swap-server/ and @message like /http-request/'
+        ' | parse @message /^<\\d+>\\d+ \\S+ \\S+ \\S+ \\d+ \\S+ - (?<body>.*)/'
+        ' | parse body /"statusCode":(?<sc>\\d+)/'
+        ' | filter sc >= 400'
+        ' | parse body /"path":"(?<rawpath>[^"]+)"/'
+        ' | parse rawpath /^\\/(?<endpoint>[^?]+)/'
+        ' | parse rawpath /outputMint=(?<out_mint>[^&]+)/'
+        ' | stats count(*) as cnt by sc, endpoint, out_mint'
+        ' | sort cnt desc'
+        ' | limit 20',
         hours=insight_hours,
     )
 
+    # --- Timeline ---
     swap_errors_timeline = query_render_logs_stats(
-        'filter @message like /swap-server/ and @message like /Order error/'
+        'filter @message like /swap-server/ and @message like /http-request/'
+        ' | parse @message /^<\\d+>\\d+ \\S+ \\S+ \\S+ \\d+ \\S+ - (?<body>.*)/'
+        ' | parse body /"statusCode":(?<sc>\\d+)/'
+        ' | filter sc >= 400'
         ' | stats count(*) as errors by bin(1h) as hour'
         ' | sort hour asc',
         hours=insight_hours,
     )
 
+    # --- Recent failures with mint addresses ---
     swap_recent = query_render_logs_stats(
-        'filter @message like /swap-server/ and @message like /Order error/'
-        ' | parse @message /^<\\d+>\\d+ (?<ts>\\S+) \\S+ \\S+ \\d+ \\S+ - \\[(?<provider>[^\\]]+)\\] Order error: HTTP (?<status>\\d+) - (?<from_mint>\\S+) -> (?<to_mint>\\S+) .*"error":"(?<err_msg>[^"]+)"/'
-        ' | fields ts, provider, status, from_mint, to_mint, err_msg'
+        'filter @message like /swap-server/ and @message like /http-request/'
+        ' | parse @message /^<\\d+>\\d+ \\S+ \\S+ \\S+ \\d+ \\S+ - (?<body>.*)/'
+        ' | parse body /"statusCode":(?<sc>\\d+)/'
+        ' | filter sc >= 400'
+        ' | parse body /"time":"(?<ts>[^"]+)"/'
+        ' | parse body /"method":"(?<method>[^"]+)"/'
+        ' | parse body /"path":"(?<rawpath>[^"]+)"/'
+        ' | parse body /"responseTimeMS":(?<latency>\\d+)/'
+        ' | parse rawpath /^\\/(?<endpoint>[^?]+)/'
+        ' | parse rawpath /inputMint=(?<in_mint>[^&]+)/'
+        ' | parse rawpath /outputMint=(?<out_mint>[^&]+)/'
+        ' | fields ts, sc, method, endpoint, latency, in_mint, out_mint'
         ' | sort @timestamp desc'
-        ' | limit 20',
+        ' | limit 25',
         hours=insight_hours,
     )
 
@@ -2412,23 +2464,25 @@ with tab_services:
                 x=swap_errors_timeline.get("hour", swap_errors_timeline.index),
                 y=swap_errors_timeline["errors"],
                 marker_color=ACCENT_WARN,
-                hovertemplate="<b>%{x}</b><br>%{y} swap errors<extra></extra>",
+                hovertemplate="<b>%{x}</b><br>%{y} failed requests<extra></extra>",
             ))
-            fig.update_layout(**PLOTLY_LAYOUT, title="Swap Order Errors per Hour", height=280)
+            fig.update_layout(**PLOTLY_LAYOUT, title="Swap Server Failed Requests per Hour", height=280)
             fig.update_xaxes(title="", tickformat="%H:%M", **AXIS_DEFAULTS)
-            fig.update_yaxes(title="errors", **AXIS_DEFAULTS)
+            fig.update_yaxes(title="count", **AXIS_DEFAULTS)
             st.plotly_chart(fig, use_container_width=True)
         else:
-            st.success("No swap order errors")
+            st.success("No swap server errors")
 
     with col_swap_breakdown:
         if not swap_errors.empty and "cnt" in swap_errors.columns:
             swap_errors["cnt"] = pd.to_numeric(swap_errors["cnt"], errors="coerce")
             labels = []
             for _, r in swap_errors.iterrows():
-                provider = r.get("provider", "")
-                msg = r.get("err_msg", "unknown")
-                labels.append(f"[{provider}] {msg}" if provider else msg)
+                sc = r.get("sc", "?")
+                ep = r.get("endpoint", "?")
+                mint = r.get("out_mint", "")
+                mint_short = f" → {mint[:6]}...{mint[-4:]}" if isinstance(mint, str) and len(mint) > 10 else ""
+                labels.append(f"HTTP {sc} /{ep}{mint_short}")
             fig = go.Figure(go.Bar(
                 y=labels, x=swap_errors["cnt"],
                 orientation="h", marker_color=ACCENT_WARN,
@@ -2436,24 +2490,25 @@ with tab_services:
                 textposition="auto",
                 hovertemplate="<b>%{y}</b><br>%{x} occurrences<extra></extra>",
             ))
-            fig.update_layout(**PLOTLY_LAYOUT, title="Swap Error Types", height=280,
+            fig.update_layout(**PLOTLY_LAYOUT, title="Failures by Status + Endpoint", height=280,
                               yaxis=dict(autorange="reversed", gridcolor="rgba(0,0,0,0)"))
             fig.update_xaxes(title="", **AXIS_DEFAULTS)
             st.plotly_chart(fig, use_container_width=True)
 
     if not swap_recent.empty:
-        display_cols = [c for c in ["ts", "provider", "status", "from_mint", "to_mint", "err_msg"] if c in swap_recent.columns]
+        display_cols = [c for c in ["ts", "sc", "method", "endpoint", "latency", "in_mint", "out_mint"] if c in swap_recent.columns]
         if display_cols:
             swap_display = swap_recent[display_cols].copy()
             # Shorten mint addresses for readability
-            for col in ["from_mint", "to_mint"]:
+            for col in ["in_mint", "out_mint"]:
                 if col in swap_display.columns:
                     swap_display[col] = swap_display[col].apply(
                         lambda x: f"{x[:6]}...{x[-4:]}" if isinstance(x, str) and len(x) > 12 else x
                     )
             swap_display = swap_display.rename(columns={
-                "ts": "Time", "provider": "Provider", "status": "HTTP",
-                "from_mint": "From Token", "to_mint": "To Token", "err_msg": "Error",
+                "ts": "Time", "sc": "Status", "method": "Method",
+                "endpoint": "Endpoint", "latency": "Latency (ms)",
+                "in_mint": "Input Token", "out_mint": "Output Token",
             })
             st.dataframe(swap_display, use_container_width=True, hide_index=True)
 
