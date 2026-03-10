@@ -230,6 +230,9 @@ def get_cloudwatch():
 CW_NAMESPACE = "Freeport/TradingBackend"
 CW_ENVIRONMENT = "development"
 
+RENDER_CW_NAMESPACE = "Render"
+RENDER_SERVICES = ["twitter-scraper", "recommender", "swap-server", "trade-news-server", "payments-server"]
+
 
 @st.cache_data(ttl=300)
 def load_cw_metric(metric_name, stat="Average", period=300, hours=24, dimensions=None):
@@ -272,6 +275,104 @@ def load_cw_metric_by_dims(metric_name, dim_name, dim_values, stat="Sum", period
             df["dimension"] = val
             frames.append(df)
     return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(columns=["timestamp", "value", "dimension"])
+
+
+@st.cache_data(ttl=300)
+def load_render_metric(metric_name, stat="Average", period=300, hours=24, dimensions=None):
+    """Fetch a metric from the Render namespace (OTel collector → EMF → CloudWatch)."""
+    try:
+        cw = get_cloudwatch()
+        end = datetime.utcnow()
+        start = end - timedelta(hours=hours)
+        dims = []
+        if dimensions:
+            for k, v in dimensions.items():
+                dims.append({"Name": k, "Value": v})
+        resp = cw.get_metric_statistics(
+            Namespace=RENDER_CW_NAMESPACE,
+            MetricName=metric_name,
+            Dimensions=dims,
+            StartTime=start,
+            EndTime=end,
+            Period=period,
+            Statistics=[stat],
+        )
+        points = resp.get("Datapoints", [])
+        if not points:
+            return pd.DataFrame(columns=["timestamp", "value"])
+        df = pd.DataFrame(points)
+        df["timestamp"] = pd.to_datetime(df["Timestamp"])
+        df["value"] = df[stat]
+        return df[["timestamp", "value"]].sort_values("timestamp").reset_index(drop=True)
+    except Exception:
+        return pd.DataFrame(columns=["timestamp", "value"])
+
+
+@st.cache_data(ttl=300)
+def load_render_metric_by_service(metric_name, stat="Average", period=300, hours=24):
+    """Fetch a Render metric broken down by service.name dimension."""
+    # Discover which services report this metric
+    try:
+        cw = get_cloudwatch()
+        listed = cw.list_metrics(Namespace=RENDER_CW_NAMESPACE, MetricName=metric_name)
+        svc_names = sorted(set(
+            d["Value"] for m in listed.get("Metrics", [])
+            for d in m.get("Dimensions", []) if d["Name"] == "service.name"
+        ))
+    except Exception:
+        svc_names = RENDER_SERVICES
+    if not svc_names:
+        svc_names = RENDER_SERVICES
+
+    frames = []
+    for svc in svc_names:
+        df = load_render_metric(metric_name, stat=stat, period=period, hours=hours,
+                                dimensions={"service.name": svc})
+        if not df.empty:
+            df["service"] = svc
+            frames.append(df)
+    return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(columns=["timestamp", "value", "service"])
+
+
+@st.cache_resource
+def get_logs_client():
+    return boto3.client(
+        "logs",
+        region_name=st.secrets["aws"]["region"],
+        aws_access_key_id=st.secrets["aws"]["aws_access_key_id"],
+        aws_secret_access_key=st.secrets["aws"]["aws_secret_access_key"],
+    )
+
+
+@st.cache_data(ttl=120)
+def query_render_logs(log_group, query, hours=1, limit=50):
+    """Run a CloudWatch Insights query against a Render log group."""
+    try:
+        logs = get_logs_client()
+        end = datetime.utcnow()
+        start = end - timedelta(hours=hours)
+        resp = logs.start_query(
+            logGroupName=log_group,
+            startTime=int(start.timestamp()),
+            endTime=int(end.timestamp()),
+            queryString=query,
+            limit=limit,
+        )
+        query_id = resp["queryId"]
+        # Poll for results (max 10s)
+        import time
+        for _ in range(20):
+            result = logs.get_query_results(queryId=query_id)
+            if result["status"] == "Complete":
+                rows = []
+                for r in result["results"]:
+                    row = {f["field"]: f["value"] for f in r}
+                    rows.append(row)
+                return pd.DataFrame(rows) if rows else pd.DataFrame()
+            time.sleep(0.5)
+        return pd.DataFrame()
+    except Exception:
+        return pd.DataFrame()
 
 
 ANALYTICS_TABLE = "freeport-analytics-events"
@@ -457,8 +558,8 @@ st.sidebar.markdown("---")
 st.sidebar.caption("Data refreshes every 5 minutes")
 
 # --- Tabs ---
-tab_overview, tab_users, tab_retention, tab_funnels, tab_trades, tab_notifications, tab_backend = st.tabs(
-    ["Overview", "Top Users", "Retention", "Funnels", "Trades", "Notifications", "Backend Health"]
+tab_overview, tab_users, tab_retention, tab_funnels, tab_trades, tab_notifications, tab_backend, tab_services = st.tabs(
+    ["Overview", "Top Users", "Retention", "Funnels", "Trades", "Notifications", "Backend Health", "Services Health"]
 )
 
 
@@ -1898,3 +1999,151 @@ with tab_backend:
             st.info("No alarms configured")
     except Exception as e:
         st.warning(f"Could not fetch alarms: {e}")
+
+
+# =====================
+# TAB 8: Services Health (Render → OTel → CloudWatch)
+# =====================
+with tab_services:
+    st.subheader("Render Services — Metrics & Logs")
+    st.caption("Twitter Scraper, Recommender, Swap Server, Trade News Server, Payments Server")
+    st.caption("Metrics: `Render` namespace in CloudWatch | Logs: `/render/logs` log group | Differentiated by `service.name` dimension")
+
+    sh_hours = st.selectbox("Lookback", [1, 6, 12, 24, 48, 72, 168], index=3, key="sh_hours",
+                             format_func=lambda h: f"{h}h" if h < 168 else "7 days")
+    sh_period = 300 if sh_hours <= 24 else (900 if sh_hours <= 72 else 3600)
+
+    # --- Service Status Overview ---
+    st.markdown("### Service Overview")
+
+    # Discover all services reporting metrics (not just our hardcoded list)
+    try:
+        cw = get_cloudwatch()
+        all_svc_metrics = cw.list_metrics(Namespace=RENDER_CW_NAMESPACE, MetricName="render.service.memory.usage")
+        discovered_services = sorted(set(
+            d["Value"] for m in all_svc_metrics.get("Metrics", [])
+            for d in m.get("Dimensions", []) if d["Name"] == "service.name"
+        ))
+    except Exception:
+        discovered_services = []
+
+    if not discovered_services:
+        discovered_services = RENDER_SERVICES
+
+    # Load key metrics per service
+    mem_df = load_render_metric_by_service("render.service.memory.usage", stat="Average", period=sh_period, hours=sh_hours)
+    cpu_df = load_render_metric_by_service("render.service.cpu.time", stat="Average", period=sh_period, hours=sh_hours)
+    http_df = load_render_metric_by_service("render.service.http.requests.total", stat="Sum", period=sh_period, hours=sh_hours)
+    net_tx_df = load_render_metric_by_service("render.service.network.transmit.bytes", stat="Sum", period=sh_period, hours=sh_hours)
+    latency_df = load_render_metric_by_service("render.service.http.requests.latency", stat="Average", period=sh_period, hours=sh_hours)
+
+    has_metrics = not mem_df.empty or not cpu_df.empty or not http_df.empty
+
+    if not has_metrics:
+        st.info(
+            "No Render metrics yet. Ensure Render Metrics Stream is configured:\n\n"
+            "- **Provider**: Custom\n"
+            "- **Endpoint**: `https://otel.freeportmarkets.com`\n"
+            "- **Token**: any value (e.g. `render-metrics`)\n\n"
+            "Metrics appear within ~5 minutes of configuration."
+        )
+    else:
+        # Summary cards per service
+        svc_cols = st.columns(min(len(discovered_services), 5))
+        for i, svc in enumerate(discovered_services[:5]):
+            svc_mem = mem_df[mem_df["service"] == svc] if not mem_df.empty else pd.DataFrame()
+            svc_http = http_df[http_df["service"] == svc] if not http_df.empty else pd.DataFrame()
+            avg_mem_mb = svc_mem["value"].mean() / (1024 * 1024) if not svc_mem.empty else 0
+            total_http = int(svc_http["value"].sum()) if not svc_http.empty else 0
+            label = svc.replace("-", " ").title()
+            svc_cols[i].metric(label, f"{avg_mem_mb:.0f} MB mem",
+                               delta=f"{fmt_number(total_http)} reqs")
+
+        st.markdown("---")
+
+        # Memory usage (primary health indicator)
+        if not mem_df.empty:
+            st.markdown("### Memory Usage")
+            mem_df["value_mb"] = mem_df["value"] / (1024 * 1024)
+            fig = px.area(mem_df, x="timestamp", y="value_mb", color="service",
+                          title="Memory Usage by Service (MB)", template="plotly_dark")
+            fig.update_layout(**PLOTLY_LAYOUT, height=350, legend=dict(orientation="h", y=-0.2))
+            st.plotly_chart(fig, use_container_width=True)
+
+            # Memory limits for context
+            mem_limit_df = load_render_metric_by_service("render.service.memory.limit", stat="Maximum", period=sh_period, hours=sh_hours)
+            if not mem_limit_df.empty:
+                limit_summary = mem_limit_df.groupby("service")["value"].max().reset_index()
+                limit_summary["limit_mb"] = limit_summary["value"] / (1024 * 1024)
+                st.caption("Memory limits: " + ", ".join(
+                    f"**{r['service']}**: {r['limit_mb']:.0f} MB" for _, r in limit_summary.iterrows()
+                ))
+
+        # CPU usage
+        if not cpu_df.empty:
+            st.markdown("### CPU Usage")
+            fig = px.line(cpu_df, x="timestamp", y="value", color="service",
+                          title="CPU Time by Service (cumulative seconds — use rate for load)", template="plotly_dark")
+            fig.update_layout(**PLOTLY_LAYOUT, height=350, legend=dict(orientation="h", y=-0.2))
+            st.plotly_chart(fig, use_container_width=True)
+
+        # HTTP requests
+        if not http_df.empty:
+            st.markdown("### HTTP Requests")
+            fig = px.bar(http_df, x="timestamp", y="value", color="service",
+                         title="HTTP Requests by Service (cumulative)", template="plotly_dark", barmode="stack")
+            fig.update_layout(**PLOTLY_LAYOUT, height=350, legend=dict(orientation="h", y=-0.2))
+            st.plotly_chart(fig, use_container_width=True)
+
+        # HTTP latency
+        if not latency_df.empty:
+            st.markdown("### HTTP Latency")
+            fig = px.line(latency_df, x="timestamp", y="value", color="service",
+                          title="HTTP Request Latency by Service", template="plotly_dark")
+            fig.update_layout(**PLOTLY_LAYOUT, height=350, legend=dict(orientation="h", y=-0.2))
+            st.plotly_chart(fig, use_container_width=True)
+
+        # Network
+        if not net_tx_df.empty:
+            st.markdown("### Network Traffic")
+            net_tx_df["value_kb"] = net_tx_df["value"] / 1024
+            fig = px.area(net_tx_df, x="timestamp", y="value_kb", color="service",
+                          title="Network Transmit by Service (KB)", template="plotly_dark")
+            fig.update_layout(**PLOTLY_LAYOUT, height=350, legend=dict(orientation="h", y=-0.2))
+            st.plotly_chart(fig, use_container_width=True)
+
+    # --- Recent Logs ---
+    st.markdown("---")
+    st.markdown("### Recent Logs")
+    st.caption("Logs streamed via syslog from Render → OTel Collector → `/render/logs`. Service name is in syslog hostname field.")
+
+    log_svc = st.selectbox("Service", ["all"] + RENDER_SERVICES, key="log_svc")
+    log_level = st.selectbox("Level", ["all", "errors only", "warnings+"], key="log_level")
+    log_hours = st.selectbox("Log lookback", [1, 6, 12, 24], index=0, key="log_hours",
+                              format_func=lambda h: f"{h}h")
+    log_search = st.text_input("Search (optional)", placeholder="error, timeout, 500...", key="log_search")
+
+    if st.button("Fetch Logs", key="fetch_logs"):
+        # Build CloudWatch Insights query with filters
+        filters = []
+        if log_svc != "all":
+            filters.append(f'filter @message like /{log_svc}/')
+        if log_level == "errors only":
+            filters.append('filter @message like /(?i)(error|exception|fatal|panic|crash|ECONNREFUSED|ETIMEDOUT)/')
+        elif log_level == "warnings+":
+            filters.append('filter @message like /(?i)(error|warn|exception|fatal|panic|crash|timeout|fail)/')
+        if log_search:
+            filters.append(f'filter @message like /{log_search}/')
+
+        filter_clause = " | ".join(filters)
+        query = f'fields @timestamp, @message | {filter_clause + " | " if filter_clause else ""}sort @timestamp desc | limit 200'
+
+        with st.spinner("Querying CloudWatch Logs..."):
+            log_df = query_render_logs("/render/logs", query, hours=log_hours, limit=200)
+
+        if log_df.empty:
+            st.info("No logs found for the selected filters.")
+        else:
+            # Show count
+            st.caption(f"Showing {len(log_df)} log entries")
+            st.dataframe(log_df, use_container_width=True, height=500)
