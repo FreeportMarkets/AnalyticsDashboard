@@ -159,6 +159,9 @@ def apply_perps_leverage(frame):
         ostium_close = close_mask & ostium_mask
         frame.loc[non_ostium_close, "amount_usd"] = frame.loc[non_ostium_close, "size"].abs() * frame.loc[non_ostium_close, "price"]
         frame.loc[ostium_close, "amount_usd"] = frame.loc[ostium_close, "size"].abs()
+    # Closes represent a round-trip (open + close) — store multiplier for volume calcs
+    frame["_volume_usd"] = frame["amount_usd"].copy()
+    frame.loc[close_mask, "_volume_usd"] = frame.loc[close_mask, "_volume_usd"] * 2
     return frame
 
 
@@ -740,8 +743,8 @@ with tab_overview:
             trades_only_ov = tdf_ov[tdf_ov["type"].isin(["swap", "perps"])] if "type" in tdf_ov.columns else tdf_ov
             deposits_ov = tdf_ov[tdf_ov["type"] == "deposit"] if "type" in tdf_ov.columns else pd.DataFrame()
 
-            trade_vol = trades_only_ov["amount_usd"].sum() if not trades_only_ov.empty and "amount_usd" in trades_only_ov.columns else 0
-            dep_vol = deposits_ov["amount_usd"].sum() if not deposits_ov.empty and "amount_usd" in deposits_ov.columns else 0
+            trade_vol = trades_only_ov["_volume_usd"].sum() if not trades_only_ov.empty and "_volume_usd" in trades_only_ov.columns else 0
+            dep_vol = deposits_ov["_volume_usd"].sum() if not deposits_ov.empty and "_volume_usd" in deposits_ov.columns else 0
             num_traders = trades_only_ov["wallet_address"].nunique() if not trades_only_ov.empty and "wallet_address" in trades_only_ov.columns else 0
             trader_pct = (num_traders / total_unique * 100) if total_unique > 0 else 0
 
@@ -848,8 +851,8 @@ with tab_overview:
                         ios_trades = trade_only[trade_only["wallet_address"].isin(ios_wallets)]
                         android_trades = trade_only[trade_only["wallet_address"].isin(android_wallets)]
 
-                        ios_vol = ios_trades["amount_usd"].sum() if not ios_trades.empty else 0
-                        android_vol = android_trades["amount_usd"].sum() if not android_trades.empty else 0
+                        ios_vol = ios_trades["_volume_usd"].sum() if not ios_trades.empty and "_volume_usd" in ios_trades.columns else 0
+                        android_vol = android_trades["_volume_usd"].sum() if not android_trades.empty and "_volume_usd" in android_trades.columns else 0
                         ios_trade_ct = len(ios_trades)
                         android_trade_ct = len(android_trades)
 
@@ -866,8 +869,8 @@ with tab_overview:
                                 ios_perps = perps_all[perps_all["wallet_address"].isin(ios_wallets)]
                                 android_perps = perps_all[perps_all["wallet_address"].isin(android_wallets)]
 
-                                ios_p_vol = ios_perps["amount_usd"].sum() if not ios_perps.empty else 0
-                                android_p_vol = android_perps["amount_usd"].sum() if not android_perps.empty else 0
+                                ios_p_vol = ios_perps["_volume_usd"].sum() if not ios_perps.empty else 0
+                                android_p_vol = android_perps["_volume_usd"].sum() if not android_perps.empty else 0
                                 ios_p_ct = len(ios_perps)
                                 android_p_ct = len(android_perps)
                                 ios_p_traders = ios_perps["wallet_address"].nunique() if not ios_perps.empty else 0
@@ -923,15 +926,15 @@ with tab_overview:
                                 if "asset" in perps_all.columns:
                                     col_ios_a, col_and_a = st.columns(2)
                                     with col_ios_a:
-                                        if not ios_perps.empty and "amount_usd" in ios_perps.columns:
-                                            ios_assets = ios_perps.groupby("asset")["amount_usd"].sum().sort_values(ascending=False).head(10).reset_index()
+                                        if not ios_perps.empty and "_volume_usd" in ios_perps.columns:
+                                            ios_assets = ios_perps.groupby("asset")["_volume_usd"].sum().sort_values(ascending=False).head(10).reset_index()
                                             ios_assets.columns = ["asset", "volume"]
                                             ios_assets["volume"] = ios_assets["volume"].round(0)
                                             fig = make_h_bar(ios_assets, "volume", "asset", title="iOS Top Assets", color=BRAND, x_prefix="$")
                                             st.plotly_chart(fig, use_container_width=True)
                                     with col_and_a:
-                                        if not android_perps.empty and "amount_usd" in android_perps.columns:
-                                            and_assets = android_perps.groupby("asset")["amount_usd"].sum().sort_values(ascending=False).head(10).reset_index()
+                                        if not android_perps.empty and "_volume_usd" in android_perps.columns:
+                                            and_assets = android_perps.groupby("asset")["_volume_usd"].sum().sort_values(ascending=False).head(10).reset_index()
                                             and_assets.columns = ["asset", "volume"]
                                             and_assets["volume"] = and_assets["volume"].round(0)
                                             fig = make_h_bar(and_assets, "volume", "asset", title="Android Top Assets", color=ACCENT, x_prefix="$")
@@ -1059,8 +1062,9 @@ with tab_users:
                 col_vol, col_count = st.columns(2)
 
                 with col_vol:
+                    vol_col = "_volume_usd" if "_volume_usd" in tdf.columns else "amount_usd"
                     trader_vol = tdf.groupby("wallet_address").agg(
-                        volume=("amount_usd", "sum"), trades=("amount_usd", "count"),
+                        volume=(vol_col, "sum"), trades=(vol_col, "count"),
                     ).sort_values("volume", ascending=False).head(15).reset_index()
                     trader_vol["wallet"] = trader_vol["wallet_address"].apply(short_wallet)
                     trader_vol["volume"] = trader_vol["volume"].round(0)
@@ -1352,19 +1356,20 @@ with tab_trades:
             tdf["hour"] = tdf["ts"].dt.hour
             tdf["dow"] = tdf["ts"].dt.dayofweek
 
+        # Compute notional volume (handles Ostium exception + sets _volume_usd for round-trip closes)
+        tdf = apply_perps_leverage(tdf)
+        if "_volume_usd" not in tdf.columns:
+            tdf["_volume_usd"] = tdf["amount_usd"].copy()
+
         # Split by type
         swap_df = tdf[tdf["type"] == "swap"].copy() if "type" in tdf.columns else tdf.copy()
         perps_df = tdf[tdf["type"] == "perps"].copy() if "type" in tdf.columns else pd.DataFrame()
         deposit_df = tdf[tdf["type"] == "deposit"].copy() if "type" in tdf.columns else pd.DataFrame()
 
-        # Compute notional volume (reuse shared helper — handles Ostium exception)
-        if not perps_df.empty:
-            perps_df = apply_perps_leverage(perps_df)
-
         trades_only = pd.concat([swap_df, perps_df], ignore_index=True)  # exclude deposits
 
         # --- Top-level metrics (swaps + perps only) ---
-        total_vol = trades_only["amount_usd"].sum() if "amount_usd" in trades_only.columns and not trades_only.empty else 0
+        total_vol = trades_only["_volume_usd"].sum() if "_volume_usd" in trades_only.columns and not trades_only.empty else 0
         total_trades = len(trades_only)
         unique_traders = trades_only["wallet_address"].nunique() if "wallet_address" in trades_only.columns and not trades_only.empty else 0
         avg_trade = total_vol / total_trades if total_trades > 0 else 0
@@ -1376,9 +1381,9 @@ with tab_trades:
         col4.metric("Avg Trade Size", f"${avg_trade:,.0f}")
 
         # Type breakdown row
-        swap_vol = swap_df["amount_usd"].sum() if not swap_df.empty and "amount_usd" in swap_df.columns else 0
-        perps_vol = perps_df["amount_usd"].sum() if not perps_df.empty and "amount_usd" in perps_df.columns else 0
-        deposit_vol = deposit_df["amount_usd"].sum() if not deposit_df.empty and "amount_usd" in deposit_df.columns else 0
+        swap_vol = swap_df["_volume_usd"].sum() if not swap_df.empty and "_volume_usd" in swap_df.columns else 0
+        perps_vol = perps_df["_volume_usd"].sum() if not perps_df.empty and "_volume_usd" in perps_df.columns else 0
+        deposit_vol = deposit_df["_volume_usd"].sum() if not deposit_df.empty and "_volume_usd" in deposit_df.columns else 0
         cb1, cb2, cb3 = st.columns(3)
         cb1.metric("Swap Volume", f"${fmt_number(swap_vol)}", delta=f"{len(swap_df)} swaps")
         cb2.metric("Perps Volume", f"${fmt_number(perps_vol)}", delta=f"{len(perps_df)} orders")
@@ -1476,7 +1481,7 @@ with tab_trades:
             st.info("No perps data for this period.")
         else:
             # Perps metrics
-            perps_total_vol = perps_df["amount_usd"].sum() if "amount_usd" in perps_df.columns else 0
+            perps_total_vol = perps_df["_volume_usd"].sum() if "_volume_usd" in perps_df.columns else 0
             perps_total_orders = len(perps_df)
             perps_unique = perps_df["wallet_address"].nunique() if "wallet_address" in perps_df.columns else 0
             perps_avg = perps_total_vol / perps_total_orders if perps_total_orders > 0 else 0
@@ -1488,8 +1493,8 @@ with tab_trades:
             pc4.metric("Avg Order Size", f"${perps_avg:,.0f}")
 
             # Daily perps volume
-            if "trade_date" in perps_df.columns and "amount_usd" in perps_df.columns:
-                daily_perps = perps_df.groupby("trade_date")["amount_usd"].sum().reset_index()
+            if "trade_date" in perps_df.columns and "_volume_usd" in perps_df.columns:
+                daily_perps = perps_df.groupby("trade_date")["_volume_usd"].sum().reset_index()
                 daily_perps.columns = ["date", "volume"]
                 fig = make_time_series(daily_perps, "date", "volume", title="Daily Perps Volume ($)", color="#8B5CF6", kind="bar")
                 st.plotly_chart(fig, use_container_width=True)
@@ -1498,8 +1503,8 @@ with tab_trades:
             col_pv, col_po = st.columns(2)
 
             with col_pv:
-                if "asset" in perps_df.columns and "amount_usd" in perps_df.columns:
-                    pva = perps_df.groupby("asset")["amount_usd"].sum().sort_values(ascending=False).head(15).reset_index()
+                if "asset" in perps_df.columns and "_volume_usd" in perps_df.columns:
+                    pva = perps_df.groupby("asset")["_volume_usd"].sum().sort_values(ascending=False).head(15).reset_index()
                     pva.columns = ["asset", "volume"]
                     pva["volume"] = pva["volume"].round(0)
                     fig = make_h_bar(pva, "volume", "asset", title="Volume by Asset", color="#8B5CF6", x_prefix="$")
@@ -1543,7 +1548,7 @@ with tab_trades:
             if "is_close" in perps_df.columns:
                 perps_df["order_side"] = perps_df["is_close"].map(lambda x: "Close" if x else "Open")
                 oc_agg = perps_df.groupby("order_side").agg(
-                    volume=("amount_usd", "sum"), count=("amount_usd", "size"),
+                    volume=("_volume_usd", "sum"), count=("_volume_usd", "size"),
                 ).reset_index()
                 oc_agg.columns = ["type", "volume", "count"]
 
