@@ -6,6 +6,7 @@ import plotly.graph_objects as go
 import urllib.request
 import requests as _requests
 import json
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 from decimal import Decimal
 from zoneinfo import ZoneInfo
@@ -490,13 +491,19 @@ def load_events_for_date(date_str: str) -> list:
 
 @st.cache_data(ttl=300)
 def load_events_range(start_date: str, end_date: str) -> list:
-    all_items = []
     current = datetime.strptime(start_date, "%Y-%m-%d")
     # Fetch one extra UTC day so late-EST events (stored under next UTC date) are included
     end = datetime.strptime(end_date, "%Y-%m-%d") + timedelta(days=1)
+    dates = []
     while current <= end:
-        all_items.extend(load_events_for_date(current.strftime("%Y-%m-%d")))
+        dates.append(current.strftime("%Y-%m-%d"))
         current += timedelta(days=1)
+    # Fetch all days in parallel
+    all_items = []
+    with ThreadPoolExecutor(max_workers=min(len(dates), 8)) as pool:
+        futures = {pool.submit(load_events_for_date, d): d for d in dates}
+        for f in as_completed(futures):
+            all_items.extend(f.result())
     return all_items
 
 
@@ -629,9 +636,12 @@ end_str = end_date.strftime("%Y-%m-%d")
 num_days = (end_date - start_date).days + 1
 
 with st.spinner("Loading data..."):
-    events = load_events_range(start_str, end_str)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        events_future = pool.submit(load_events_range, start_str, end_str)
+        trades_future = pool.submit(load_trades_range, start_str, end_str)
+        events = events_future.result()
+        trades = trades_future.result()
     df = events_to_df(events)
-    trades = load_trades_range(start_str, end_str)
 
 # Filter out server/system entries from user metrics
 SYSTEM_WALLETS = {"server", "unknown", "system", ""}
@@ -1388,6 +1398,42 @@ with tab_trades:
         cb1.metric("Swap Volume", f"${fmt_number(swap_vol)}", delta=f"{len(swap_df)} swaps")
         cb2.metric("Perps Volume", f"${fmt_number(perps_vol)}", delta=f"{len(perps_df)} orders")
         cb3.metric("Deposit Volume", f"${fmt_number(deposit_vol)}", delta=f"{len(deposit_df)} deposits")
+
+        # --- Daily Trade Count (swaps + perps) ---
+        if not trades_only.empty and "trade_date" in trades_only.columns:
+            daily_counts = trades_only.groupby("trade_date").agg(
+                trades=("trade_date", "size"),
+                volume=("_volume_usd", "sum"),
+            ).reset_index()
+            daily_counts.columns = ["date", "trades", "volume"]
+
+            fig = go.Figure()
+            fig.add_trace(go.Bar(
+                x=daily_counts["date"], y=daily_counts["trades"],
+                name="Trades",
+                marker_color=BRAND,
+                hovertemplate="<b>%{x}</b><br>%{y} trades<extra></extra>",
+            ))
+            fig.add_trace(go.Scatter(
+                x=daily_counts["date"], y=daily_counts["volume"],
+                name="Volume ($)",
+                yaxis="y2",
+                mode="lines+markers",
+                line=dict(color=ACCENT, width=2.5),
+                marker=dict(size=6),
+                hovertemplate="<b>%{x}</b><br>$%{y:,.0f}<extra></extra>",
+            ))
+            fig.update_layout(
+                **PLOTLY_LAYOUT,
+                title="Daily Trades & Volume",
+                height=380,
+                yaxis=dict(title="Trades", **AXIS_DEFAULTS),
+                yaxis2=dict(title="Volume ($)", overlaying="y", side="right", **AXIS_DEFAULTS),
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+                barmode="group",
+            )
+            fig.update_xaxes(title="", **AXIS_DEFAULTS)
+            st.plotly_chart(fig, use_container_width=True)
 
         # ============================
         # SWAPS SECTION
