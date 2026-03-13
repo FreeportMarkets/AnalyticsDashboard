@@ -216,6 +216,7 @@ def make_funnel(steps, values, title=""):
 
 # --- AWS Setup ---
 @st.cache_resource
+@st.cache_resource
 def get_dynamodb():
     return boto3.resource(
         "dynamodb",
