@@ -508,20 +508,38 @@ def load_events_range(start_date: str, end_date: str) -> list:
     return all_items
 
 
-@st.cache_data(ttl=300, max_entries=2)
-def load_trades_range(start_date: str, end_date: str) -> list:
+@st.cache_data(ttl=300, max_entries=32)
+def load_trades_for_date(date_str: str) -> list:
+    """Query trades for a single date using the trade_date GSI (no table scan)."""
     db = get_dynamodb()
     table = db.Table(TRADES_TABLE)
     items, params = [], {
-        "FilterExpression": Key("timestamp").between(start_date + "T00:00:00", end_date + "T23:59:59"),
+        "IndexName": "trade_date-timestamp-index",
+        "KeyConditionExpression": Key("trade_date").eq(date_str),
     }
     while True:
-        resp = table.scan(**params)
+        resp = table.query(**params)
         items.extend(resp.get("Items", []))
         if "LastEvaluatedKey" not in resp:
             break
         params["ExclusiveStartKey"] = resp["LastEvaluatedKey"]
     return [decimal_to_float(i) for i in items]
+
+
+@st.cache_data(ttl=300, max_entries=2)
+def load_trades_range(start_date: str, end_date: str) -> list:
+    current = datetime.strptime(start_date, "%Y-%m-%d")
+    end = datetime.strptime(end_date, "%Y-%m-%d")
+    dates = []
+    while current <= end:
+        dates.append(current.strftime("%Y-%m-%d"))
+        current += timedelta(days=1)
+    all_items = []
+    with ThreadPoolExecutor(max_workers=min(len(dates), 8)) as pool:
+        futures = {pool.submit(load_trades_for_date, d): d for d in dates}
+        for f in as_completed(futures):
+            all_items.extend(f.result())
+    return all_items
 
 
 EVM_FEE_PAYER = "0xe39244f14AFB106255754538Cc718cAdFC0A9905"
