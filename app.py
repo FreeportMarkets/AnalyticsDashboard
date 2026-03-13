@@ -243,7 +243,7 @@ RENDER_SERVICES = ["Twitter_scraper", "Recommender", "Swap_Server-1", "TradeNews
 CF_NAMESPACE = "AWS/CloudFront"
 
 
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=300, max_entries=30)
 def load_cw_metric(metric_name, stat="Average", period=300, hours=24, dimensions=None):
     """Fetch a single CloudWatch metric time series."""
     try:
@@ -274,7 +274,7 @@ def load_cw_metric(metric_name, stat="Average", period=300, hours=24, dimensions
         return pd.DataFrame(columns=["timestamp", "value"])
 
 
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=300, max_entries=10)
 def load_cw_metric_by_dims(metric_name, dim_name, dim_values, stat="Sum", period=300, hours=24):
     """Fetch a CloudWatch metric broken down by a dimension."""
     frames = []
@@ -286,7 +286,7 @@ def load_cw_metric_by_dims(metric_name, dim_name, dim_values, stat="Sum", period
     return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(columns=["timestamp", "value", "dimension"])
 
 
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=300, max_entries=30)
 def load_render_metric(metric_name, stat="Average", period=300, hours=24, dimensions=None):
     """Fetch a metric from the Render namespace (OTel collector → EMF → CloudWatch)."""
     try:
@@ -317,7 +317,7 @@ def load_render_metric(metric_name, stat="Average", period=300, hours=24, dimens
         return pd.DataFrame(columns=["timestamp", "value"])
 
 
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=300, max_entries=10)
 def load_render_metric_by_service(metric_name, stat="Average", period=300, hours=24):
     """Fetch a Render metric broken down by service.name dimension."""
     # Discover which services report this metric
@@ -353,7 +353,7 @@ def get_logs_client():
     )
 
 
-@st.cache_data(ttl=120)
+@st.cache_data(ttl=120, max_entries=5)
 def query_render_logs(log_group, query, hours=1, limit=50):
     """Run a CloudWatch Insights query against a Render log group."""
     try:
@@ -384,7 +384,7 @@ def query_render_logs(log_group, query, hours=1, limit=50):
         return pd.DataFrame()
 
 
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=300, max_entries=10)
 def load_cloudfront_metric(metric_name, stat="Sum", period=300, hours=24, dist_id=None):
     """Fetch a CloudFront metric. Discovers distribution ID if not provided."""
     try:
@@ -425,7 +425,7 @@ def load_cloudfront_metric(metric_name, stat="Sum", period=300, hours=24, dist_i
         return pd.DataFrame(columns=["timestamp", "value"])
 
 
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=300, max_entries=1)
 def get_cloudfront_dist_id():
     """Discover the CloudFront distribution ID from CloudWatch."""
     try:
@@ -440,7 +440,7 @@ def get_cloudfront_dist_id():
         return None
 
 
-@st.cache_data(ttl=120)
+@st.cache_data(ttl=120, max_entries=5)
 def query_render_logs_stats(query, hours=1):
     """Run a CloudWatch Insights aggregation query, return DataFrame of results."""
     try:
@@ -475,7 +475,7 @@ TRADES_TABLE = "freeport-trades-history"
 
 
 # --- Data Loading ---
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=300, max_entries=32)
 def load_events_for_date(date_str: str) -> list:
     db = get_dynamodb()
     table = db.Table(ANALYTICS_TABLE)
@@ -489,7 +489,7 @@ def load_events_for_date(date_str: str) -> list:
     return [decimal_to_float(i) for i in items]
 
 
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=300, max_entries=2)
 def load_events_range(start_date: str, end_date: str) -> list:
     current = datetime.strptime(start_date, "%Y-%m-%d")
     # Fetch one extra UTC day so late-EST events (stored under next UTC date) are included
@@ -507,7 +507,7 @@ def load_events_range(start_date: str, end_date: str) -> list:
     return all_items
 
 
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=300, max_entries=2)
 def load_trades_range(start_date: str, end_date: str) -> list:
     db = get_dynamodb()
     table = db.Table(TRADES_TABLE)
@@ -640,8 +640,29 @@ with st.spinner("Loading data..."):
         events_future = pool.submit(load_events_range, start_str, end_str)
         trades_future = pool.submit(load_trades_range, start_str, end_str)
         events = events_future.result()
-        trades = trades_future.result()
+        trades_raw = trades_future.result()
     df = events_to_df(events)
+    del events  # free raw list — df holds all we need
+
+# Build trades DataFrame once (reused by Overview, Top Users, and Trades tabs)
+if trades_raw:
+    trades_df = pd.DataFrame(trades_raw)
+    if "amount_usd" in trades_df.columns:
+        trades_df["amount_usd"] = pd.to_numeric(trades_df["amount_usd"], errors="coerce")
+    if "timestamp" in trades_df.columns:
+        _ts = pd.to_datetime(trades_df["timestamp"], errors="coerce")
+        if _ts.dt.tz is None:
+            _ts = _ts.dt.tz_localize("UTC")
+        trades_df["ts"] = _ts.dt.tz_convert("America/New_York")
+        trades_df["trade_date"] = trades_df["ts"].dt.strftime("%Y-%m-%d")
+        trades_df["hour"] = trades_df["ts"].dt.hour
+        trades_df["dow"] = trades_df["ts"].dt.dayofweek
+    trades_df = apply_perps_leverage(trades_df)
+    if "_volume_usd" not in trades_df.columns:
+        trades_df["_volume_usd"] = trades_df["amount_usd"].copy()
+    del trades_raw  # free raw list
+else:
+    trades_df = pd.DataFrame()
 
 # Filter out server/system entries from user metrics
 SYSTEM_WALLETS = {"server", "unknown", "system", ""}
@@ -745,13 +766,9 @@ with tab_overview:
         st.markdown("---")
 
         # --- Trading Snapshot + User Insights ---
-        if trades:
-            tdf_ov = pd.DataFrame(trades)
-            if "amount_usd" in tdf_ov.columns:
-                tdf_ov["amount_usd"] = pd.to_numeric(tdf_ov["amount_usd"], errors="coerce")
-            tdf_ov = apply_perps_leverage(tdf_ov)
-            trades_only_ov = tdf_ov[tdf_ov["type"].isin(["swap", "perps"])] if "type" in tdf_ov.columns else tdf_ov
-            deposits_ov = tdf_ov[tdf_ov["type"] == "deposit"] if "type" in tdf_ov.columns else pd.DataFrame()
+        if not trades_df.empty:
+            trades_only_ov = trades_df[trades_df["type"].isin(["swap", "perps"])] if "type" in trades_df.columns else trades_df
+            deposits_ov = trades_df[trades_df["type"] == "deposit"] if "type" in trades_df.columns else pd.DataFrame()
 
             trade_vol = trades_only_ov["_volume_usd"].sum() if not trades_only_ov.empty and "_volume_usd" in trades_only_ov.columns else 0
             dep_vol = deposits_ov["_volume_usd"].sum() if not deposits_ov.empty and "_volume_usd" in deposits_ov.columns else 0
@@ -849,106 +866,102 @@ with tab_overview:
                         st.plotly_chart(fig, use_container_width=True)
 
                 # Trading comparison
-                if trades:
+                if not trades_df.empty and "wallet_address" in trades_df.columns:
                     ios_wallets = set(ios_df["wallet_address"].unique())
                     android_wallets = set(android_df["wallet_address"].unique())
-                    tdf_plat = pd.DataFrame(trades)
-                    if "amount_usd" in tdf_plat.columns and "wallet_address" in tdf_plat.columns:
-                        tdf_plat["amount_usd"] = pd.to_numeric(tdf_plat["amount_usd"], errors="coerce")
-                        tdf_plat = apply_perps_leverage(tdf_plat)
-                        trade_only = tdf_plat[tdf_plat["type"].isin(["swap", "perps"])] if "type" in tdf_plat.columns else tdf_plat
+                    trade_only = trades_df[trades_df["type"].isin(["swap", "perps"])] if "type" in trades_df.columns else trades_df
 
-                        ios_trades = trade_only[trade_only["wallet_address"].isin(ios_wallets)]
-                        android_trades = trade_only[trade_only["wallet_address"].isin(android_wallets)]
+                    ios_trades = trade_only[trade_only["wallet_address"].isin(ios_wallets)]
+                    android_trades = trade_only[trade_only["wallet_address"].isin(android_wallets)]
 
-                        ios_vol = ios_trades["_volume_usd"].sum() if not ios_trades.empty and "_volume_usd" in ios_trades.columns else 0
-                        android_vol = android_trades["_volume_usd"].sum() if not android_trades.empty and "_volume_usd" in android_trades.columns else 0
-                        ios_trade_ct = len(ios_trades)
-                        android_trade_ct = len(android_trades)
+                    ios_vol = ios_trades["_volume_usd"].sum() if not ios_trades.empty and "_volume_usd" in ios_trades.columns else 0
+                    android_vol = android_trades["_volume_usd"].sum() if not android_trades.empty and "_volume_usd" in android_trades.columns else 0
+                    ios_trade_ct = len(ios_trades)
+                    android_trade_ct = len(android_trades)
 
-                        tc1, tc2, tc3, tc4 = st.columns(4)
-                        tc1.metric("iOS Volume", f"${fmt_number(ios_vol)}")
-                        tc2.metric("Android Volume", f"${fmt_number(android_vol)}")
-                        tc3.metric("iOS Trades", fmt_number(ios_trade_ct))
-                        tc4.metric("Android Trades", fmt_number(android_trade_ct))
+                    tc1, tc2, tc3, tc4 = st.columns(4)
+                    tc1.metric("iOS Volume", f"${fmt_number(ios_vol)}")
+                    tc2.metric("Android Volume", f"${fmt_number(android_vol)}")
+                    tc3.metric("iOS Trades", fmt_number(ios_trade_ct))
+                    tc4.metric("Android Trades", fmt_number(android_trade_ct))
 
-                        # Perps breakdown by platform
-                        if "type" in tdf_plat.columns:
-                            perps_all = tdf_plat[tdf_plat["type"] == "perps"]
-                            if not perps_all.empty:
-                                ios_perps = perps_all[perps_all["wallet_address"].isin(ios_wallets)]
-                                android_perps = perps_all[perps_all["wallet_address"].isin(android_wallets)]
+                    # Perps breakdown by platform
+                    if "type" in trades_df.columns:
+                        perps_all = trades_df[trades_df["type"] == "perps"]
+                        if not perps_all.empty:
+                            ios_perps = perps_all[perps_all["wallet_address"].isin(ios_wallets)]
+                            android_perps = perps_all[perps_all["wallet_address"].isin(android_wallets)]
 
-                                ios_p_vol = ios_perps["_volume_usd"].sum() if not ios_perps.empty else 0
-                                android_p_vol = android_perps["_volume_usd"].sum() if not android_perps.empty else 0
-                                ios_p_ct = len(ios_perps)
-                                android_p_ct = len(android_perps)
-                                ios_p_traders = ios_perps["wallet_address"].nunique() if not ios_perps.empty else 0
-                                android_p_traders = android_perps["wallet_address"].nunique() if not android_perps.empty else 0
-                                ios_p_avg = ios_p_vol / ios_p_ct if ios_p_ct > 0 else 0
-                                android_p_avg = android_p_vol / android_p_ct if android_p_ct > 0 else 0
+                            ios_p_vol = ios_perps["_volume_usd"].sum() if not ios_perps.empty else 0
+                            android_p_vol = android_perps["_volume_usd"].sum() if not android_perps.empty else 0
+                            ios_p_ct = len(ios_perps)
+                            android_p_ct = len(android_perps)
+                            ios_p_traders = ios_perps["wallet_address"].nunique() if not ios_perps.empty else 0
+                            android_p_traders = android_perps["wallet_address"].nunique() if not android_perps.empty else 0
+                            ios_p_avg = ios_p_vol / ios_p_ct if ios_p_ct > 0 else 0
+                            android_p_avg = android_p_vol / android_p_ct if android_p_ct > 0 else 0
 
-                                st.markdown("**Perpetuals**")
-                                pp1, pp2, pp3, pp4 = st.columns(4)
-                                pp1.metric("iOS Perps Volume", f"${fmt_number(ios_p_vol)}")
-                                pp2.metric("Android Perps Volume", f"${fmt_number(android_p_vol)}")
-                                pp3.metric("iOS Perps Traders", fmt_number(ios_p_traders))
-                                pp4.metric("Android Perps Traders", fmt_number(android_p_traders))
+                            st.markdown("**Perpetuals**")
+                            pp1, pp2, pp3, pp4 = st.columns(4)
+                            pp1.metric("iOS Perps Volume", f"${fmt_number(ios_p_vol)}")
+                            pp2.metric("Android Perps Volume", f"${fmt_number(android_p_vol)}")
+                            pp3.metric("iOS Perps Traders", fmt_number(ios_p_traders))
+                            pp4.metric("Android Perps Traders", fmt_number(android_p_traders))
 
-                                pp5, pp6, pp7, pp8 = st.columns(4)
-                                pp5.metric("iOS Orders", fmt_number(ios_p_ct))
-                                pp6.metric("Android Orders", fmt_number(android_p_ct))
-                                pp7.metric("iOS Avg Order", f"${ios_p_avg:,.0f}")
-                                pp8.metric("Android Avg Order", f"${android_p_avg:,.0f}")
+                            pp5, pp6, pp7, pp8 = st.columns(4)
+                            pp5.metric("iOS Orders", fmt_number(ios_p_ct))
+                            pp6.metric("Android Orders", fmt_number(android_p_ct))
+                            pp7.metric("iOS Avg Order", f"${ios_p_avg:,.0f}")
+                            pp8.metric("Android Avg Order", f"${android_p_avg:,.0f}")
 
-                                # Leverage comparison
-                                if "leverage" in perps_all.columns:
-                                    ios_lev = pd.to_numeric(ios_perps["leverage"], errors="coerce").dropna() if not ios_perps.empty else pd.Series(dtype=float)
-                                    and_lev = pd.to_numeric(android_perps["leverage"], errors="coerce").dropna() if not android_perps.empty else pd.Series(dtype=float)
-                                    lv1, lv2 = st.columns(2)
-                                    lv1.metric("iOS Avg Leverage", f"{ios_lev.mean():.1f}x" if not ios_lev.empty else "N/A")
-                                    lv2.metric("Android Avg Leverage", f"{and_lev.mean():.1f}x" if not and_lev.empty else "N/A")
+                            # Leverage comparison
+                            if "leverage" in perps_all.columns:
+                                ios_lev = pd.to_numeric(ios_perps["leverage"], errors="coerce").dropna() if not ios_perps.empty else pd.Series(dtype=float)
+                                and_lev = pd.to_numeric(android_perps["leverage"], errors="coerce").dropna() if not android_perps.empty else pd.Series(dtype=float)
+                                lv1, lv2 = st.columns(2)
+                                lv1.metric("iOS Avg Leverage", f"{ios_lev.mean():.1f}x" if not ios_lev.empty else "N/A")
+                                lv2.metric("Android Avg Leverage", f"{and_lev.mean():.1f}x" if not and_lev.empty else "N/A")
 
-                                # Long/Short split per platform
-                                if "side" in perps_all.columns:
-                                    col_ios_ls, col_and_ls = st.columns(2)
-                                    with col_ios_ls:
-                                        if not ios_perps.empty:
-                                            ios_sides = ios_perps["side"].value_counts().reset_index()
-                                            ios_sides.columns = ["side", "count"]
-                                            colors = {"Long": ACCENT, "Short": ACCENT_RED, "long": ACCENT, "short": ACCENT_RED}
-                                            fig = px.pie(ios_sides, values="count", names="side", hole=0.5,
-                                                         color="side", color_discrete_map=colors)
-                                            fig.update_traces(textinfo="label+percent+value", textfont=dict(size=13, color="white"))
-                                            fig.update_layout(**PLOTLY_LAYOUT, title="iOS Long vs Short", height=300, showlegend=False)
-                                            st.plotly_chart(fig, use_container_width=True)
-                                    with col_and_ls:
-                                        if not android_perps.empty:
-                                            and_sides = android_perps["side"].value_counts().reset_index()
-                                            and_sides.columns = ["side", "count"]
-                                            fig = px.pie(and_sides, values="count", names="side", hole=0.5,
-                                                         color="side", color_discrete_map=colors)
-                                            fig.update_traces(textinfo="label+percent+value", textfont=dict(size=13, color="white"))
-                                            fig.update_layout(**PLOTLY_LAYOUT, title="Android Long vs Short", height=300, showlegend=False)
-                                            st.plotly_chart(fig, use_container_width=True)
+                            # Long/Short split per platform
+                            if "side" in perps_all.columns:
+                                col_ios_ls, col_and_ls = st.columns(2)
+                                with col_ios_ls:
+                                    if not ios_perps.empty:
+                                        ios_sides = ios_perps["side"].value_counts().reset_index()
+                                        ios_sides.columns = ["side", "count"]
+                                        colors = {"Long": ACCENT, "Short": ACCENT_RED, "long": ACCENT, "short": ACCENT_RED}
+                                        fig = px.pie(ios_sides, values="count", names="side", hole=0.5,
+                                                     color="side", color_discrete_map=colors)
+                                        fig.update_traces(textinfo="label+percent+value", textfont=dict(size=13, color="white"))
+                                        fig.update_layout(**PLOTLY_LAYOUT, title="iOS Long vs Short", height=300, showlegend=False)
+                                        st.plotly_chart(fig, use_container_width=True)
+                                with col_and_ls:
+                                    if not android_perps.empty:
+                                        and_sides = android_perps["side"].value_counts().reset_index()
+                                        and_sides.columns = ["side", "count"]
+                                        fig = px.pie(and_sides, values="count", names="side", hole=0.5,
+                                                     color="side", color_discrete_map=colors)
+                                        fig.update_traces(textinfo="label+percent+value", textfont=dict(size=13, color="white"))
+                                        fig.update_layout(**PLOTLY_LAYOUT, title="Android Long vs Short", height=300, showlegend=False)
+                                        st.plotly_chart(fig, use_container_width=True)
 
-                                # Top assets per platform
-                                if "asset" in perps_all.columns:
-                                    col_ios_a, col_and_a = st.columns(2)
-                                    with col_ios_a:
-                                        if not ios_perps.empty and "_volume_usd" in ios_perps.columns:
-                                            ios_assets = ios_perps.groupby("asset")["_volume_usd"].sum().sort_values(ascending=False).head(10).reset_index()
-                                            ios_assets.columns = ["asset", "volume"]
-                                            ios_assets["volume"] = ios_assets["volume"].round(0)
-                                            fig = make_h_bar(ios_assets, "volume", "asset", title="iOS Top Assets", color=BRAND, x_prefix="$")
-                                            st.plotly_chart(fig, use_container_width=True)
-                                    with col_and_a:
-                                        if not android_perps.empty and "_volume_usd" in android_perps.columns:
-                                            and_assets = android_perps.groupby("asset")["_volume_usd"].sum().sort_values(ascending=False).head(10).reset_index()
-                                            and_assets.columns = ["asset", "volume"]
-                                            and_assets["volume"] = and_assets["volume"].round(0)
-                                            fig = make_h_bar(and_assets, "volume", "asset", title="Android Top Assets", color=ACCENT, x_prefix="$")
-                                            st.plotly_chart(fig, use_container_width=True)
+                            # Top assets per platform
+                            if "asset" in perps_all.columns:
+                                col_ios_a, col_and_a = st.columns(2)
+                                with col_ios_a:
+                                    if not ios_perps.empty and "_volume_usd" in ios_perps.columns:
+                                        ios_assets = ios_perps.groupby("asset")["_volume_usd"].sum().sort_values(ascending=False).head(10).reset_index()
+                                        ios_assets.columns = ["asset", "volume"]
+                                        ios_assets["volume"] = ios_assets["volume"].round(0)
+                                        fig = make_h_bar(ios_assets, "volume", "asset", title="iOS Top Assets", color=BRAND, x_prefix="$")
+                                        st.plotly_chart(fig, use_container_width=True)
+                                with col_and_a:
+                                    if not android_perps.empty and "_volume_usd" in android_perps.columns:
+                                        and_assets = android_perps.groupby("asset")["_volume_usd"].sum().sort_values(ascending=False).head(10).reset_index()
+                                        and_assets.columns = ["asset", "volume"]
+                                        and_assets["volume"] = and_assets["volume"].round(0)
+                                        fig = make_h_bar(and_assets, "volume", "asset", title="Android Top Assets", color=ACCENT, x_prefix="$")
+                                        st.plotly_chart(fig, use_container_width=True)
 
         st.markdown("---")
 
@@ -1060,14 +1073,9 @@ with tab_users:
 
         # --- Top Traders ---
         st.subheader("Top Traders")
-        if trades:
-            tdf = pd.DataFrame(trades)
-            # Exclude deposits from trader leaderboards
-            if "type" in tdf.columns:
-                tdf = tdf[tdf["type"] != "deposit"]
-            if not tdf.empty and "amount_usd" in tdf.columns and "wallet_address" in tdf.columns:
-                tdf["amount_usd"] = pd.to_numeric(tdf["amount_usd"], errors="coerce")
-                tdf = apply_perps_leverage(tdf)
+        if not trades_df.empty:
+            tdf = trades_df[trades_df["type"] != "deposit"] if "type" in trades_df.columns else trades_df
+            if not tdf.empty and "wallet_address" in tdf.columns:
 
                 col_vol, col_count = st.columns(2)
 
@@ -1146,19 +1154,15 @@ with tab_users:
                 fig = make_time_series(ud, "date", "events", title="Daily Activity", color=ACCENT, kind="bar")
                 st.plotly_chart(fig, use_container_width=True)
 
-            if trades:
-                user_trades = [t for t in trades if t.get("wallet_address") == full_wallet]
-                if user_trades:
-                    utdf = pd.DataFrame(user_trades)
-                    if "amount_usd" in utdf.columns:
-                        utdf["amount_usd"] = pd.to_numeric(utdf["amount_usd"], errors="coerce")
-                        utdf = apply_perps_leverage(utdf)
-                        st.markdown(f"**Trades:** {len(utdf)} trades | **${utdf['amount_usd'].sum():,.2f}** total volume")
-                        display_cols = [c for c in ["timestamp", "from_token", "to_token", "amount_usd", "status", "source"] if c in utdf.columns]
-                        display_df = utdf[display_cols].sort_values("timestamp", ascending=False).copy()
-                        if "timestamp" in display_df.columns:
-                            display_df["timestamp"] = pd.to_datetime(display_df["timestamp"], errors="coerce", utc=True).dt.tz_convert("America/New_York").dt.strftime("%b %d, %I:%M %p")
-                        st.dataframe(display_df, use_container_width=True, hide_index=True)
+            if not trades_df.empty and "wallet_address" in trades_df.columns:
+                utdf = trades_df[trades_df["wallet_address"] == full_wallet]
+                if not utdf.empty:
+                    st.markdown(f"**Trades:** {len(utdf)} trades | **${utdf['_volume_usd'].sum():,.2f}** total volume")
+                    display_cols = [c for c in ["timestamp", "from_token", "to_token", "amount_usd", "status", "source"] if c in utdf.columns]
+                    display_df = utdf[display_cols].sort_values("timestamp", ascending=False).copy()
+                    if "timestamp" in display_df.columns:
+                        display_df["timestamp"] = pd.to_datetime(display_df["timestamp"], errors="coerce", utc=True).dt.tz_convert("America/New_York").dt.strftime("%b %d, %I:%M %p")
+                    st.dataframe(display_df, use_container_width=True, hide_index=True)
 
 
 # =====================
@@ -1351,30 +1355,15 @@ with tab_funnels:
 # TAB 5: Trades
 # =====================
 with tab_trades:
-    if not trades:
+    if trades_df.empty:
         st.info("No trades found for this date range.")
     else:
-        tdf = pd.DataFrame(trades)
-        if "amount_usd" in tdf.columns:
-            tdf["amount_usd"] = pd.to_numeric(tdf["amount_usd"], errors="coerce")
-        if "timestamp" in tdf.columns:
-            ts = pd.to_datetime(tdf["timestamp"], errors="coerce")
-            if ts.dt.tz is None:
-                ts = ts.dt.tz_localize("UTC")
-            tdf["ts"] = ts.dt.tz_convert("America/New_York")
-            tdf["trade_date"] = tdf["ts"].dt.strftime("%Y-%m-%d")
-            tdf["hour"] = tdf["ts"].dt.hour
-            tdf["dow"] = tdf["ts"].dt.dayofweek
+        tdf = trades_df
 
-        # Compute notional volume (handles Ostium exception + sets _volume_usd for round-trip closes)
-        tdf = apply_perps_leverage(tdf)
-        if "_volume_usd" not in tdf.columns:
-            tdf["_volume_usd"] = tdf["amount_usd"].copy()
-
-        # Split by type
-        swap_df = tdf[tdf["type"] == "swap"].copy() if "type" in tdf.columns else tdf.copy()
-        perps_df = tdf[tdf["type"] == "perps"].copy() if "type" in tdf.columns else pd.DataFrame()
-        deposit_df = tdf[tdf["type"] == "deposit"].copy() if "type" in tdf.columns else pd.DataFrame()
+        # Split by type (views, not copies)
+        swap_df = tdf[tdf["type"] == "swap"] if "type" in tdf.columns else tdf
+        perps_df = tdf[tdf["type"] == "perps"] if "type" in tdf.columns else pd.DataFrame()
+        deposit_df = tdf[tdf["type"] == "deposit"] if "type" in tdf.columns else pd.DataFrame()
 
         trades_only = pd.concat([swap_df, perps_df], ignore_index=True)  # exclude deposits
 
@@ -1592,8 +1581,8 @@ with tab_trades:
 
             # Open vs Close — volume & count
             if "is_close" in perps_df.columns:
-                perps_df["order_side"] = perps_df["is_close"].map(lambda x: "Close" if x else "Open")
-                oc_agg = perps_df.groupby("order_side").agg(
+                order_side = perps_df["is_close"].map(lambda x: "Close" if x else "Open")
+                oc_agg = perps_df.assign(order_side=order_side).groupby("order_side").agg(
                     volume=("_volume_usd", "sum"), count=("_volume_usd", "size"),
                 ).reset_index()
                 oc_agg.columns = ["type", "volume", "count"]
