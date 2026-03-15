@@ -216,7 +216,6 @@ def make_funnel(steps, values, title=""):
 
 # --- AWS Setup ---
 @st.cache_resource
-@st.cache_resource
 def get_dynamodb():
     return boto3.resource(
         "dynamodb",
@@ -510,7 +509,7 @@ def load_events_range(start_date: str, end_date: str) -> list:
 
 @st.cache_data(ttl=300, max_entries=32)
 def load_trades_for_date(date_str: str) -> list:
-    """Query trades for a single date using the trade_date GSI (no table scan)."""
+    """Query trades for a single date using the trade_date GSI."""
     db = get_dynamodb()
     table = db.Table(TRADES_TABLE)
     items, params = [], {
@@ -526,20 +525,40 @@ def load_trades_for_date(date_str: str) -> list:
     return [decimal_to_float(i) for i in items]
 
 
+def _load_trades_scan(start_date: str, end_date: str) -> list:
+    """Fallback: full table scan with timestamp filter (used if GSI unavailable)."""
+    db = get_dynamodb()
+    table = db.Table(TRADES_TABLE)
+    items, params = [], {
+        "FilterExpression": Key("timestamp").between(start_date + "T00:00:00", end_date + "T23:59:59"),
+    }
+    while True:
+        resp = table.scan(**params)
+        items.extend(resp.get("Items", []))
+        if "LastEvaluatedKey" not in resp:
+            break
+        params["ExclusiveStartKey"] = resp["LastEvaluatedKey"]
+    return [decimal_to_float(i) for i in items]
+
+
 @st.cache_data(ttl=300, max_entries=2)
 def load_trades_range(start_date: str, end_date: str) -> list:
-    current = datetime.strptime(start_date, "%Y-%m-%d")
-    end = datetime.strptime(end_date, "%Y-%m-%d")
-    dates = []
-    while current <= end:
-        dates.append(current.strftime("%Y-%m-%d"))
-        current += timedelta(days=1)
-    all_items = []
-    with ThreadPoolExecutor(max_workers=min(len(dates), 8)) as pool:
-        futures = {pool.submit(load_trades_for_date, d): d for d in dates}
-        for f in as_completed(futures):
-            all_items.extend(f.result())
-    return all_items
+    # Try GSI-based parallel fetch first; fall back to scan if GSI missing
+    try:
+        current = datetime.strptime(start_date, "%Y-%m-%d")
+        end = datetime.strptime(end_date, "%Y-%m-%d")
+        dates = []
+        while current <= end:
+            dates.append(current.strftime("%Y-%m-%d"))
+            current += timedelta(days=1)
+        all_items = []
+        with ThreadPoolExecutor(max_workers=min(len(dates), 8)) as pool:
+            futures = {pool.submit(load_trades_for_date, d): d for d in dates}
+            for f in as_completed(futures):
+                all_items.extend(f.result())
+        return all_items
+    except Exception:
+        return _load_trades_scan(start_date, end_date)
 
 
 EVM_FEE_PAYER = "0xe39244f14AFB106255754538Cc718cAdFC0A9905"
