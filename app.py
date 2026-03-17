@@ -243,7 +243,7 @@ RENDER_SERVICES = ["Twitter_scraper", "Recommender", "Swap_Server-1", "TradeNews
 CF_NAMESPACE = "AWS/CloudFront"
 
 
-@st.cache_data(ttl=300, max_entries=30)
+@st.cache_data(ttl=300, max_entries=10)
 def load_cw_metric(metric_name, stat="Average", period=300, hours=24, dimensions=None):
     """Fetch a single CloudWatch metric time series."""
     try:
@@ -286,7 +286,7 @@ def load_cw_metric_by_dims(metric_name, dim_name, dim_values, stat="Sum", period
     return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(columns=["timestamp", "value", "dimension"])
 
 
-@st.cache_data(ttl=300, max_entries=30)
+@st.cache_data(ttl=300, max_entries=10)
 def load_render_metric(metric_name, stat="Average", period=300, hours=24, dimensions=None):
     """Fetch a metric from the Render namespace (OTel collector → EMF → CloudWatch)."""
     try:
@@ -475,7 +475,7 @@ TRADES_TABLE = "freeport-trades-history"
 
 
 # --- Data Loading ---
-@st.cache_data(ttl=300, max_entries=32)
+@st.cache_resource(ttl=300, max_entries=10)
 def load_events_for_date(date_str: str) -> list:
     db = get_dynamodb()
     table = db.Table(ANALYTICS_TABLE)
@@ -489,7 +489,6 @@ def load_events_for_date(date_str: str) -> list:
     return [decimal_to_float(i) for i in items]
 
 
-@st.cache_data(ttl=300, max_entries=2)
 def load_events_range(start_date: str, end_date: str) -> list:
     current = datetime.strptime(start_date, "%Y-%m-%d")
     # Fetch one extra UTC day so late-EST events (stored under next UTC date) are included
@@ -507,7 +506,7 @@ def load_events_range(start_date: str, end_date: str) -> list:
     return all_items
 
 
-@st.cache_data(ttl=300, max_entries=32)
+@st.cache_resource(ttl=300, max_entries=10)
 def load_trades_for_date(date_str: str) -> list:
     """Query trades for a single date using the trade_date GSI."""
     db = get_dynamodb()
@@ -541,7 +540,6 @@ def _load_trades_scan(start_date: str, end_date: str) -> list:
     return [decimal_to_float(i) for i in items]
 
 
-@st.cache_data(ttl=300, max_entries=2)
 def load_trades_range(start_date: str, end_date: str) -> list:
     # Try GSI-based parallel fetch first; fall back to scan if GSI missing
     try:
@@ -573,7 +571,7 @@ ARB_RPC_URLS = [
 ]
 
 
-@st.cache_data(ttl=120)
+@st.cache_data(ttl=120, max_entries=1)
 def fetch_evm_balance(address: str) -> float | None:
     """Fetch ETH balance on Arbitrum via public RPC (with fallbacks)."""
     payload = {
@@ -591,7 +589,7 @@ def fetch_evm_balance(address: str) -> float | None:
     return None
 
 
-@st.cache_data(ttl=120)
+@st.cache_data(ttl=120, max_entries=1)
 def fetch_sol_balance(address: str) -> float | None:
     """Fetch SOL balance via Solana public RPC."""
     try:
@@ -697,7 +695,7 @@ if trades_raw:
         trades_df["dow"] = trades_df["ts"].dt.dayofweek
     trades_df = apply_perps_leverage(trades_df)
     if "_volume_usd" not in trades_df.columns:
-        trades_df["_volume_usd"] = trades_df["amount_usd"].copy()
+        trades_df["_volume_usd"] = trades_df["amount_usd"]
     del trades_raw  # free raw list
 else:
     trades_df = pd.DataFrame()
@@ -708,9 +706,9 @@ if not df.empty and "wallet_address" in df.columns:
     is_real_user = ~df["wallet_address"].isin(SYSTEM_WALLETS)
     if "platform" in df.columns:
         is_real_user = is_real_user & (df["platform"] != "server")
-    user_df = df[is_real_user].copy()
+    user_df = df[is_real_user]
 else:
-    user_df = df.copy()
+    user_df = df
 
 st.sidebar.markdown("---")
 st.sidebar.metric("Total Events", fmt_number(len(df)))
