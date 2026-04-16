@@ -807,21 +807,23 @@ def _extract_privy_identity(user: dict) -> dict:
 
 
 @st.cache_data(ttl=3600, max_entries=1, show_spinner=False)
-def load_privy_users() -> dict:
+def load_privy_users() -> tuple:
     """Fetch every Privy user (paginated) and build wallet_lower -> identity dict.
 
-    Cached for 1 hour. Returns empty dict silently if Privy isn't configured or
-    the API is unreachable — the dashboard still works, just without labels.
+    Returns (mapping, status_string). status is one of:
+      "not_configured" | "ok (N users)" | "http <code>" | "error: <msg>"
+    Cached for 1 hour. Never raises — dashboard keeps working without labels.
     """
     app_id, secret = _privy_credentials()
     if not app_id or not secret:
-        return {}
+        return {}, "not_configured"
 
     headers = {"privy-app-id": app_id}
     auth = (app_id, secret)
     mapping: dict = {}
     cursor = None
     pages = 0
+    total_users = 0
     try:
         while True:
             params = {"limit": 100}
@@ -832,9 +834,11 @@ def load_privy_users() -> dict:
                 headers=headers, auth=auth, params=params, timeout=20,
             )
             if resp.status_code != 200:
-                break
+                return mapping, f"http {resp.status_code}: {resp.text[:200]}"
             body = resp.json()
-            for u in body.get("data", []):
+            page_users = body.get("data", [])
+            total_users += len(page_users)
+            for u in page_users:
                 ident = _extract_privy_identity(u)
                 for w in ident["wallets"]:
                     mapping[w] = ident
@@ -842,9 +846,9 @@ def load_privy_users() -> dict:
             pages += 1
             if not cursor or pages > 200:  # safety cap ~20k users
                 break
-    except Exception:
-        return mapping
-    return mapping
+    except Exception as e:
+        return mapping, f"error: {type(e).__name__}: {str(e)[:200]}"
+    return mapping, f"ok ({total_users} users, {len(mapping)} wallets)"
 
 
 LOGIN_TYPE_BADGE = {
@@ -943,7 +947,7 @@ with st.spinner("Loading data..."):
         privy_future = pool.submit(load_privy_users)
         events = events_future.result()
         trades_raw = trades_future.result()
-        privy_map = privy_future.result()
+        privy_map, privy_status = privy_future.result()
     df = events_to_df(events)
     del events  # free raw list — df holds all we need
 
@@ -983,11 +987,22 @@ if not user_df.empty:
     unique_wallets = user_df["wallet_address"].nunique()
     st.sidebar.metric("Unique Users", fmt_number(unique_wallets))
     st.sidebar.metric("Date Range", f"{num_days} days")
-    if privy_map:
-        matched = user_df["wallet_address"].astype(str).str.lower().isin(privy_map.keys()).sum()
+
+# --- Privy status (always visible for diagnostics) ---
+st.sidebar.markdown("---")
+st.sidebar.markdown("**Privy identity**")
+if privy_status == "not_configured":
+    st.sidebar.warning("⚠️ Not configured. Add `[privy]` to Streamlit Cloud secrets.")
+elif privy_status.startswith("ok"):
+    if not user_df.empty:
+        unique_wallets = user_df["wallet_address"].nunique()
         matched_unique = user_df[user_df["wallet_address"].astype(str).str.lower().isin(privy_map.keys())]["wallet_address"].nunique()
         pct = (matched_unique / unique_wallets * 100) if unique_wallets > 0 else 0
-        st.sidebar.metric("Privy-matched", f"{matched_unique}/{unique_wallets}", delta=f"{pct:.0f}%", delta_color="off")
+        st.sidebar.metric("Matched users", f"{matched_unique}/{unique_wallets}", delta=f"{pct:.0f}%", delta_color="off")
+    st.sidebar.caption(f"✅ {privy_status}")
+else:
+    st.sidebar.error(f"❌ {privy_status}")
+
 st.sidebar.markdown("---")
 st.sidebar.caption("Data refreshes every 5 minutes")
 st.sidebar.caption("User identities cached 1 hour")
