@@ -319,7 +319,7 @@ def load_render_metric(metric_name, stat="Average", period=300, hours=24, dimens
 
 @st.cache_data(ttl=300, max_entries=10)
 def load_render_metric_by_service(metric_name, stat="Average", period=300, hours=24):
-    """Fetch a Render metric broken down by service.name dimension."""
+    """Fetch a Render metric broken down by service.name dimension (parallel)."""
     # Discover which services report this metric
     try:
         cw = get_cloudwatch()
@@ -333,13 +333,18 @@ def load_render_metric_by_service(metric_name, stat="Average", period=300, hours
     if not svc_names:
         svc_names = RENDER_SERVICES
 
-    frames = []
-    for svc in svc_names:
+    def _fetch(svc):
         df = load_render_metric(metric_name, stat=stat, period=period, hours=hours,
                                 dimensions={"service.name": svc})
         if not df.empty:
             df["service"] = svc
-            frames.append(df)
+        return df
+
+    frames = []
+    with ThreadPoolExecutor(max_workers=min(len(svc_names), 8)) as pool:
+        for df in pool.map(_fetch, svc_names):
+            if not df.empty:
+                frames.append(df)
     return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(columns=["timestamp", "value", "service"])
 
 
@@ -440,6 +445,25 @@ def get_cloudfront_dist_id():
         return None
 
 
+def prefetch_in_parallel(calls: list, max_workers: int = 16):
+    """Fire a list of cache-warming callables concurrently.
+
+    Each entry is (func, args_tuple, kwargs_dict). The results are discarded —
+    the goal is to populate the @st.cache_data caches so the subsequent
+    sequential tab code hits warm caches and returns instantly. Errors are
+    swallowed per-call (individual metrics are allowed to fail).
+    """
+    if not calls:
+        return
+    with ThreadPoolExecutor(max_workers=min(max_workers, len(calls))) as pool:
+        futures = [pool.submit(f, *a, **kw) for f, a, kw in calls]
+        for fut in as_completed(futures):
+            try:
+                fut.result()
+            except Exception:
+                pass
+
+
 @st.cache_data(ttl=120, max_entries=5)
 def query_render_logs_stats(query, hours=1):
     """Run a CloudWatch Insights aggregation query, return DataFrame of results."""
@@ -472,6 +496,116 @@ def query_render_logs_stats(query, hours=1):
 
 ANALYTICS_TABLE = "freeport-analytics-events"
 TRADES_TABLE = "freeport-trades-history"
+
+
+# --- CloudWatch Log Insights query strings used by the Services Health tab ---
+# Kept here so the Services Health lazy prefetch can warm all of them in parallel
+# via the @st.cache_data layer before the tab body walks them sequentially.
+LOG_Q_ERR_BY_SVC = (
+    'parse @message /^<(?<pri>\\d+)>/'
+    ' | filter pri <= 4'
+    ' | parse @message /^<\\d+>\\d+ \\S+ (?<svc>\\S+)/'
+    ' | stats count(*) as errors by svc'
+    ' | sort errors desc'
+    ' | limit 15'
+)
+LOG_Q_ERR_TIMELINE = (
+    'parse @message /^<(?<pri>\\d+)>/'
+    ' | filter pri <= 4'
+    ' | stats count(*) as errors by bin(1h) as hour'
+    ' | sort hour asc'
+)
+LOG_Q_ERR_HTTP = (
+    'parse @message /^<(?<pri>\\d+)>/'
+    ' | filter pri <= 4 and @message like /http-request/'
+    ' | parse @message /^<\\d+>\\d+ \\S+ (?<svc>\\S+)/'
+    ' | parse @message /^<\\d+>\\d+ \\S+ \\S+ \\S+ \\d+ \\S+ - (?<body>.*)/'
+    ' | parse body /"statusCode":(?<sc>\\d+)/'
+    ' | filter sc >= 400'
+    ' | parse body /"path":"(?<rawpath>[^"]+)"/'
+    ' | parse rawpath /^\\/(?<endpoint>[^?]+)/'
+    ' | stats count(*) as cnt by svc, concat("HTTP ", sc, " /", endpoint) as detail'
+    ' | sort cnt desc'
+    ' | limit 15'
+)
+LOG_Q_ERR_APP = (
+    'parse @message /^<(?<pri>\\d+)>/'
+    ' | filter pri <= 4 and @message not like /http-request/'
+    ' | parse @message /^<\\d+>\\d+ \\S+ (?<svc>\\S+) \\S+ \\d+ \\S+ - (?<body>.*)/'
+    ' | stats count(*) as cnt by svc, body as detail'
+    ' | sort cnt desc'
+    ' | limit 15'
+)
+LOG_Q_RECENT_ERRORS = (
+    'parse @message /^<(?<pri>\\d+)>/'
+    ' | filter pri <= 4'
+    ' | parse @message /^<\\d+>\\d+ (?<ts>\\S+) (?<svc>\\S+) \\S+ \\d+ \\S+ - (?<body>.*)/'
+    ' | fields ts, svc, body'
+    ' | sort @timestamp desc'
+    ' | limit 30'
+)
+LOG_Q_ERR_SUMMARY = (
+    'filter @message like /(?i)(error|exception|fatal|crash|ECONNREFUSED)/'
+    ' | stats count(*) as errors by bin(1h) as hour'
+    ' | sort hour desc'
+)
+LOG_Q_SWAP_ERRORS = (
+    'filter @message like /swap-server/ and @message like /http-request/'
+    ' | parse @message /^<\\d+>\\d+ \\S+ \\S+ \\S+ \\d+ \\S+ - (?<body>.*)/'
+    ' | parse body /"statusCode":(?<sc>\\d+)/'
+    ' | filter sc >= 400'
+    ' | parse body /"path":"(?<rawpath>[^"]+)"/'
+    ' | parse rawpath /^\\/(?<endpoint>[^?]+)/'
+    ' | parse rawpath /outputMint=(?<out_mint>[^&]+)/'
+    ' | stats count(*) as cnt by sc, endpoint, out_mint'
+    ' | sort cnt desc'
+    ' | limit 20'
+)
+LOG_Q_SWAP_TIMELINE = (
+    'filter @message like /swap-server/ and @message like /http-request/'
+    ' | parse @message /^<\\d+>\\d+ \\S+ \\S+ \\S+ \\d+ \\S+ - (?<body>.*)/'
+    ' | parse body /"statusCode":(?<sc>\\d+)/'
+    ' | filter sc >= 400'
+    ' | stats count(*) as errors by bin(1h) as hour'
+    ' | sort hour asc'
+)
+LOG_Q_SWAP_RECENT = (
+    'filter @message like /swap-server/ and @message like /http-request/'
+    ' | parse @message /^<\\d+>\\d+ \\S+ \\S+ \\S+ \\d+ \\S+ - (?<body>.*)/'
+    ' | parse body /"statusCode":(?<sc>\\d+)/'
+    ' | filter sc >= 400'
+    ' | parse body /"time":"(?<ts>[^"]+)"/'
+    ' | parse body /"method":"(?<method>[^"]+)"/'
+    ' | parse body /"path":"(?<rawpath>[^"]+)"/'
+    ' | parse body /"responseTimeMS":(?<latency>\\d+)/'
+    ' | parse rawpath /^\\/(?<endpoint>[^?]+)/'
+    ' | parse rawpath /inputMint=(?<in_mint>[^&]+)/'
+    ' | parse rawpath /outputMint=(?<out_mint>[^&]+)/'
+    ' | fields ts, sc, method, endpoint, latency, in_mint, out_mint'
+    ' | sort @timestamp desc'
+    ' | limit 25'
+)
+LOG_Q_SCRAPER_STATS = (
+    'filter @message like /twitter-scraper/'
+    ' | parse @message />>> (?<outcome>\\S+)/'
+    ' | filter outcome in ["SIGNAL:", "Not", "Written"]'
+    ' | stats count(*) as cnt by outcome'
+    ' | sort cnt desc'
+)
+LOG_Q_SCRAPER_SIGNALS = (
+    'filter @message like /twitter-scraper/ and @message like /SIGNAL:/'
+    ' | parse @message />>> SIGNAL: (?<ticker>\\S+) (?<direction>\\S+)/'
+    ' | stats count(*) as cnt by ticker, direction'
+    ' | sort cnt desc'
+    ' | limit 15'
+)
+
+ALL_SERVICES_HEALTH_LOG_QUERIES = [
+    LOG_Q_ERR_BY_SVC, LOG_Q_ERR_TIMELINE, LOG_Q_ERR_HTTP, LOG_Q_ERR_APP,
+    LOG_Q_RECENT_ERRORS, LOG_Q_ERR_SUMMARY,
+    LOG_Q_SWAP_ERRORS, LOG_Q_SWAP_TIMELINE, LOG_Q_SWAP_RECENT,
+    LOG_Q_SCRAPER_STATS, LOG_Q_SCRAPER_SIGNALS,
+]
 
 
 # --- Data Loading ---
@@ -610,6 +744,137 @@ def fetch_sol_balance(address: str) -> float | None:
 
 
 
+# --- Privy user identity enrichment -----------------------------------------
+# Fetches all Privy users once and builds a wallet -> {label, email, login_type}
+# map so we can show "Jason Yang (Google)" instead of "0xabc...123" across the UI.
+
+PRIVY_API_BASE = "https://auth.privy.io/api/v1"
+
+
+def _privy_credentials():
+    privy_cfg = st.secrets.get("privy", {}) if hasattr(st, "secrets") else {}
+    app_id = privy_cfg.get("app_id")
+    secret = privy_cfg.get("app_secret")
+    return app_id, secret
+
+
+def _extract_privy_identity(user: dict) -> dict:
+    """Pick the best human-readable label out of a Privy user's linked_accounts."""
+    accounts = user.get("linked_accounts") or []
+    email = google_email = google_name = apple_email = phone = twitter = None
+    wallets = []
+    for acc in accounts:
+        t = acc.get("type")
+        if t == "email" and not email:
+            email = acc.get("address")
+        elif t == "google_oauth":
+            google_email = google_email or acc.get("email")
+            google_name = google_name or acc.get("name")
+        elif t == "apple_oauth" and not apple_email:
+            apple_email = acc.get("email")
+        elif t == "phone" and not phone:
+            phone = acc.get("number")
+        elif t == "twitter_oauth" and not twitter:
+            twitter = acc.get("username")
+        elif t == "wallet":
+            addr = acc.get("address")
+            if addr:
+                wallets.append(addr)
+
+    if google_name:
+        label, login_type, contact = google_name, "google", google_email
+    elif google_email:
+        label, login_type, contact = google_email, "google", google_email
+    elif email:
+        label, login_type, contact = email, "email", email
+    elif apple_email:
+        label, login_type, contact = apple_email, "apple", apple_email
+    elif twitter:
+        label, login_type, contact = f"@{twitter}", "twitter", None
+    elif phone:
+        label, login_type, contact = phone, "phone", phone
+    else:
+        label, login_type, contact = None, "wallet_only", None
+
+    return {
+        "privy_did": user.get("id"),
+        "label": label,
+        "login_type": login_type,
+        "contact": contact,
+        "email": email or google_email or apple_email,
+        "wallets": [w.lower() for w in wallets if w],
+    }
+
+
+@st.cache_data(ttl=3600, max_entries=1, show_spinner=False)
+def load_privy_users() -> dict:
+    """Fetch every Privy user (paginated) and build wallet_lower -> identity dict.
+
+    Cached for 1 hour. Returns empty dict silently if Privy isn't configured or
+    the API is unreachable — the dashboard still works, just without labels.
+    """
+    app_id, secret = _privy_credentials()
+    if not app_id or not secret:
+        return {}
+
+    headers = {"privy-app-id": app_id}
+    auth = (app_id, secret)
+    mapping: dict = {}
+    cursor = None
+    pages = 0
+    try:
+        while True:
+            params = {"limit": 100}
+            if cursor:
+                params["cursor"] = cursor
+            resp = _requests.get(
+                f"{PRIVY_API_BASE}/users",
+                headers=headers, auth=auth, params=params, timeout=20,
+            )
+            if resp.status_code != 200:
+                break
+            body = resp.json()
+            for u in body.get("data", []):
+                ident = _extract_privy_identity(u)
+                for w in ident["wallets"]:
+                    mapping[w] = ident
+            cursor = body.get("next_cursor")
+            pages += 1
+            if not cursor or pages > 200:  # safety cap ~20k users
+                break
+    except Exception:
+        return mapping
+    return mapping
+
+
+LOGIN_TYPE_BADGE = {
+    "google": "Google", "email": "Email", "apple": "Apple",
+    "twitter": "Twitter", "phone": "Phone", "wallet_only": "Wallet",
+}
+
+
+def label_wallet(w, privy_map: dict | None = None) -> str:
+    """Human label for a wallet. Prefers identity, falls back to short wallet."""
+    if not w:
+        return "?"
+    info = (privy_map or {}).get(w.lower())
+    if info and info.get("label"):
+        return info["label"]
+    return short_wallet(w)
+
+
+def enrich_wallet_df(frame: pd.DataFrame, privy_map: dict, wallet_col: str = "wallet_address") -> pd.DataFrame:
+    """Add user_label / user_contact / login_type columns derived from Privy."""
+    if frame.empty or wallet_col not in frame.columns:
+        return frame
+    out = frame.copy()
+    lower = out[wallet_col].astype(str).str.lower()
+    out["user_label"] = [label_wallet(w, privy_map) for w in out[wallet_col]]
+    out["user_contact"] = lower.map(lambda w: (privy_map.get(w) or {}).get("contact") or "")
+    out["login_type"] = lower.map(lambda w: LOGIN_TYPE_BADGE.get((privy_map.get(w) or {}).get("login_type"), "—"))
+    return out
+
+
 def events_to_df(events: list) -> pd.DataFrame:
     if not events:
         return pd.DataFrame()
@@ -672,11 +937,13 @@ end_str = end_date.strftime("%Y-%m-%d")
 num_days = (end_date - start_date).days + 1
 
 with st.spinner("Loading data..."):
-    with ThreadPoolExecutor(max_workers=2) as pool:
+    with ThreadPoolExecutor(max_workers=3) as pool:
         events_future = pool.submit(load_events_range, start_str, end_str)
         trades_future = pool.submit(load_trades_range, start_str, end_str)
+        privy_future = pool.submit(load_privy_users)
         events = events_future.result()
         trades_raw = trades_future.result()
+        privy_map = privy_future.result()
     df = events_to_df(events)
     del events  # free raw list — df holds all we need
 
@@ -713,10 +980,17 @@ else:
 st.sidebar.markdown("---")
 st.sidebar.metric("Total Events", fmt_number(len(df)))
 if not user_df.empty:
-    st.sidebar.metric("Unique Users", fmt_number(user_df["wallet_address"].nunique()))
+    unique_wallets = user_df["wallet_address"].nunique()
+    st.sidebar.metric("Unique Users", fmt_number(unique_wallets))
     st.sidebar.metric("Date Range", f"{num_days} days")
+    if privy_map:
+        matched = user_df["wallet_address"].astype(str).str.lower().isin(privy_map.keys()).sum()
+        matched_unique = user_df[user_df["wallet_address"].astype(str).str.lower().isin(privy_map.keys())]["wallet_address"].nunique()
+        pct = (matched_unique / unique_wallets * 100) if unique_wallets > 0 else 0
+        st.sidebar.metric("Privy-matched", f"{matched_unique}/{unique_wallets}", delta=f"{pct:.0f}%", delta_color="off")
 st.sidebar.markdown("---")
 st.sidebar.caption("Data refreshes every 5 minutes")
+st.sidebar.caption("User identities cached 1 hour")
 
 # --- Tabs ---
 tab_overview, tab_users, tab_retention, tab_funnels, tab_trades, tab_notifications, tab_backend, tab_services = st.tabs(
@@ -743,7 +1017,7 @@ with tab_overview:
         col3.metric("Sessions", fmt_number(len(sessions)))
         col4.metric("Avg Session", f"{avg_dur/1000:.0f}s" if avg_dur else "N/A")
 
-        # Expandable unique users list
+        # Expandable unique users list — enriched with Privy identity
         with st.expander(f"View all {total_unique} unique users"):
             all_user_wallets = user_df.groupby("wallet_address").agg(
                 events=("event", "count"),
@@ -751,9 +1025,14 @@ with tab_overview:
                 first_seen=("date", "min"),
                 last_seen=("date", "max"),
             ).sort_values("last_seen", ascending=False).reset_index()
+            all_user_wallets = enrich_wallet_df(all_user_wallets, privy_map)
             all_user_wallets["wallet_short"] = all_user_wallets["wallet_address"].apply(short_wallet)
             st.dataframe(
-                all_user_wallets[["wallet_short", "wallet_address", "events", "days_active", "first_seen", "last_seen"]].rename(columns={
+                all_user_wallets[[
+                    "user_label", "login_type", "user_contact", "wallet_short",
+                    "wallet_address", "events", "days_active", "first_seen", "last_seen",
+                ]].rename(columns={
+                    "user_label": "User", "login_type": "Login", "user_contact": "Contact",
                     "wallet_short": "Wallet", "wallet_address": "Full Address",
                     "events": "Events", "days_active": "Days Active",
                     "first_seen": "First Seen", "last_seen": "Last Seen",
@@ -1062,17 +1341,19 @@ with tab_users:
                 sessions=("session_id", "count"),
                 avg_session_min=("duration_ms", lambda x: round(x.mean() / 60000, 1)),
             ).sort_values("total_time_min", ascending=False).head(20).reset_index()
+            time_by_user = enrich_wallet_df(time_by_user, privy_map)
             time_by_user["wallet"] = time_by_user["wallet_address"].apply(short_wallet)
 
             fig = make_h_bar(
-                time_by_user, "total_time_min", "wallet",
+                time_by_user, "total_time_min", "user_label",
                 title="Top Users by Time Spent", color=BRAND, x_suffix=" min",
             )
             st.plotly_chart(fig, use_container_width=True)
 
             with st.expander("Detailed time breakdown"):
                 st.dataframe(
-                    time_by_user[["wallet", "total_time_min", "sessions", "avg_session_min"]].rename(columns={
+                    time_by_user[["user_label", "login_type", "user_contact", "wallet", "total_time_min", "sessions", "avg_session_min"]].rename(columns={
+                        "user_label": "User", "login_type": "Login", "user_contact": "Contact",
                         "wallet": "Wallet", "total_time_min": "Total (min)",
                         "sessions": "Sessions", "avg_session_min": "Avg (min)",
                     }),
@@ -1091,14 +1372,16 @@ with tab_users:
             first_seen=("date", "min"),
             last_seen=("date", "max"),
         ).sort_values("events", ascending=False).head(20).reset_index()
+        events_per_user = enrich_wallet_df(events_per_user, privy_map)
         events_per_user["wallet"] = events_per_user["wallet_address"].apply(short_wallet)
 
-        fig = make_h_bar(events_per_user, "events", "wallet", title="Top Users by Event Count", color=ACCENT)
+        fig = make_h_bar(events_per_user, "events", "user_label", title="Top Users by Event Count", color=ACCENT)
         st.plotly_chart(fig, use_container_width=True)
 
         with st.expander("Detailed activity breakdown"):
             st.dataframe(
-                events_per_user[["wallet", "events", "days_active", "first_seen", "last_seen"]].rename(columns={
+                events_per_user[["user_label", "login_type", "user_contact", "wallet", "events", "days_active", "first_seen", "last_seen"]].rename(columns={
+                    "user_label": "User", "login_type": "Login", "user_contact": "Contact",
                     "wallet": "Wallet", "events": "Events", "days_active": "Days Active",
                     "first_seen": "First Seen", "last_seen": "Last Seen",
                 }),
@@ -1120,16 +1403,16 @@ with tab_users:
                     trader_vol = tdf.groupby("wallet_address").agg(
                         volume=(vol_col, "sum"), trades=(vol_col, "count"),
                     ).sort_values("volume", ascending=False).head(15).reset_index()
-                    trader_vol["wallet"] = trader_vol["wallet_address"].apply(short_wallet)
+                    trader_vol = enrich_wallet_df(trader_vol, privy_map)
                     trader_vol["volume"] = trader_vol["volume"].round(0)
-                    fig = make_h_bar(trader_vol, "volume", "wallet", title="By Volume ($)", color=ACCENT_WARN, x_prefix="$")
+                    fig = make_h_bar(trader_vol, "volume", "user_label", title="By Volume ($)", color=ACCENT_WARN, x_prefix="$")
                     st.plotly_chart(fig, use_container_width=True)
 
                 with col_count:
                     trader_cnt = tdf.groupby("wallet_address").size().sort_values(ascending=False).head(15).reset_index()
                     trader_cnt.columns = ["wallet_address", "trades"]
-                    trader_cnt["wallet"] = trader_cnt["wallet_address"].apply(short_wallet)
-                    fig = make_h_bar(trader_cnt, "trades", "wallet", title="By Trade Count", color="#EC4899")
+                    trader_cnt = enrich_wallet_df(trader_cnt, privy_map)
+                    fig = make_h_bar(trader_cnt, "trades", "user_label", title="By Trade Count", color="#EC4899")
                     st.plotly_chart(fig, use_container_width=True)
             else:
                 st.info("No trade data for this period.")
@@ -1164,12 +1447,22 @@ with tab_users:
         # --- Per-User Deep Dive ---
         st.subheader("User Deep Dive")
         all_wallets = sorted(user_df["wallet_address"].unique())
-        wallet_options = [f"{short_wallet(w)} ({w})" for w in all_wallets]
-        selected = st.selectbox("Select a user", wallet_options, index=None, placeholder="Pick a wallet...")
+        wallet_options = [f"{label_wallet(w, privy_map)}  —  {short_wallet(w)} ({w})" for w in all_wallets]
+        selected = st.selectbox("Select a user", wallet_options, index=None, placeholder="Pick a user...")
 
         if selected:
-            full_wallet = selected.split("(")[1].rstrip(")")
+            # Wallet address is the last parenthesized token in the option string
+            full_wallet = selected.rsplit("(", 1)[-1].rstrip(")")
             selected_user_df = user_df[user_df["wallet_address"] == full_wallet]
+            ident = (privy_map or {}).get(full_wallet.lower(), {})
+
+            # Identity header
+            if ident.get("label"):
+                contact = ident.get("contact") or ""
+                lt = LOGIN_TYPE_BADGE.get(ident.get("login_type"), "—")
+                st.markdown(f"**{ident['label']}**  ·  {lt}" + (f"  ·  `{contact}`" if contact else "") + f"  ·  `{full_wallet}`")
+            else:
+                st.markdown(f"Wallet-only user  ·  `{full_wallet}`")
 
             col1, col2, col3 = st.columns(3)
             col1.metric("Events", fmt_number(len(selected_user_df)))
@@ -1532,12 +1825,17 @@ with tab_trades:
                 fig.update_layout(**PLOTLY_LAYOUT, height=350, showlegend=False)
                 st.plotly_chart(fig, use_container_width=True)
 
-            # Recent swaps table
+            # Recent swaps table (enriched with identity)
             st.subheader("Recent Swaps")
             swap_cols = [c for c in ["timestamp", "wallet_address", "from_token", "to_token", "amount_usd", "status", "source"] if c in swap_df.columns]
             recent_swaps = swap_df[swap_cols].sort_values("timestamp", ascending=False).head(50).copy()
             if "wallet_address" in recent_swaps.columns:
+                recent_swaps = enrich_wallet_df(recent_swaps, privy_map)
                 recent_swaps["wallet_address"] = recent_swaps["wallet_address"].apply(short_wallet)
+                ordered = ["timestamp", "user_label", "login_type", "wallet_address"] + [c for c in swap_cols if c not in ("timestamp", "wallet_address")]
+                recent_swaps = recent_swaps[[c for c in ordered if c in recent_swaps.columns]].rename(columns={
+                    "user_label": "User", "login_type": "Login", "wallet_address": "Wallet",
+                })
             if "timestamp" in recent_swaps.columns:
                 recent_swaps["timestamp"] = pd.to_datetime(recent_swaps["timestamp"], errors="coerce", utc=True).dt.tz_convert("America/New_York").dt.strftime("%b %d, %I:%M %p")
             st.dataframe(recent_swaps, use_container_width=True, hide_index=True)
@@ -1642,12 +1940,17 @@ with tab_trades:
                     fig.update_yaxes(title="Count", **AXIS_DEFAULTS)
                     st.plotly_chart(fig, use_container_width=True)
 
-            # Recent perps table
+            # Recent perps table (enriched with identity)
             st.subheader("Recent Perps Orders")
             perps_cols = [c for c in ["timestamp", "wallet_address", "asset", "side", "size", "price", "leverage", "amount_usd", "order_type", "is_close"] if c in perps_df.columns]
             recent_perps = perps_df[perps_cols].sort_values("timestamp", ascending=False).head(50).copy()
             if "wallet_address" in recent_perps.columns:
+                recent_perps = enrich_wallet_df(recent_perps, privy_map)
                 recent_perps["wallet_address"] = recent_perps["wallet_address"].apply(short_wallet)
+                ordered = ["timestamp", "user_label", "login_type", "wallet_address"] + [c for c in perps_cols if c not in ("timestamp", "wallet_address")]
+                recent_perps = recent_perps[[c for c in ordered if c in recent_perps.columns]].rename(columns={
+                    "user_label": "User", "login_type": "Login", "wallet_address": "Wallet",
+                })
             if "timestamp" in recent_perps.columns:
                 recent_perps["timestamp"] = pd.to_datetime(recent_perps["timestamp"], errors="coerce", utc=True).dt.tz_convert("America/New_York").dt.strftime("%b %d, %I:%M %p")
             st.dataframe(recent_perps, use_container_width=True, hide_index=True)
@@ -1689,12 +1992,17 @@ with tab_trades:
                     fig = make_time_series(daily_dep, "date", "volume", title="Daily Deposit Volume ($)", color=ACCENT_WARN, kind="bar")
                     st.plotly_chart(fig, use_container_width=True)
 
-            # Recent deposits table
+            # Recent deposits table (enriched with identity)
             st.subheader("Recent Deposits")
             dep_cols = [c for c in ["timestamp", "wallet_address", "amount_usd", "source"] if c in deposit_df.columns]
             recent_deps = deposit_df[dep_cols].sort_values("timestamp", ascending=False).head(50).copy()
             if "wallet_address" in recent_deps.columns:
+                recent_deps = enrich_wallet_df(recent_deps, privy_map)
                 recent_deps["wallet_address"] = recent_deps["wallet_address"].apply(short_wallet)
+                ordered = ["timestamp", "user_label", "login_type", "wallet_address"] + [c for c in dep_cols if c not in ("timestamp", "wallet_address")]
+                recent_deps = recent_deps[[c for c in ordered if c in recent_deps.columns]].rename(columns={
+                    "user_label": "User", "login_type": "Login", "wallet_address": "Wallet",
+                })
             if "timestamp" in recent_deps.columns:
                 recent_deps["timestamp"] = pd.to_datetime(recent_deps["timestamp"], errors="coerce", utc=True).dt.tz_convert("America/New_York").dt.strftime("%b %d, %I:%M %p")
             st.dataframe(recent_deps, use_container_width=True, hide_index=True)
@@ -1839,8 +2147,8 @@ with tab_notifications:
                 st.subheader("Most Engaged Users")
                 tt = tapped_events.groupby("wallet_address").size().sort_values(ascending=False).head(10).reset_index()
                 tt.columns = ["wallet_address", "taps"]
-                tt["wallet"] = tt["wallet_address"].apply(short_wallet)
-                fig = make_h_bar(tt, "taps", "wallet", title="Top Notification Tappers", color="#EC4899")
+                tt = enrich_wallet_df(tt, privy_map)
+                fig = make_h_bar(tt, "taps", "user_label", title="Top Notification Tappers", color="#EC4899")
                 st.plotly_chart(fig, use_container_width=True)
 
 
@@ -1853,6 +2161,59 @@ with tab_backend:
     bh_hours = st.selectbox("Lookback", [6, 12, 24, 48, 72, 168], index=2, key="bh_hours",
                              format_func=lambda h: f"{h}h" if h < 168 else "7 days")
     bh_period = 300 if bh_hours <= 24 else (900 if bh_hours <= 72 else 3600)
+
+    # --- Lazy-load gate: skip ~50 CloudWatch calls unless user opts in ---
+    bh_cache_key = f"bh_loaded::{bh_hours}"
+    bh_ready = st.session_state.get(bh_cache_key, False)
+    if not bh_ready:
+        st.info(
+            "Backend Health metrics pull ~50 CloudWatch series. Skipped by default so the "
+            "rest of the dashboard renders fast. Click to load."
+        )
+        if st.button("Load Backend Health metrics", key=f"bh_load_btn::{bh_hours}"):
+            st.session_state[bh_cache_key] = True
+            st.rerun()
+        st.stop()
+
+    # Parallel prefetch: warm @st.cache_data for every metric this tab reads.
+    # Subsequent sequential calls below hit the cache and return instantly.
+    _bh_metrics_single = [
+        ("Gas.FeePayerBalanceETH", "Minimum"),
+        ("API.Latency", "Average"), ("API.Request", "Sum"), ("API.Error", "Sum"),
+        ("Order.CancelLatency", "Average"), ("Withdraw.Latency", "Average"),
+        ("Bridge.Success", "Sum"), ("Bridge.Failure", "Sum"),
+        ("Bridge.TotalDuration", "Average"), ("Bridge.FillTime", "Average"),
+        ("FundRouter.RouteLatency", "Average"), ("FundRouter.ReverseRouteLatency", "Average"),
+        ("FundRouter.SettlementTimeout", "Sum"),
+        ("Cache.Hit", "Sum"), ("Cache.Miss", "Sum"),
+        ("WS.ActiveConnections", "Maximum"), ("WS.MessageSent", "Sum"),
+        ("WS.MessageReceived", "Sum"), ("WS.SlowClientTerminated", "Sum"),
+        ("Privy.SigningLatency", "Average"), ("Account.SnapshotLatency", "Average"),
+    ]
+    _bh_prefetch = [
+        (load_cw_metric, (name,), {"stat": stat, "period": bh_period, "hours": bh_hours})
+        for name, stat in _bh_metrics_single
+    ]
+    # Dimensioned metrics: Order.PlaceLatency per venue, Venue.ReadLatency/Error per venue
+    for venue in ["hyperliquid", "ostium"]:
+        _bh_prefetch.append((
+            load_cw_metric, ("Order.PlaceLatency",),
+            {"stat": "Average", "period": bh_period, "hours": bh_hours, "dimensions": {"Venue": venue}},
+        ))
+    for venue in ["hyperliquid", "lighter", "ostium"]:
+        _bh_prefetch.append((
+            load_cw_metric, ("Venue.ReadLatency",),
+            {"stat": "Average", "period": bh_period, "hours": bh_hours, "dimensions": {"Venue": venue}},
+        ))
+        _bh_prefetch.append((
+            load_cw_metric, ("Venue.ReadError",),
+            {"stat": "Sum", "period": bh_period, "hours": bh_hours, "dimensions": {"Venue": venue}},
+        ))
+    # RPC calls for fee payer balances — also parallelizable
+    _bh_prefetch.append((fetch_evm_balance, (EVM_FEE_PAYER,), {}))
+    _bh_prefetch.append((fetch_sol_balance, (SOL_FEE_PAYER,), {}))
+    with st.spinner("Loading Backend Health metrics..."):
+        prefetch_in_parallel(_bh_prefetch, max_workers=20)
 
     # --- Fee Payer Balance (critical) — live RPC ---
     st.markdown("### Gas Sponsorship")
@@ -2152,6 +2513,37 @@ with tab_services:
                              format_func=lambda h: f"{h}h" if h < 168 else "7 days")
     sh_period = 300 if sh_hours <= 24 else (900 if sh_hours <= 72 else 3600)
 
+    # --- Lazy-load gate: Services Health runs ~11 Log Insights queries (~90s cold) ---
+    sh_cache_key = f"sh_loaded::{sh_hours}"
+    sh_ready = st.session_state.get(sh_cache_key, False)
+    if not sh_ready:
+        st.info(
+            "Services Health runs ~11 CloudWatch Log Insights queries plus Render metrics. "
+            "Skipped by default so the rest of the dashboard renders fast. Click to load."
+        )
+        if st.button("Load Services Health metrics", key=f"sh_load_btn::{sh_hours}"):
+            st.session_state[sh_cache_key] = True
+            st.rerun()
+        st.stop()
+
+    # Parallel prefetch: 6 render metric fanouts + ~11 log insights queries concurrently.
+    # Subsequent tab code hits the @st.cache_data layer and returns instantly.
+    _sh_insight_hours = min(sh_hours, 24)
+    _sh_prefetch = [
+        (load_render_metric_by_service, ("render.service.memory.usage",), {"stat": "Average", "period": sh_period, "hours": sh_hours}),
+        (load_render_metric_by_service, ("render.service.cpu.time",), {"stat": "Average", "period": sh_period, "hours": sh_hours}),
+        (load_render_metric_by_service, ("render.service.http.requests.total",), {"stat": "Sum", "period": sh_period, "hours": sh_hours}),
+        (load_render_metric_by_service, ("render.service.network.transmit.bytes",), {"stat": "Sum", "period": sh_period, "hours": sh_hours}),
+        (load_render_metric_by_service, ("render.service.http.requests.latency",), {"stat": "Average", "period": sh_period, "hours": sh_hours}),
+        (load_render_metric_by_service, ("render.service.memory.limit",), {"stat": "Maximum", "period": sh_period, "hours": sh_hours}),
+    ]
+    for _q in ALL_SERVICES_HEALTH_LOG_QUERIES:
+        _sh_prefetch.append((query_render_logs_stats, (_q,), {"hours": _sh_insight_hours}))
+    # CloudFront metrics are also fetched by this tab — warm their cache too
+    _sh_prefetch.append((get_cloudfront_dist_id, (), {}))
+    with st.spinner("Loading Services Health metrics (~11 log queries in parallel)..."):
+        prefetch_in_parallel(_sh_prefetch, max_workers=24)
+
     # --- Discover services ---
     try:
         cw = get_cloudwatch()
@@ -2223,12 +2615,7 @@ with tab_services:
                 )
 
         # Error rate from logs (quick Insights query)
-        error_stats = query_render_logs_stats(
-            'filter @message like /(?i)(error|exception|fatal|crash|ECONNREFUSED)/'
-            ' | stats count(*) as errors by bin(1h) as hour'
-            ' | sort hour desc',
-            hours=sh_hours if sh_hours <= 24 else 24,
-        )
+        error_stats = query_render_logs_stats(LOG_Q_ERR_SUMMARY, hours=_sh_insight_hours)
         if not error_stats.empty and "errors" in error_stats.columns:
             total_errors = pd.to_numeric(error_stats["errors"], errors="coerce").sum()
             if total_errors > 0:
@@ -2317,56 +2704,21 @@ with tab_services:
     st.markdown("### Error Dashboard")
     st.caption("Syslog priority `<3>` (error) + `<4>` (warning/HTTP 4xx) from all Render services")
 
-    insight_hours = min(sh_hours, 24)  # Insights queries capped at 24h for speed
+    insight_hours = _sh_insight_hours  # Insights queries capped at 24h for speed (see prefetch above)
 
     # --- Errors by service (priority <= 4 catches errors + warnings + HTTP 4xx) ---
-    err_by_svc = query_render_logs_stats(
-        'parse @message /^<(?<pri>\\d+)>/'
-        ' | filter pri <= 4'
-        ' | parse @message /^<\\d+>\\d+ \\S+ (?<svc>\\S+)/'
-        ' | stats count(*) as errors by svc'
-        ' | sort errors desc'
-        ' | limit 15',
-        hours=insight_hours,
-    )
+    err_by_svc = query_render_logs_stats(LOG_Q_ERR_BY_SVC, hours=insight_hours)
 
     # --- Error timeline by hour ---
-    err_timeline = query_render_logs_stats(
-        'parse @message /^<(?<pri>\\d+)>/'
-        ' | filter pri <= 4'
-        ' | stats count(*) as errors by bin(1h) as hour'
-        ' | sort hour asc',
-        hours=insight_hours,
-    )
+    err_timeline = query_render_logs_stats(LOG_Q_ERR_TIMELINE, hours=insight_hours)
 
     # --- Top error messages ---
     # Two log formats:
     #   1. HTTP access logs: <4>1 TS svc http-request ... - {"statusCode":400,"path":"/order?..."}
     #   2. App logs: <3>1 TS svc proc ... - CoinGecko API error: 429
     # Query them separately and merge for a clean table.
-    err_http = query_render_logs_stats(
-        'parse @message /^<(?<pri>\\d+)>/'
-        ' | filter pri <= 4 and @message like /http-request/'
-        ' | parse @message /^<\\d+>\\d+ \\S+ (?<svc>\\S+)/'
-        ' | parse @message /^<\\d+>\\d+ \\S+ \\S+ \\S+ \\d+ \\S+ - (?<body>.*)/'
-        ' | parse body /"statusCode":(?<sc>\\d+)/'
-        ' | filter sc >= 400'
-        ' | parse body /"path":"(?<rawpath>[^"]+)"/'
-        ' | parse rawpath /^\\/(?<endpoint>[^?]+)/'
-        ' | stats count(*) as cnt by svc, concat("HTTP ", sc, " /", endpoint) as detail'
-        ' | sort cnt desc'
-        ' | limit 15',
-        hours=insight_hours,
-    )
-    err_app = query_render_logs_stats(
-        'parse @message /^<(?<pri>\\d+)>/'
-        ' | filter pri <= 4 and @message not like /http-request/'
-        ' | parse @message /^<\\d+>\\d+ \\S+ (?<svc>\\S+) \\S+ \\d+ \\S+ - (?<body>.*)/'
-        ' | stats count(*) as cnt by svc, body as detail'
-        ' | sort cnt desc'
-        ' | limit 15',
-        hours=insight_hours,
-    )
+    err_http = query_render_logs_stats(LOG_Q_ERR_HTTP, hours=insight_hours)
+    err_app = query_render_logs_stats(LOG_Q_ERR_APP, hours=insight_hours)
     # Merge HTTP + app errors into one table
     err_messages = pd.concat([err_http, err_app], ignore_index=True)
     if not err_messages.empty and "cnt" in err_messages.columns:
@@ -2374,15 +2726,7 @@ with tab_services:
         err_messages = err_messages.sort_values("cnt", ascending=False).head(25)
 
     # --- Recent errors (individual entries) ---
-    recent_errors = query_render_logs_stats(
-        'parse @message /^<(?<pri>\\d+)>/'
-        ' | filter pri <= 4'
-        ' | parse @message /^<\\d+>\\d+ (?<ts>\\S+) (?<svc>\\S+) \\S+ \\d+ \\S+ - (?<body>.*)/'
-        ' | fields ts, svc, body'
-        ' | sort @timestamp desc'
-        ' | limit 30',
-        hours=insight_hours,
-    )
+    recent_errors = query_render_logs_stats(LOG_Q_RECENT_ERRORS, hours=insight_hours)
 
     # --- Summary banner ---
     total_errors = 0
@@ -2464,49 +2808,13 @@ with tab_services:
     st.caption("HTTP 4xx/5xx from swap-server-1 access logs (parsed from JSON `statusCode` field)")
 
     # --- Swap errors by status code + endpoint ---
-    swap_errors = query_render_logs_stats(
-        'filter @message like /swap-server/ and @message like /http-request/'
-        ' | parse @message /^<\\d+>\\d+ \\S+ \\S+ \\S+ \\d+ \\S+ - (?<body>.*)/'
-        ' | parse body /"statusCode":(?<sc>\\d+)/'
-        ' | filter sc >= 400'
-        ' | parse body /"path":"(?<rawpath>[^"]+)"/'
-        ' | parse rawpath /^\\/(?<endpoint>[^?]+)/'
-        ' | parse rawpath /outputMint=(?<out_mint>[^&]+)/'
-        ' | stats count(*) as cnt by sc, endpoint, out_mint'
-        ' | sort cnt desc'
-        ' | limit 20',
-        hours=insight_hours,
-    )
+    swap_errors = query_render_logs_stats(LOG_Q_SWAP_ERRORS, hours=insight_hours)
 
     # --- Timeline ---
-    swap_errors_timeline = query_render_logs_stats(
-        'filter @message like /swap-server/ and @message like /http-request/'
-        ' | parse @message /^<\\d+>\\d+ \\S+ \\S+ \\S+ \\d+ \\S+ - (?<body>.*)/'
-        ' | parse body /"statusCode":(?<sc>\\d+)/'
-        ' | filter sc >= 400'
-        ' | stats count(*) as errors by bin(1h) as hour'
-        ' | sort hour asc',
-        hours=insight_hours,
-    )
+    swap_errors_timeline = query_render_logs_stats(LOG_Q_SWAP_TIMELINE, hours=insight_hours)
 
     # --- Recent failures with mint addresses ---
-    swap_recent = query_render_logs_stats(
-        'filter @message like /swap-server/ and @message like /http-request/'
-        ' | parse @message /^<\\d+>\\d+ \\S+ \\S+ \\S+ \\d+ \\S+ - (?<body>.*)/'
-        ' | parse body /"statusCode":(?<sc>\\d+)/'
-        ' | filter sc >= 400'
-        ' | parse body /"time":"(?<ts>[^"]+)"/'
-        ' | parse body /"method":"(?<method>[^"]+)"/'
-        ' | parse body /"path":"(?<rawpath>[^"]+)"/'
-        ' | parse body /"responseTimeMS":(?<latency>\\d+)/'
-        ' | parse rawpath /^\\/(?<endpoint>[^?]+)/'
-        ' | parse rawpath /inputMint=(?<in_mint>[^&]+)/'
-        ' | parse rawpath /outputMint=(?<out_mint>[^&]+)/'
-        ' | fields ts, sc, method, endpoint, latency, in_mint, out_mint'
-        ' | sort @timestamp desc'
-        ' | limit 25',
-        hours=insight_hours,
-    )
+    swap_recent = query_render_logs_stats(LOG_Q_SWAP_RECENT, hours=insight_hours)
 
     col_swap_chart, col_swap_breakdown = st.columns(2)
     with col_swap_chart:
@@ -2570,23 +2878,9 @@ with tab_services:
     st.markdown("---")
     st.markdown("### Twitter Scraper — Signal Analysis")
 
-    scraper_stats = query_render_logs_stats(
-        'filter @message like /twitter-scraper/'
-        ' | parse @message />>> (?<outcome>\\S+)/'
-        ' | filter outcome in ["SIGNAL:", "Not", "Written"]'
-        ' | stats count(*) as cnt by outcome'
-        ' | sort cnt desc',
-        hours=insight_hours,
-    )
+    scraper_stats = query_render_logs_stats(LOG_Q_SCRAPER_STATS, hours=insight_hours)
 
-    scraper_signals = query_render_logs_stats(
-        'filter @message like /twitter-scraper/ and @message like /SIGNAL:/'
-        ' | parse @message />>> SIGNAL: (?<ticker>\\S+) (?<direction>\\S+)/'
-        ' | stats count(*) as cnt by ticker, direction'
-        ' | sort cnt desc'
-        ' | limit 15',
-        hours=insight_hours,
-    )
+    scraper_signals = query_render_logs_stats(LOG_Q_SCRAPER_SIGNALS, hours=insight_hours)
 
     col_scrape_pie, col_scrape_signals = st.columns(2)
     with col_scrape_pie:
