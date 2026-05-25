@@ -2488,11 +2488,15 @@ with tab_referrals:
                         st.caption("No redemption rows on this code yet.")
                     else:
                         red_df = pd.DataFrame(redemptions)
-                        # Enrich the redeemer DIDs with privy identity when
-                        # possible — matches the rest of the dashboard's
-                        # wallet→user enrichment pattern.
-                        if "privy_did" in red_df.columns:
-                            red_df["redeemed_at"] = red_df.get("redeemed_at", "").astype(str).str[:19]
+                        # Greptile P2: the truncation guard was checking
+                        # `privy_did in columns` — semantically unrelated to
+                        # whether `redeemed_at` exists. If the backend ever
+                        # ships privy_did without redeemed_at the original
+                        # guard would `.astype(str)` on the empty-string
+                        # fallback and AttributeError. Check the column we
+                        # actually touch.
+                        if "redeemed_at" in red_df.columns:
+                            red_df["redeemed_at"] = red_df["redeemed_at"].astype(str).str[:19]
                         st.dataframe(red_df, use_container_width=True, hide_index=True)
                         st.caption(f"{len(red_df)} redemption rows.")
 
@@ -2653,14 +2657,29 @@ with tab_referrals:
             )
         else:
             tr_df = pd.DataFrame(top_refs)
-            # Enrich with privy identity when possible — same convention as
-            # other tabs that surface DIDs.
-            if "privy_did" in tr_df.columns and not privy_map.empty:
-                tr_df = tr_df.merge(
-                    privy_map[["privy_did", "display_label", "primary_email"]],
-                    on="privy_did",
-                    how="left",
-                )
+            # Enrich the referrer DIDs with Privy identity (label + email)
+            # when available.
+            #
+            # `privy_map` is a `dict[wallet_lower → identity_dict]` returned
+            # by load_privy_users() — NOT a DataFrame. Calling `.empty` on
+            # it would AttributeError (Codex P1 / Greptile P1 caught this).
+            # Each identity dict carries `privy_did`, `label`, `email` (see
+            # _extract_privy_identity), so we collapse the wallet-keyed map
+            # to a DID-keyed DataFrame for the merge — dropping duplicates
+            # because one Privy DID can have multiple linked wallets.
+            tr_df["referrer_did"] = tr_df.get("referrer_did", "").astype(str)
+            if privy_map:
+                _privy_rows = [v for v in privy_map.values() if v.get("privy_did")]
+                if _privy_rows:
+                    _privy_df = pd.DataFrame(_privy_rows).drop_duplicates("privy_did")[
+                        ["privy_did", "label", "email"]
+                    ]
+                    # Match the BE column name (referrer_did) on our side.
+                    tr_df = tr_df.merge(
+                        _privy_df.rename(columns={"privy_did": "referrer_did"}),
+                        on="referrer_did",
+                        how="left",
+                    )
             st.dataframe(tr_df, use_container_width=True, hide_index=True)
 
 
