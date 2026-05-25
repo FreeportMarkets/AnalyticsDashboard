@@ -1007,9 +1007,186 @@ st.sidebar.markdown("---")
 st.sidebar.caption("Data refreshes every 5 minutes")
 st.sidebar.caption("User identities cached 1 hour")
 
+# =====================
+# Points admin API helpers (used by the Referrals tab below)
+# =====================
+# All trading-backend admin endpoints are gated by the x-admin-key header.
+# Key lives in Streamlit secrets under [admin].admin_api_key — see
+# .streamlit/secrets.toml.example. Base URL is the production trading API.
+POINTS_API_BASE = "https://trading-api.freeportmarkets.com/v1/points"
+
+
+def _admin_key() -> str | None:
+    """Return the admin API key from Streamlit secrets, or None if unset.
+
+    Surface as None rather than raising so the Referrals tab can render a
+    friendly "configure admin_api_key in secrets" hint instead of a stack
+    trace.
+    """
+    try:
+        return st.secrets["admin"]["admin_api_key"]
+    except Exception:
+        return None
+
+
+def _admin_headers() -> dict[str, str]:
+    key = _admin_key()
+    h = {"content-type": "application/json"}
+    if key:
+        h["x-admin-key"] = key
+    # x-admin-id is purely audit metadata on the backend — flag this caller as
+    # the dashboard so the disabled_by / created_by columns are honest.
+    h["x-admin-id"] = "analytics-dashboard"
+    return h
+
+
+@st.cache_data(ttl=60, max_entries=4)
+def fetch_promo_codes() -> list[dict]:
+    """GET /admin/promo — all promo codes with the projected dynamic status.
+
+    Cached 60s to match the dashboard's data-refresh cadence on writes
+    (create/disable invalidate via st.cache_data.clear in the action
+    handlers). Returns an empty list on auth failure / network error so
+    the tab can render an actionable message instead of crashing.
+    """
+    key = _admin_key()
+    if not key:
+        return []
+    try:
+        r = _requests.get(
+            f"{POINTS_API_BASE}/admin/promo",
+            headers=_admin_headers(),
+            timeout=10,
+        )
+        if r.status_code != 200:
+            return []
+        return r.json().get("codes", [])
+    except Exception:
+        return []
+
+
+@st.cache_data(ttl=60, max_entries=20)
+def fetch_promo_code_detail(code: str) -> dict | None:
+    """GET /admin/promo/:code — detail + redemption rows for one code."""
+    if not _admin_key() or not code:
+        return None
+    try:
+        r = _requests.get(
+            f"{POINTS_API_BASE}/admin/promo/{code}",
+            headers=_admin_headers(),
+            timeout=10,
+        )
+        if r.status_code != 200:
+            return None
+        return r.json()
+    except Exception:
+        return None
+
+
+def create_promo_code(payload: dict) -> tuple[bool, str]:
+    """POST /admin/promo. Returns (ok, message).
+
+    Payload must match CreatePromoBody on the backend (discriminated on
+    reward_kind). On success, blows the @st.cache_data caches so the table
+    re-fetches with the new row visible.
+    """
+    if not _admin_key():
+        return False, "Admin API key not configured (.streamlit/secrets.toml → [admin].admin_api_key)."
+    try:
+        r = _requests.post(
+            f"{POINTS_API_BASE}/admin/promo",
+            headers=_admin_headers(),
+            json=payload,
+            timeout=15,
+        )
+        if r.status_code == 201:
+            fetch_promo_codes.clear()
+            return True, f"Created {r.json().get('code', '?')}."
+        # 409 = code already exists, 400 = bad body. Surface the backend's
+        # error string verbatim — it's already user-readable.
+        body = r.json() if r.headers.get("content-type", "").startswith("application/json") else {}
+        return False, f"HTTP {r.status_code}: {body.get('error', r.text[:200])}"
+    except Exception as e:
+        return False, f"Network error: {e}"
+
+
+def disable_promo_code(code: str, reason: str) -> tuple[bool, str]:
+    """POST /admin/promo/:code/disable. Reason is required by the backend."""
+    if not _admin_key():
+        return False, "Admin API key not configured."
+    try:
+        r = _requests.post(
+            f"{POINTS_API_BASE}/admin/promo/{code}/disable",
+            headers=_admin_headers(),
+            json={"reason": reason},
+            timeout=10,
+        )
+        if r.status_code == 200:
+            fetch_promo_codes.clear()
+            fetch_promo_code_detail.clear()
+            return True, f"Disabled {code}."
+        body = r.json() if r.headers.get("content-type", "").startswith("application/json") else {}
+        return False, f"HTTP {r.status_code}: {body.get('error', r.text[:200])}"
+    except Exception as e:
+        return False, f"Network error: {e}"
+
+
+def attach_promo_beneficiary(code: str, *, did: str | None, wallet: str | None, force: bool) -> tuple[bool, str]:
+    """POST /admin/promo/:code/beneficiary. Either did or wallet must be set."""
+    if not _admin_key():
+        return False, "Admin API key not configured."
+    payload: dict = {"force": force}
+    if did:
+        payload["beneficiary_did"] = did
+    elif wallet:
+        payload["beneficiary_wallet"] = wallet
+    else:
+        return False, "Provide either a DID or a wallet address."
+    try:
+        r = _requests.post(
+            f"{POINTS_API_BASE}/admin/promo/{code}/beneficiary",
+            headers=_admin_headers(),
+            json=payload,
+            timeout=15,
+        )
+        if r.status_code in (200, 201):
+            fetch_promo_codes.clear()
+            fetch_promo_code_detail.clear()
+            return True, f"Beneficiary attached to {code}."
+        body = r.json() if r.headers.get("content-type", "").startswith("application/json") else {}
+        return False, f"HTTP {r.status_code}: {body.get('error', r.text[:200])}"
+    except Exception as e:
+        return False, f"Network error: {e}"
+
+
+@st.cache_data(ttl=300, max_entries=2)
+def fetch_top_referrers(limit: int = 50) -> list[dict]:
+    """GET /admin/personal-codes/top — top users by referee count.
+
+    Backend endpoint added in trading-backend PR (paired with this tab).
+    Returns [] on auth failure / endpoint-not-yet-deployed so the tab can
+    show a "feature coming with next backend deploy" hint instead of
+    raising.
+    """
+    if not _admin_key():
+        return []
+    try:
+        r = _requests.get(
+            f"{POINTS_API_BASE}/admin/personal-codes/top",
+            headers=_admin_headers(),
+            params={"limit": limit},
+            timeout=10,
+        )
+        if r.status_code != 200:
+            return []
+        return r.json().get("top_referrers", [])
+    except Exception:
+        return []
+
+
 # --- Tabs ---
-tab_overview, tab_users, tab_retention, tab_funnels, tab_trades, tab_notifications, tab_backend, tab_services = st.tabs(
-    ["Overview", "Top Users", "Retention", "Funnels", "Trades", "Notifications", "Backend Health", "Services Health"]
+tab_overview, tab_users, tab_retention, tab_funnels, tab_trades, tab_notifications, tab_referrals, tab_backend, tab_services = st.tabs(
+    ["Overview", "Top Users", "Retention", "Funnels", "Trades", "Notifications", "Referrals", "Backend Health", "Services Health"]
 )
 
 
@@ -2165,6 +2342,326 @@ with tab_notifications:
                 tt = enrich_wallet_df(tt, privy_map)
                 fig = make_h_bar(tt, "taps", "user_label", title="Top Notification Tappers", color="#EC4899")
                 st.plotly_chart(fig, use_container_width=True)
+
+
+# =====================
+# TAB: Referrals (Promo Codes admin)
+# =====================
+# Wraps the trading-backend's /v1/points/admin/promo/* surface for ops
+# usage: list every promo code with redemption count, drill into a code's
+# redemption history, create new codes, disable / revoke active codes,
+# attach champion beneficiaries, and view a leaderboard of top personal
+# referrers. All actions are gated by the admin_api_key in Streamlit
+# secrets — no key = read attempts return [] and write attempts surface
+# a configure-secrets hint instead of crashing.
+with tab_referrals:
+    st.subheader("Referrals — Promo Codes")
+
+    if not _admin_key():
+        st.error(
+            "Admin API key not configured. Add `[admin]` → `admin_api_key` to "
+            "`.streamlit/secrets.toml` (local) or Streamlit Cloud → app settings (deployed). "
+            "Fetch it from AWS Secrets Manager: `freeport-trading-backend-dev/points/admin-api-key`."
+        )
+    else:
+        codes = fetch_promo_codes()
+
+        # ── Top metrics row ──────────────────────────────────────────────
+        # Computed client-side over the full codes list — every value the
+        # backend returns is already in the JSON, no extra round-trip.
+        col_a, col_b, col_c, col_d = st.columns(4)
+        total_codes = len(codes)
+        # 'active' projection on the backend already collapses past-expiry
+        # into 'expired', so we count exactly what the user sees.
+        active_count = sum(1 for c in codes if c.get("status") == "active")
+        total_redemptions = sum(int(c.get("current_redemptions", 0) or 0) for c in codes)
+        # Points distributed: only meaningful for reward_kind='points'. Sum
+        # current_redemptions × reward_value.amount for that subset. Boosts
+        # and chest_grant rewards aren't denominated in points so they don't
+        # contribute here; surfaced separately below if useful.
+        def _points_distributed(c: dict) -> int:
+            if c.get("reward_kind") != "points":
+                return 0
+            rv = c.get("reward_value") or {}
+            amt = rv.get("amount")
+            try:
+                return int(float(amt)) * int(c.get("current_redemptions", 0) or 0)
+            except (TypeError, ValueError):
+                return 0
+        total_points = sum(_points_distributed(c) for c in codes)
+
+        col_a.metric("Total codes", fmt_number(total_codes))
+        col_b.metric("Active", fmt_number(active_count))
+        col_c.metric("Total redemptions", fmt_number(total_redemptions))
+        col_d.metric("Points distributed", fmt_number(total_points))
+
+        st.markdown("---")
+
+        # ── Codes table ──────────────────────────────────────────────────
+        # Shape the list for display. Two columns matter most: code +
+        # current/max progress. The rest sorts/filters via st.dataframe's
+        # built-ins (column_config + sortable).
+        if codes:
+            rows = []
+            for c in codes:
+                rv = c.get("reward_value") or {}
+                # Reward-kind-specific display string — backend ships the
+                # value as JSONB so the shape differs per kind.
+                kind = c.get("reward_kind", "?")
+                if kind == "points":
+                    reward_label = f"{rv.get('amount', '?')} pts"
+                elif kind == "multiplier_boost":
+                    reward_label = f"{rv.get('multiplier', '?')}× / {rv.get('duration_hours', '?')}h"
+                elif kind == "chest_grant":
+                    reward_label = f"{rv.get('tier', '?').title()} chest"
+                else:
+                    reward_label = kind
+                max_red = c.get("max_redemptions")
+                progress = (
+                    f"{c.get('current_redemptions', 0)}/{max_red}"
+                    if max_red is not None
+                    else f"{c.get('current_redemptions', 0)} (unlimited)"
+                )
+                rows.append({
+                    "code": c.get("code"),
+                    "status": c.get("status"),
+                    "reward": reward_label,
+                    "progress": progress,
+                    "beneficiary": (c.get("beneficiary_did") or "—")[:24] + ("…" if c.get("beneficiary_did") and len(c.get("beneficiary_did", "")) > 24 else ""),
+                    "kickback_rate": c.get("kickback_rate") or "—",
+                    "champion_bonus": c.get("champion_redeem_bonus") or "—",
+                    "expires_at": (c.get("expires_at") or "—")[:19],
+                    "created_by": c.get("created_by", "?"),
+                    "created_at": (c.get("created_at") or "")[:19],
+                })
+
+            codes_df = pd.DataFrame(rows)
+            # Filter widget: text-box for code substring (case-insensitive)
+            # + multi-select for status. Both narrow the rendered df without
+            # round-tripping to the backend.
+            filt_col_1, filt_col_2 = st.columns([1, 1])
+            with filt_col_1:
+                q = st.text_input("Filter by code substring", value="", key="referrals_filter_q")
+            with filt_col_2:
+                status_choices = sorted(codes_df["status"].dropna().unique().tolist())
+                statuses = st.multiselect(
+                    "Status",
+                    options=status_choices,
+                    default=status_choices,
+                    key="referrals_filter_status",
+                )
+
+            view = codes_df.copy()
+            if q:
+                view = view[view["code"].str.contains(q, case=False, na=False)]
+            if statuses:
+                view = view[view["status"].isin(statuses)]
+
+            st.dataframe(view, use_container_width=True, hide_index=True)
+            st.caption(f"Showing {len(view)} of {total_codes} codes. Cache TTL 60s — click ⋮ → 'Clear cache' for instant refresh.")
+        else:
+            st.info("No promo codes have been created yet.")
+
+        # ── Inspect redemptions ─────────────────────────────────────────
+        st.markdown("---")
+        st.markdown("### Inspect redemptions")
+        # Codes that have at least one redemption — sorted desc so the most-
+        # used surface first. Empty-state friendly.
+        inspectable = [c for c in codes if int(c.get("current_redemptions", 0) or 0) > 0]
+        inspectable.sort(key=lambda c: int(c.get("current_redemptions", 0) or 0), reverse=True)
+        if not inspectable:
+            st.caption("No redemptions to inspect yet.")
+        else:
+            inspect_code = st.selectbox(
+                "Pick a code to see who redeemed it",
+                options=[c["code"] for c in inspectable],
+                format_func=lambda c: f"{c} ({next((int(x.get('current_redemptions', 0) or 0) for x in inspectable if x.get('code') == c), 0)} redemptions)",
+                key="referrals_inspect_code",
+            )
+            if inspect_code:
+                detail = fetch_promo_code_detail(inspect_code)
+                if detail is None:
+                    st.warning("Couldn't load detail — check admin key + network.")
+                else:
+                    redemptions = detail.get("redemptions", []) or []
+                    if not redemptions:
+                        st.caption("No redemption rows on this code yet.")
+                    else:
+                        red_df = pd.DataFrame(redemptions)
+                        # Enrich the redeemer DIDs with privy identity when
+                        # possible — matches the rest of the dashboard's
+                        # wallet→user enrichment pattern.
+                        if "privy_did" in red_df.columns:
+                            red_df["redeemed_at"] = red_df.get("redeemed_at", "").astype(str).str[:19]
+                        st.dataframe(red_df, use_container_width=True, hide_index=True)
+                        st.caption(f"{len(red_df)} redemption rows.")
+
+        # ── Create code ──────────────────────────────────────────────────
+        st.markdown("---")
+        with st.expander("➕ Create a new promo code"):
+            with st.form("create_promo_form", clear_on_submit=False):
+                c_code = st.text_input(
+                    "Code (alphanumeric + _-, 2-64 chars)",
+                    value="",
+                    help="e.g. FREE-IMC2026. Will be UPPERCASED on save.",
+                )
+                c_kind = st.selectbox(
+                    "Reward kind",
+                    options=["points", "multiplier_boost", "chest_grant"],
+                    index=0,
+                )
+                # Reward-value shape branches on kind — render the right
+                # inputs based on selection. Streamlit re-renders the whole
+                # form on each interaction, so this is safe.
+                if c_kind == "points":
+                    c_amount = st.number_input("Points per redemption", min_value=1, max_value=10_000_000, value=10_000, step=100)
+                    c_reward_value: dict = {"amount": str(c_amount)}
+                elif c_kind == "multiplier_boost":
+                    c_mult = st.text_input("Multiplier (e.g. 2.0 → +1.0 lift = 2× boost)", value="2.0")
+                    c_hours = st.number_input("Duration hours", min_value=1, max_value=720, value=24, step=1)
+                    c_reward_value = {"multiplier": str(c_mult), "duration_hours": int(c_hours)}
+                else:  # chest_grant
+                    c_tier = st.selectbox("Chest tier", options=["wood", "silver", "gold"], index=2)
+                    c_reward_value = {"tier": c_tier}
+
+                col_max, col_exp = st.columns(2)
+                c_max = col_max.number_input("Max redemptions (0 = unlimited)", min_value=0, max_value=1_000_000, value=50, step=1)
+                c_expires_str = col_exp.text_input(
+                    "Expires at (ISO 8601, blank = never)",
+                    value="",
+                    help="e.g. 2026-12-31T23:59:59Z. Backend rejects malformed strings.",
+                )
+
+                # Champion fields — only relevant for reward_kind=points.
+                if c_kind == "points":
+                    st.caption("Champion kickback (optional, points-only). Set if this is a partner / firm campaign code.")
+                    cb_col1, cb_col2, cb_col3 = st.columns(3)
+                    c_kickback = cb_col1.text_input("Kickback rate (e.g. 0.10 = 10% per trade)", value="")
+                    c_champion_bonus = cb_col2.number_input("Champion redeem bonus (pts per redemption)", min_value=0, max_value=10_000_000, value=0, step=100)
+                    c_kickback_cap = cb_col3.number_input("Kickback cap per referee (pts)", min_value=0, max_value=10_000_000, value=0, step=100)
+                else:
+                    c_kickback, c_champion_bonus, c_kickback_cap = "", 0, 0
+
+                submitted = st.form_submit_button("Create code")
+                if submitted:
+                    payload: dict = {
+                        "code": c_code.strip().upper(),
+                        "reward_kind": c_kind,
+                        "reward_value": c_reward_value,
+                    }
+                    if c_max > 0:
+                        payload["max_redemptions"] = int(c_max)
+                    if c_expires_str.strip():
+                        payload["expires_at"] = c_expires_str.strip()
+                    if c_kind == "points":
+                        if c_kickback.strip():
+                            payload["kickback_rate"] = c_kickback.strip()
+                        if c_champion_bonus > 0:
+                            payload["champion_redeem_bonus"] = int(c_champion_bonus)
+                        if c_kickback_cap > 0:
+                            payload["kickback_cap_per_referee"] = int(c_kickback_cap)
+                    ok, msg = create_promo_code(payload)
+                    (st.success if ok else st.error)(msg)
+                    if ok:
+                        st.rerun()
+
+        # ── Disable code ─────────────────────────────────────────────────
+        active_codes = [c["code"] for c in codes if c.get("status") == "active"]
+        with st.expander("🚫 Disable / revoke an active code"):
+            if not active_codes:
+                st.caption("No active codes to disable.")
+            else:
+                d_code = st.selectbox(
+                    "Code to disable",
+                    options=active_codes,
+                    key="referrals_disable_code",
+                )
+                d_reason = st.text_input(
+                    "Reason (required, recorded in audit log)",
+                    value="",
+                    key="referrals_disable_reason",
+                )
+                # Two-step confirm via session_state — prevents fat-finger
+                # taps on the destructive button. Reset each time the
+                # selected code changes.
+                confirm_key = f"referrals_disable_confirm_{d_code}"
+                if st.session_state.get(confirm_key) is True:
+                    st.warning(f"Confirm: this disables `{d_code}` immediately. Users mid-redeem will get a 409.")
+                    cc1, cc2 = st.columns(2)
+                    if cc1.button("Confirm disable", type="primary", key=f"referrals_disable_confirm_btn_{d_code}"):
+                        if not d_reason.strip():
+                            st.error("Reason is required.")
+                        else:
+                            ok, msg = disable_promo_code(d_code, d_reason.strip())
+                            (st.success if ok else st.error)(msg)
+                            st.session_state[confirm_key] = False
+                            if ok:
+                                st.rerun()
+                    if cc2.button("Cancel", key=f"referrals_disable_cancel_btn_{d_code}"):
+                        st.session_state[confirm_key] = False
+                        st.rerun()
+                else:
+                    if st.button("Disable code", key=f"referrals_disable_init_btn_{d_code}"):
+                        st.session_state[confirm_key] = True
+                        st.rerun()
+
+        # ── Attach champion beneficiary ──────────────────────────────────
+        # For champion-kickback codes that ship without a beneficiary (the
+        # two-step pattern: create code, attach champion later when their
+        # wallet is known). Less common but useful when manual.
+        with st.expander("🤝 Attach champion beneficiary to a code"):
+            if not codes:
+                st.caption("No codes available.")
+            else:
+                b_code = st.selectbox("Code", options=[c["code"] for c in codes], key="referrals_attach_code")
+                b_did = st.text_input("Beneficiary DID (preferred)", value="", key="referrals_attach_did")
+                b_wallet = st.text_input("OR beneficiary wallet (resolves to DID via Privy)", value="", key="referrals_attach_wallet")
+                b_force = st.checkbox(
+                    "Force-overwrite an existing beneficiary",
+                    value=False,
+                    key="referrals_attach_force",
+                    help="If the code already has a beneficiary attached, only succeeds with this flag. Used for the FREE-JS2026-style mid-campaign swap.",
+                )
+                if st.button("Attach beneficiary", key="referrals_attach_btn"):
+                    ok, msg = attach_promo_beneficiary(
+                        b_code,
+                        did=b_did.strip() or None,
+                        wallet=b_wallet.strip() or None,
+                        force=b_force,
+                    )
+                    (st.success if ok else st.error)(msg)
+                    if ok:
+                        st.rerun()
+
+        # ── Top personal referrers ──────────────────────────────────────
+        # Separate from promo codes — these are user-generated FREE-XXXXXX
+        # codes, one per user. Read-only leaderboard of who's referred the
+        # most. Backed by a new BE endpoint shipping in the paired PR; if
+        # the endpoint isn't yet deployed the helper returns [] and we show
+        # a friendly hint instead of an error.
+        st.markdown("---")
+        st.markdown("### Top personal referrers")
+        st.caption(
+            "Users who have referred the most other accounts via their personal FREE-XXXXXX code. "
+            "Updates every 5 minutes."
+        )
+        top_refs = fetch_top_referrers(50)
+        if not top_refs:
+            st.info(
+                "Top-referrer endpoint not yet deployed (or no referees exist yet). "
+                "Returns data once `GET /admin/personal-codes/top` ships in the trading-backend."
+            )
+        else:
+            tr_df = pd.DataFrame(top_refs)
+            # Enrich with privy identity when possible — same convention as
+            # other tabs that surface DIDs.
+            if "privy_did" in tr_df.columns and not privy_map.empty:
+                tr_df = tr_df.merge(
+                    privy_map[["privy_did", "display_label", "primary_email"]],
+                    on="privy_did",
+                    how="left",
+                )
+            st.dataframe(tr_df, use_container_width=True, hide_index=True)
 
 
 # =====================
