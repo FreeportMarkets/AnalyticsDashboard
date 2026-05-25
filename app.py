@@ -879,6 +879,58 @@ def enrich_wallet_df(frame: pd.DataFrame, privy_map: dict, wallet_col: str = "wa
     return out
 
 
+# DID-keyed lookup, derived lazily from privy_map (which is wallet-keyed).
+# Same Privy DID can have multiple linked wallets, so drop dups on the way
+# in. Returns a small dict, recomputed each call instead of cached — keeps
+# the code simple and lets a cleared privy cache propagate without extra
+# wiring.
+def _did_lookup_from_privy_map(privy_map: dict) -> dict:
+    """Returns {did: {label, email, login_type}}. Empty if privy unavailable."""
+    if not privy_map:
+        return {}
+    seen: dict = {}
+    for ident in privy_map.values():
+        did = ident.get("privy_did")
+        if not did or did in seen:
+            continue
+        seen[did] = {
+            "label": ident.get("label") or "",
+            "email": ident.get("email") or "",
+            "login_type": ident.get("login_type") or "",
+        }
+    return seen
+
+
+def enrich_did_df(
+    frame: pd.DataFrame,
+    privy_map: dict,
+    did_col: str = "privy_did",
+    label_col: str = "user_label",
+    email_col: str = "user_email",
+    type_col: str = "login_type",
+) -> pd.DataFrame:
+    """Add label / email / login_type columns from Privy, keyed by DID.
+
+    For tables shipped directly from the points-engine that expose
+    `privy_did` (or aliases like `referrer_did`, `beneficiary_did`,
+    `referee_did`) rather than a wallet address. Falls through with the
+    bare frame if Privy isn't configured or the DID column is missing.
+    """
+    if frame.empty or did_col not in frame.columns:
+        return frame
+    did_map = _did_lookup_from_privy_map(privy_map)
+    if not did_map:
+        return frame
+    out = frame.copy()
+    dids = out[did_col].astype(str)
+    out[label_col] = dids.map(lambda d: (did_map.get(d) or {}).get("label") or "")
+    out[email_col] = dids.map(lambda d: (did_map.get(d) or {}).get("email") or "")
+    out[type_col] = dids.map(
+        lambda d: LOGIN_TYPE_BADGE.get((did_map.get(d) or {}).get("login_type"), "—")
+    )
+    return out
+
+
 def events_to_df(events: list) -> pd.DataFrame:
     if not events:
         return pd.DataFrame()
@@ -2402,6 +2454,25 @@ with tab_referrals:
         # current/max progress. The rest sorts/filters via st.dataframe's
         # built-ins (column_config + sortable).
         if codes:
+            # DID-keyed identity lookup for beneficiary enrichment. Built
+            # once per render — beats N round-trips through enrich_did_df
+            # in the row loop.
+            _did_map = _did_lookup_from_privy_map(privy_map)
+
+            def _beneficiary_display(did: str | None) -> str:
+                """Champion label (+ email if distinct) when Privy resolves,
+                else truncated DID. Falls back to em-dash on missing."""
+                if not did:
+                    return "—"
+                ident = _did_map.get(did)
+                if ident:
+                    label = ident.get("label") or ""
+                    email = ident.get("email") or ""
+                    if label and email and label != email:
+                        return f"{label} ({email})"
+                    return label or email or (did[:24] + "…" if len(did) > 24 else did)
+                return did[:24] + ("…" if len(did) > 24 else "")
+
             rows = []
             for c in codes:
                 rv = c.get("reward_value") or {}
@@ -2427,7 +2498,7 @@ with tab_referrals:
                     "status": c.get("status"),
                     "reward": reward_label,
                     "progress": progress,
-                    "beneficiary": (c.get("beneficiary_did") or "—")[:24] + ("…" if c.get("beneficiary_did") and len(c.get("beneficiary_did", "")) > 24 else ""),
+                    "beneficiary": _beneficiary_display(c.get("beneficiary_did")),
                     "kickback_rate": c.get("kickback_rate") or "—",
                     "champion_bonus": c.get("champion_redeem_bonus") or "—",
                     "expires_at": (c.get("expires_at") or "—")[:19],
@@ -2497,6 +2568,7 @@ with tab_referrals:
                         # actually touch.
                         if "redeemed_at" in red_df.columns:
                             red_df["redeemed_at"] = red_df["redeemed_at"].astype(str).str[:19]
+                        red_df = enrich_did_df(red_df, privy_map)
                         st.dataframe(red_df, use_container_width=True, hide_index=True)
                         st.caption(f"{len(red_df)} redemption rows.")
 
@@ -2657,29 +2729,10 @@ with tab_referrals:
             )
         else:
             tr_df = pd.DataFrame(top_refs)
-            # Enrich the referrer DIDs with Privy identity (label + email)
-            # when available.
-            #
-            # `privy_map` is a `dict[wallet_lower → identity_dict]` returned
-            # by load_privy_users() — NOT a DataFrame. Calling `.empty` on
-            # it would AttributeError (Codex P1 / Greptile P1 caught this).
-            # Each identity dict carries `privy_did`, `label`, `email` (see
-            # _extract_privy_identity), so we collapse the wallet-keyed map
-            # to a DID-keyed DataFrame for the merge — dropping duplicates
-            # because one Privy DID can have multiple linked wallets.
-            tr_df["referrer_did"] = tr_df.get("referrer_did", "").astype(str)
-            if privy_map:
-                _privy_rows = [v for v in privy_map.values() if v.get("privy_did")]
-                if _privy_rows:
-                    _privy_df = pd.DataFrame(_privy_rows).drop_duplicates("privy_did")[
-                        ["privy_did", "label", "email"]
-                    ]
-                    # Match the BE column name (referrer_did) on our side.
-                    tr_df = tr_df.merge(
-                        _privy_df.rename(columns={"privy_did": "referrer_did"}),
-                        on="referrer_did",
-                        how="left",
-                    )
+            # Enrich the referrer DIDs with Privy identity (label + email).
+            # enrich_did_df handles privy_map being empty / dict-shape and
+            # all the DataFrame-merge edge cases — see its docstring.
+            tr_df = enrich_did_df(tr_df, privy_map, did_col="referrer_did")
             st.dataframe(tr_df, use_container_width=True, hide_index=True)
 
 
