@@ -901,6 +901,38 @@ def _did_lookup_from_privy_map(privy_map: dict) -> dict:
     return seen
 
 
+# Per-DID identity fetch, cached individually. Backstop for the bulk
+# `load_privy_users()` listing, which Privy rate-limits past ~30 pages
+# (~3000 users) under any sustained request rate — newer accounts that
+# fell off the listing window would otherwise render as bare DIDs forever.
+# The /api/v1/users/{did} endpoint is unaffected by that rate limit and
+# returns the full linked_accounts payload.
+#
+# Cached per-DID for 24h via st.cache_data so re-renders of the same table
+# cost zero round-trips, and the total request budget is bounded by the
+# count of unique DIDs ever displayed across all open sessions per day.
+@st.cache_data(ttl=86400, max_entries=50000, show_spinner=False)
+def _fetch_privy_user_by_did(did: str) -> dict | None:
+    """GET /api/v1/users/{did} → identity dict. None on any failure."""
+    if not did or not did.startswith("did:privy:"):
+        return None
+    app_id, secret = _privy_credentials()
+    if not app_id or not secret:
+        return None
+    try:
+        resp = _requests.get(
+            f"{PRIVY_API_BASE}/users/{did}",
+            headers={"privy-app-id": app_id},
+            auth=(app_id, secret),
+            timeout=10,
+        )
+        if resp.status_code != 200:
+            return None
+        return _extract_privy_identity(resp.json())
+    except Exception:
+        return None
+
+
 def enrich_did_df(
     frame: pd.DataFrame,
     privy_map: dict,
@@ -911,14 +943,38 @@ def enrich_did_df(
 ) -> pd.DataFrame:
     """Add label / email / login_type columns from Privy, keyed by DID.
 
+    Resolution order per rendered DID:
+      1. wallet-keyed bulk map (cheap — already in memory)
+      2. per-DID Privy GET (cached 24h — fills the gap for users that
+         fell off the bulk-listing pagination window)
+
     For tables shipped directly from the points-engine that expose
     `privy_did` (or aliases like `referrer_did`, `beneficiary_did`,
     `referee_did`) rather than a wallet address. Falls through with the
-    bare frame if Privy isn't configured or the DID column is missing.
+    bare frame if the DID column is missing.
     """
     if frame.empty or did_col not in frame.columns:
         return frame
+
+    # Start with whatever the bulk listing gave us (zero new API calls).
     did_map = _did_lookup_from_privy_map(privy_map)
+
+    # Fan out per-DID for the rows actually being rendered. Bounded by the
+    # frame's unique DID set — never more than `len(frame)` lookups, and
+    # st.cache_data short-circuits each DID after the first hit.
+    dids_in_frame = {
+        d for d in frame[did_col].astype(str).unique()
+        if d and d.startswith("did:privy:") and d not in did_map
+    }
+    for did in dids_in_frame:
+        ident = _fetch_privy_user_by_did(did)
+        if ident:
+            did_map[did] = {
+                "label": ident.get("label") or "",
+                "email": ident.get("email") or "",
+                "login_type": ident.get("login_type") or "",
+            }
+
     if not did_map:
         return frame
     out = frame.copy()
@@ -2454,17 +2510,29 @@ with tab_referrals:
         # current/max progress. The rest sorts/filters via st.dataframe's
         # built-ins (column_config + sortable).
         if codes:
-            # DID-keyed identity lookup for beneficiary enrichment. Built
-            # once per render — beats N round-trips through enrich_did_df
-            # in the row loop.
+            # DID-keyed identity lookup for beneficiary enrichment. Seed
+            # from the wallet-keyed bulk map (zero API cost). Per-DID
+            # fallback for beneficiaries not in the bulk listing is
+            # handled inline below.
             _did_map = _did_lookup_from_privy_map(privy_map)
 
             def _beneficiary_display(did: str | None) -> str:
                 """Champion label (+ email if distinct) when Privy resolves,
-                else truncated DID. Falls back to em-dash on missing."""
+                else truncated DID. Falls back to em-dash on missing.
+                Two-tier resolution: bulk map first, then per-DID API
+                (st.cache_data 24h — first render warms, subsequent renders
+                cost nothing)."""
                 if not did:
                     return "—"
                 ident = _did_map.get(did)
+                if not ident and did.startswith("did:privy:"):
+                    fetched = _fetch_privy_user_by_did(did)
+                    if fetched:
+                        ident = {
+                            "label": fetched.get("label") or "",
+                            "email": fetched.get("email") or "",
+                        }
+                        _did_map[did] = ident  # populate render-local cache
                 if ident:
                     label = ident.get("label") or ""
                     email = ident.get("email") or ""
