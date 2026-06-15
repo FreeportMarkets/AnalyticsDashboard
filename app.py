@@ -962,18 +962,30 @@ def enrich_did_df(
     # Fan out per-DID for the rows actually being rendered. Bounded by the
     # frame's unique DID set — never more than `len(frame)` lookups, and
     # st.cache_data short-circuits each DID after the first hit.
-    dids_in_frame = {
+    #
+    # Run the lookups concurrently: on a cold start (cache cold) this loop is
+    # the dominant Referrals-tab cost, and a sequential walk serializes one
+    # Privy round-trip per uncached DID. The fetcher is @st.cache_data-wrapped
+    # and thread-safe (same pattern as prefetch_in_parallel).
+    dids_in_frame = [
         d for d in frame[did_col].astype(str).unique()
         if d and d.startswith("did:privy:") and d not in did_map
-    }
-    for did in dids_in_frame:
-        ident = _fetch_privy_user_by_did(did)
-        if ident:
-            did_map[did] = {
-                "label": ident.get("label") or "",
-                "email": ident.get("email") or "",
-                "login_type": ident.get("login_type") or "",
-            }
+    ]
+    if dids_in_frame:
+        with ThreadPoolExecutor(max_workers=min(len(dids_in_frame), 16)) as pool:
+            futures = {pool.submit(_fetch_privy_user_by_did, d): d for d in dids_in_frame}
+            for fut in as_completed(futures):
+                did = futures[fut]
+                try:
+                    ident = fut.result()
+                except Exception:
+                    ident = None
+                if ident:
+                    did_map[did] = {
+                        "label": ident.get("label") or "",
+                        "email": ident.get("email") or "",
+                        "login_type": ident.get("login_type") or "",
+                    }
 
     if not did_map:
         return frame
