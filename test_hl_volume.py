@@ -119,3 +119,36 @@ def test_compute_dedups_same_fill_across_wallet_fetches():
         "0xB": [{"tid": 9, "dir": "Open Long", "sz": "1", "px": "100", "time": 1000}],
     })
     assert hv.compute_perp_volume(["0xA", "0xB"], 0, 2000, fetcher) == 100.0
+
+
+# --- pagination: HL caps userFillsByTime at 2000 fills, must page past it -----
+
+def test_fetcher_no_pagination_for_short_batch():
+    calls = []
+    def post_fn(body):
+        calls.append(body["startTime"])
+        return [{"tid": 1, "dir": "Open Long", "sz": "1", "px": "1", "time": 1000}]
+    got = hv.hl_fills_fetcher("0xA", 0, post_fn=post_fn)
+    assert len(got) == 1
+    assert len(calls) == 1  # one page only
+
+
+def test_fetcher_pages_past_2000_cap():
+    # 2500 fills with unique increasing times; post_fn returns <=2000 from startTime
+    all_fills = [{"tid": i, "dir": "Open Long", "sz": "1", "px": "1", "time": 1000 + i}
+                 for i in range(2500)]
+    def post_fn(body):
+        s = body["startTime"]
+        return [f for f in all_fills if f["time"] >= s][:2000]
+    got = hv.hl_fills_fetcher("0xA", 0, post_fn=post_fn)
+    assert len({f["tid"] for f in got}) == 2500  # all pages collected, deduped
+
+
+def test_fetcher_terminates_on_same_timestamp_boundary():
+    # 2000 fills all sharing one timestamp (degenerate) — must not infinite-loop
+    all_fills = [{"tid": i, "dir": "Open Long", "sz": "1", "px": "1", "time": 5000}
+                 for i in range(2000)]
+    def post_fn(body):
+        return all_fills  # always returns the same full page
+    got = hv.hl_fills_fetcher("0xA", 0, post_fn=post_fn)
+    assert len({f["tid"] for f in got}) == 2000  # deduped, loop broke

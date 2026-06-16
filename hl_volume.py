@@ -73,6 +73,28 @@ def _hl_post(body):
         return json.loads(resp.read())
 
 
-def hl_fills_fetcher(wallet, start_ms):
-    """Live HL `userFillsByTime` fetch for one wallet."""
-    return _hl_post({"type": "userFillsByTime", "user": wallet, "startTime": start_ms})
+_HL_PAGE_CAP = 2000  # HL returns at most 2000 fills per userFillsByTime call
+
+
+def hl_fills_fetcher(wallet, start_ms, post_fn=_hl_post):
+    """Live HL `userFillsByTime` for one wallet, paginated past the 2000-fill cap.
+
+    HL caps each response at 2000 fills; a busy wallet over a multi-day range has
+    more, so a single call silently truncates (undercounts volume). We page by
+    advancing `startTime` to the last fill's time and dedup by `tid` to absorb the
+    boundary overlap. `post_fn` is injected for testing. Terminates when a page is
+    under the cap or no new fills appear (degenerate same-timestamp page)."""
+    out, seen, cur = [], set(), start_ms
+    while True:
+        batch = post_fn({"type": "userFillsByTime", "user": wallet, "startTime": cur})
+        if not batch:
+            break
+        new = [f for f in batch if f.get("tid") not in seen]
+        for f in new:
+            seen.add(f.get("tid"))
+        out.extend(new)
+        if len(batch) < _HL_PAGE_CAP or not new:
+            break
+        last = max(int(f["time"]) for f in batch)
+        cur = last if last > cur else cur + 1  # advance; re-fetch boundary, dedup handles overlap
+    return out
