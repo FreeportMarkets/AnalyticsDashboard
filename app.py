@@ -6,6 +6,7 @@ import plotly.graph_objects as go
 import urllib.request
 import requests as _requests
 import json
+import hl_volume
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 from decimal import Decimal
@@ -160,9 +161,13 @@ def apply_perps_leverage(frame):
         ostium_close = close_mask & ostium_mask
         frame.loc[non_ostium_close, "amount_usd"] = frame.loc[non_ostium_close, "size"].abs() * frame.loc[non_ostium_close, "price"]
         frame.loc[ostium_close, "amount_usd"] = frame.loc[ostium_close, "size"].abs()
-    # Closes represent a round-trip (open + close) — store multiplier for volume calcs
+    # Each row is ONE fill at its true notional (opens: margin×leverage set
+    # above; closes: size×price set above). Count every fill exactly once.
+    # A round-trip is already two separate rows (an open row + a close row),
+    # so it is naturally counted twice — matching HL's per-fill notional.
+    # The previous `closes × 2` made closes count a THIRD time, inflating
+    # volume by the full close notional (verified vs HL fills 2026-06-16).
     frame["_volume_usd"] = frame["amount_usd"].copy()
-    frame.loc[close_mask, "_volume_usd"] = frame.loc[close_mask, "_volume_usd"] * 2
     return frame
 
 
@@ -691,6 +696,33 @@ def load_trades_range(start_date: str, end_date: str) -> list:
         return all_items
     except Exception:
         return _load_trades_scan(start_date, end_date)
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def hl_perp_volume_usd(wallets, start_ms, end_ms):
+    """Authoritative perp volume, computed 1:1 from HL per-fill data (Σ px*size,
+    perp-only, deduped). This is exactly what HL charges builder fees on — the DB
+    `_volume_usd` is a reconstruction that runs ~15% hot (intended vs filled size).
+    Fetches per wallet in parallel; cached 5min. Returns None on any HL error so
+    the caller can fall back to the DB estimate rather than break the page.
+    Logic + edge cases are covered by test_hl_volume.py."""
+    if not wallets:
+        return 0.0
+    try:
+        fills_by_wallet = {}
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            futs = {pool.submit(hl_volume.hl_fills_fetcher, w, start_ms): w for w in wallets}
+            for fut in as_completed(futs):
+                fills_by_wallet[futs[fut]] = fut.result()
+        return hl_volume.compute_perp_volume(
+            list(wallets), start_ms, end_ms, lambda w, s: fills_by_wallet.get(w, [])
+        )
+    except Exception:
+        return None
+
+
+def _ny_midnight_ms(d):
+    return int(datetime.combine(d, datetime.min.time(), tzinfo=ZoneInfo("America/New_York")).timestamp() * 1000)
 
 
 EVM_FEE_PAYER = "0xe39244f14AFB106255754538Cc718cAdFC0A9905"
@@ -1397,13 +1429,33 @@ with tab_overview:
             trades_only_ov = trades_df[trades_df["type"].isin(["swap", "perps"])] if "type" in trades_df.columns else trades_df
             deposits_ov = trades_df[trades_df["type"] == "deposit"] if "type" in trades_df.columns else pd.DataFrame()
 
-            trade_vol = trades_only_ov["_volume_usd"].sum() if not trades_only_ov.empty and "_volume_usd" in trades_only_ov.columns else 0
+            # Perp volume is sourced 1:1 from HL per-fill data (exact, matches
+            # what fees bill on). Swap volume stays DB-sourced. If HL is
+            # unreachable, fall back to the DB estimate (now ×1, not the old ×2).
+            perps_ov = trades_only_ov[trades_only_ov["type"] == "perps"] if "type" in trades_only_ov.columns else pd.DataFrame()
+            swaps_ov = trades_only_ov[trades_only_ov["type"] == "swap"] if "type" in trades_only_ov.columns else pd.DataFrame()
+            swap_vol = swaps_ov["_volume_usd"].sum() if not swaps_ov.empty and "_volume_usd" in swaps_ov.columns else 0
+            perp_wallets = (
+                tuple(sorted(perps_ov["wallet_address"].dropna().unique()))
+                if not perps_ov.empty and "wallet_address" in perps_ov.columns else ()
+            )
+            _start_ms = _ny_midnight_ms(start_date)
+            _end_ms = min(int(datetime.now(tz=ZoneInfo("America/New_York")).timestamp() * 1000),
+                          _ny_midnight_ms(end_date + timedelta(days=1)))
+            hl_vol = hl_perp_volume_usd(perp_wallets, _start_ms, _end_ms)
+            if hl_vol is None:  # HL fetch failed → DB estimate, flag it
+                perp_vol = perps_ov["_volume_usd"].sum() if not perps_ov.empty and "_volume_usd" in perps_ov.columns else 0
+                trade_vol = perp_vol + swap_vol
+                _vol_label = "Trading Volume (est.)"
+            else:
+                trade_vol = hl_vol + swap_vol
+                _vol_label = "Trading Volume"
             dep_vol = deposits_ov["_volume_usd"].sum() if not deposits_ov.empty and "_volume_usd" in deposits_ov.columns else 0
             num_traders = trades_only_ov["wallet_address"].nunique() if not trades_only_ov.empty and "wallet_address" in trades_only_ov.columns else 0
             trader_pct = (num_traders / total_unique * 100) if total_unique > 0 else 0
 
             tv1, tv2, tv3, tv4 = st.columns(4)
-            tv1.metric("Trading Volume", f"${fmt_number(trade_vol)}")
+            tv1.metric(_vol_label, f"${fmt_number(trade_vol)}")
             tv2.metric("Deposit Volume", f"${fmt_number(dep_vol)}")
             tv3.metric("Active Traders", fmt_number(num_traders))
             tv4.metric("Trader %", f"{trader_pct:.0f}%")
