@@ -1460,6 +1460,31 @@ with tab_overview:
             tv3.metric("Active Traders", fmt_number(num_traders))
             tv4.metric("Trader %", f"{trader_pct:.0f}%")
 
+            # --- Perp volume by surface: Mobile (FreeApp) vs Web (terminal) ---
+            # HL fills carry no client, so orders are tagged at placement time with
+            # an `x-client` header stored on each perp row. The authoritative total
+            # is the HL-fill perp volume; we split it by each client's reconstructed
+            # _volume_usd share. Rows placed before the tag shipped → "Untagged".
+            if not perps_ov.empty and "_volume_usd" in perps_ov.columns:
+                _pc = perps_ov.copy()
+                _pc["client"] = (
+                    _pc["client"].fillna("untagged").replace("", "untagged").str.lower()
+                    if "client" in _pc.columns else "untagged"
+                )
+                by_client = _pc.groupby("client")["_volume_usd"].sum()
+                recon_total = by_client.sum()
+                # Reconcile the split to the authoritative HL perp total when we have it.
+                perp_total = hl_vol if hl_vol is not None else recon_total
+                scale = (perp_total / recon_total) if recon_total > 0 else 0
+                mobile_vol = float(by_client.get("mobile", 0)) * scale
+                web_vol = float(by_client.get("web", 0)) * scale
+                untagged_vol = max(0.0, perp_total - mobile_vol - web_vol)
+                st.caption("Perp volume by surface")
+                mv1, mv2, mv3 = st.columns(3)
+                mv1.metric("📱 Mobile", f"${fmt_number(mobile_vol)}")
+                mv2.metric("🖥️ Web Terminal", f"${fmt_number(web_vol)}")
+                mv3.metric("Untagged", f"${fmt_number(untagged_vol)}")
+
         # New vs Returning users
         # Users whose first-ever event is within this date range = new
         first_seen_dates = user_df.groupby("wallet_address")["date"].min()
