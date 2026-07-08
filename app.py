@@ -1460,6 +1460,36 @@ with tab_overview:
             tv3.metric("Active Traders", fmt_number(num_traders))
             tv4.metric("Trader %", f"{trader_pct:.0f}%")
 
+            # --- Perp volume by surface: Mobile (FreeApp) vs Web (terminal) ---
+            # HL fills carry no client, so orders are tagged at placement time with
+            # an `x-client` header (values: 'mobile' | 'web' | 'unknown', whitelisted
+            # backend-side) stored on each perp row. The authoritative total is the
+            # HL-fill perp volume; we split it by each client's reconstructed
+            # _volume_usd share. Rows placed before the tag shipped → "Untagged".
+            if "_volume_usd" in perps_ov.columns and "client" in perps_ov.columns:
+                by_client = (
+                    perps_ov.assign(
+                        client=perps_ov["client"].fillna("untagged").replace("", "untagged").str.lower()
+                    ).groupby("client")["_volume_usd"].sum()
+                )
+            else:
+                by_client = pd.Series(dtype=float)
+            recon_total = float(by_client.sum())
+            # Reconcile the split to the authoritative HL perp total when we have it;
+            # otherwise fall back to the DB reconstruction (flag it as an estimate).
+            perp_total = hl_vol if hl_vol is not None else recon_total
+            if perp_total and perp_total > 0:
+                scale = (perp_total / recon_total) if recon_total > 0 else 0
+                mobile_vol = float(by_client.get("mobile", 0)) * scale
+                web_vol = float(by_client.get("web", 0)) * scale
+                # No perp rows (scale 0) → all of it is untagged, not lost.
+                untagged_vol = max(0.0, perp_total - mobile_vol - web_vol)
+                st.caption("Perp volume by surface" + ("" if hl_vol is not None else " (est.)"))
+                mv1, mv2, mv3 = st.columns(3)
+                mv1.metric("📱 Mobile", f"${fmt_number(mobile_vol)}")
+                mv2.metric("🖥️ Web Terminal", f"${fmt_number(web_vol)}")
+                mv3.metric("Untagged", f"${fmt_number(untagged_vol)}")
+
         # New vs Returning users
         # Users whose first-ever event is within this date range = new
         first_seen_dates = user_df.groupby("wallet_address")["date"].min()
