@@ -10,6 +10,14 @@ describe('timezone handling', () => {
     expect(nyDateExpr('ts')).toBe("(ts AT TIME ZONE 'America/New_York')::date")
   })
 
+  it('builds a NY-bucketing SQL expression for a qualified column', () => {
+    expect(nyDateExpr('e.ts')).toBe("(e.ts AT TIME ZONE 'America/New_York')::date")
+  })
+
+  it('rejects a tsColumn that is not a plain SQL identifier', () => {
+    expect(() => nyDateExpr("ts'; DROP TABLE events; --")).toThrow()
+  })
+
   // THE guard. An event at 01:30 UTC on Jul 20 is 21:30 EDT on Jul 19.
   // The DynamoDB partition key says 2026-07-20; every metric must say 2026-07-19.
   // If this ever passes as equal, the highest-severity risk in the spec is live.
