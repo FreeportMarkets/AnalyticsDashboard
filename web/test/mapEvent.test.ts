@@ -1,0 +1,86 @@
+import { describe, it, expect } from 'vitest'
+import { mapEvent } from '@/lib/sync/mapEvent'
+
+// Shape produced by Swap_Server/src/services/analytics.ts:70-92
+const valid = {
+  date: '2026-07-19',
+  sk: '2026-07-19T14:32:11.482Z#0xabcdef#k3j4h5g6',
+  event: 'trade_success',
+  screen: 'trade',
+  component: 'SwapModal',
+  wallet_address: '0xABCDEF0123456789',
+  session_id: 'm4k2j1-x9',
+  timestamp: '2026-07-19T14:32:11.482Z',
+  metadata: { asset: 'BTC', amount_usd: 250.5 },
+  platform: 'ios',
+  app_version: '1.4.2',
+  hour: 14,
+  day_of_week: 0,
+}
+
+describe('mapEvent', () => {
+  it('maps a well-formed item', () => {
+    const r = mapEvent(valid)
+    expect(r.ok).toBe(true)
+    if (!r.ok) return
+    expect(r.value.date).toBe('2026-07-19')
+    expect(r.value.sk).toBe(valid.sk)
+    expect(r.value.ts.toISOString()).toBe('2026-07-19T14:32:11.482Z')
+    expect(r.value.event).toBe('trade_success')
+    expect(r.value.metadata).toEqual({ asset: 'BTC', amount_usd: 250.5 })
+  })
+
+  it('preserves wallet_address case exactly', () => {
+    // Downstream joins lowercase explicitly; the mirror must not pre-normalize
+    // or it stops being a faithful copy of the source row.
+    const r = mapEvent(valid)
+    expect(r.ok && r.value.wallet_address).toBe('0xABCDEF0123456789')
+  })
+
+  it('drops the denormalized UTC hour and day_of_week', () => {
+    // These are UTC-derived; the dashboard must recompute in America/New_York.
+    // Carrying them forward invites a GROUP BY on the wrong value (spec risk #1).
+    const r = mapEvent(valid)
+    expect(r.ok && 'hour' in (r.value as object)).toBe(false)
+    expect(r.ok && 'day_of_week' in (r.value as object)).toBe(false)
+  })
+
+  it('allows absent optional fields', () => {
+    const r = mapEvent({
+      date: '2026-07-19', sk: 'a', event: 'session_start',
+      wallet_address: '0x1', session_id: 's', timestamp: '2026-07-19T00:00:00.000Z',
+    })
+    expect(r.ok).toBe(true)
+    if (!r.ok) return
+    expect(r.value.screen).toBeNull()
+    expect(r.value.platform).toBeNull()
+    expect(r.value.metadata).toBeNull()
+  })
+
+  it('quarantines a missing required field', () => {
+    const { date, ...noDate } = valid
+    const r = mapEvent(noDate)
+    expect(r.ok).toBe(false)
+    if (r.ok) return
+    expect(r.reason).toMatch(/date/)
+  })
+
+  it('quarantines an unparseable timestamp', () => {
+    const r = mapEvent({ ...valid, timestamp: 'not-a-date' })
+    expect(r.ok).toBe(false)
+    if (r.ok) return
+    expect(r.reason).toMatch(/timestamp/)
+  })
+
+  it('quarantines a non-object', () => {
+    expect(mapEvent(null).ok).toBe(false)
+    expect(mapEvent('nope').ok).toBe(false)
+  })
+
+  it('quarantines non-string metadata rather than coercing', () => {
+    const r = mapEvent({ ...valid, metadata: 'a string' })
+    expect(r.ok).toBe(false)
+    if (r.ok) return
+    expect(r.reason).toMatch(/metadata/)
+  })
+})
