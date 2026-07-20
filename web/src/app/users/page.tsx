@@ -11,10 +11,12 @@ import {
 } from '@/lib/metrics/users'
 import { watermarkAge } from '@/lib/metrics/staleness'
 import { NY_TZ } from '@/lib/time'
+import { fetchPrivyUsers } from '@/lib/privy'
 import { PageHeader } from '@/components/PageHeader'
 import { StatTile } from '@/components/StatTile'
 import { DataTable } from '@/components/DataTable'
 import { StalenessBadge } from '@/components/StalenessBadge'
+import { TraderCell } from '@/components/TraderCell'
 
 export const dynamic = 'force-dynamic'
 
@@ -54,10 +56,6 @@ function shortDay(day: string): string {
   return new Intl.DateTimeFormat('en-US', { month: 'short', day: 'numeric' }).format(new Date(`${day}T12:00:00Z`))
 }
 
-function shortWallet(w: string): string {
-  return w.length > 10 ? `${w.slice(0, 4)}…${w.slice(-4)}` : w
-}
-
 function formatTimestamp(iso: string): string {
   return new Intl.DateTimeFormat('en-US', {
     timeZone: NY_TZ, month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit',
@@ -83,7 +81,7 @@ export default async function UsersPage({
   const [session, end] = [await auth(), today()]
   const start = addDays(end, -(RANGES[range].days - 1))
 
-  const [au, ss, topUsers, traders, heatmap, nvr, curve, cohorts, ages] = await Promise.all([
+  const [au, ss, topUsers, traders, heatmap, nvr, curve, cohorts, ages, privyMap] = await Promise.all([
     activeUsers(start, end),
     sessionStats(start, end),
     topUsersByActivity(start, end, 20),
@@ -93,6 +91,7 @@ export default async function UsersPage({
     retentionCurve(start, end),
     cohortRetention(start, end),
     watermarkAge(),
+    fetchPrivyUsers(),
   ])
 
   const maxDau = Math.max(...au.daily.map(d => d.users), 1)
@@ -257,7 +256,7 @@ export default async function UsersPage({
                 rowKey={row => row.wallet}
                 rows={topUsers}
                 columns={[
-                  { key: 'wallet', header: 'User', render: r => <span title={r.wallet}>{shortWallet(r.wallet)}</span> },
+                  { key: 'wallet', header: 'User', render: r => <TraderCell wallet={r.wallet} privyMap={privyMap} /> },
                   { key: 'events', header: 'Events', align: 'right', render: r => compact(r.events) },
                   { key: 'sessions', header: 'Sessions', align: 'right', render: r => compact(r.sessions) },
                   { key: 'lastSeen', header: 'Last seen', align: 'right', render: r => formatTimestamp(r.lastSeen) },
@@ -272,7 +271,7 @@ export default async function UsersPage({
                 rowKey={row => row.wallet}
                 rows={traders}
                 columns={[
-                  { key: 'wallet', header: 'User', render: r => <span title={r.wallet}>{shortWallet(r.wallet)}</span> },
+                  { key: 'wallet', header: 'User', render: r => <TraderCell wallet={r.wallet} privyMap={privyMap} /> },
                   { key: 'trades', header: 'Trades', align: 'right', render: r => compact(r.trades) },
                   { key: 'volumeUsd', header: 'Volume', align: 'right', render: r => usd(r.volumeUsd) },
                 ]}

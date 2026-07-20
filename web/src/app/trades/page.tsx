@@ -9,11 +9,13 @@ import {
 } from '@/lib/metrics/trades'
 import { watermarkAge } from '@/lib/metrics/staleness'
 import { NY_TZ } from '@/lib/time'
+import { fetchPrivyUsers } from '@/lib/privy'
 import { PageHeader } from '@/components/PageHeader'
 import { StatTile } from '@/components/StatTile'
 import { BarList } from '@/components/BarList'
 import { DataTable } from '@/components/DataTable'
 import { StalenessBadge } from '@/components/StalenessBadge'
+import { TraderCell } from '@/components/TraderCell'
 
 export const dynamic = 'force-dynamic'
 
@@ -91,7 +93,7 @@ export default async function TradesPage({
   const [session, end] = [await auth(), today()]
   const start = addDays(end, -(RANGES[range].days - 1))
 
-  const [vol, daily, assets, venues, recent, deposits, ages] = await Promise.all([
+  const [vol, daily, assets, venues, recent, deposits, ages, privyMap] = await Promise.all([
     volumeSummary(start, end),
     dailyVolume(start, end),
     topAssets(start, end, 15),
@@ -99,6 +101,7 @@ export default async function TradesPage({
     recentTrades(start, end, 50),
     depositSummary(start, end),
     watermarkAge(),
+    fetchPrivyUsers(),
   ])
 
   const swap = vol.byType.find(t => t.type === 'swap') ?? { type: 'swap', count: 0, volumeUsd: 0 }
@@ -276,10 +279,11 @@ export default async function TradesPage({
           <h2 className="text-xs font-semibold uppercase tracking-wide text-ink-2">Recent trades</h2>
           <div className="mt-3">
             <DataTable
-              rowKey={row => `${row.ts}-${row.asset}-${row.side ?? ''}-${row.volumeUsd}`}
+              rowKey={row => `${row.ts}-${row.walletAddress}-${row.asset}-${row.side ?? ''}-${row.volumeUsd}`}
               rows={recent}
               columns={[
                 { key: 'ts', header: 'Time', render: r => formatTradeTs(r.ts) },
+                { key: 'trader', header: 'Trader', render: r => <TraderCell wallet={r.walletAddress} privyMap={privyMap} /> },
                 { key: 'type', header: 'Type', render: r => r.type },
                 { key: 'asset', header: 'Asset', render: r => r.asset },
                 { key: 'side', header: 'Side', render: r => r.side ?? '—' },

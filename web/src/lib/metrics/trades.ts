@@ -240,12 +240,16 @@ export interface RecentTradeRow {
   status: string | null
   venue: string | null
   volumeUsd: number
+  walletAddress: string
 }
 
 /**
  * Last N swap+perps trades. `asset` falls back to `to_token` for swaps
  * (which have no `asset`/`display_symbol`). `volumeUsd` is the same
  * reconstruction as everywhere else in this file -- "est." for perps rows.
+ * `walletAddress` is selected (it's already used in the WHERE clause) so
+ * callers can enrich the row with a Privy identity label -- see
+ * `@/lib/privy`.
  */
 export async function recentTrades(startDate: string, endDate: string, limit = 50): Promise<RecentTradeRow[]> {
   const { fromUtc, toUtc } = nyRangeToUtc(startDate, endDate)
@@ -260,7 +264,8 @@ export async function recentTrades(startDate: string, endDate: string, limit = 5
             coalesce(nullif(lower(client), ''), 'untagged') AS client,
             status,
             category AS venue,
-            ${VOLUME_USD_EXPR} AS volume_usd
+            ${VOLUME_USD_EXPR} AS volume_usd,
+            wallet_address
        FROM trades
       WHERE ts >= $1 AND ts < $2
         AND type IN ('swap', 'perps')
@@ -280,6 +285,7 @@ export async function recentTrades(startDate: string, endDate: string, limit = 5
     status: string | null
     venue: string | null
     volume_usd: number
+    wallet_address: string
   }>
 
   return rows.map(r => ({
@@ -294,6 +300,7 @@ export async function recentTrades(startDate: string, endDate: string, limit = 5
     status: r.status,
     venue: r.venue,
     volumeUsd: r.volume_usd,
+    walletAddress: r.wallet_address,
   }))
 }
 
