@@ -2138,6 +2138,61 @@ git commit -m "feat(verify): row-count and partition-health verification against
 
 ---
 
+## Task 11: Nightly reconciliation
+
+**Promoted from Phase 2 into Phase 1 after a code review.** The 60s sync holds its
+watermark `WATERMARK_LAG_MS` (10 min) behind wall-clock so late events are not stepped
+over. That lag was chosen from the client's 30s flush interval — but
+`FreeApp/services/AnalyticsService.ts:32` keeps its queue **in memory only**, so lateness
+is bounded by a *foreground session*, not the flush interval. A phone offline for 40
+minutes delivers 40-minute-late events, which fall behind the watermark and are never
+synced: no error, no quarantine row, no log line. Just permanently undercounted metrics.
+
+The design always intended lag + reconciliation *together*; only the pair is sufficient.
+Running the Phase 2.5 seven-day parity gate against data with a known silent-loss hole
+would make the gate meaningless.
+
+**Files:**
+- Create: `web/src/app/api/cron/reconcile/route.ts`
+- Create: `web/test/reconcile.test.ts`
+- Modify: `web/vercel.json` (add the nightly cron)
+
+**Interfaces:**
+- Consumes: `syncEvents`/`syncTrades` deps, `insertEvents`/`insertTrades`, `quarantineRow`,
+  `ensurePartitions`, `mapEvent`/`mapTrade`, `fetchEvents`/`fetchTrades`.
+- Produces: `GET /api/cron/reconcile` returning `{ events: SyncResult, trades: SyncResult }`.
+
+**Design:** a full re-read of the last 2 UTC date partitions that deliberately IGNORES the
+watermark. Same `CRON_SECRET` bearer check as `/api/cron/sync`. Idempotent by construction
+(events `DO NOTHING`, trades `DO UPDATE`, quarantine dedups on `(source, item_hash)`).
+
+**It must NOT call `advanceWatermark` for the `events` or `trades` sources.** Reconciliation
+may not move the incremental cursor in either direction.
+
+**The `inserted` count is a measurement, not just a status.** Rows inserted by a reconcile
+run are exactly those the incremental sync missed, so that number is the empirical answer to
+"is 10 minutes enough?" — the question this plan originally guessed at. Log it prominently.
+If persistently nonzero, `WATERMARK_LAG_MS` is too short and should be raised from that
+data rather than from reasoning about flush intervals.
+
+- [ ] **Step 1: Write the failing tests** covering: (a) a fetched row whose `timestamp`
+      predates the current watermark is still inserted — this is the whole point, proving
+      reconciliation ignores the cursor; (b) `advanceWatermark` is never called; (c) a
+      non-data error still propagates rather than being swallowed.
+- [ ] **Step 2: Run them, confirm they fail** for a missing-module reason.
+- [ ] **Step 3: Implement the route**, reusing the existing sync building blocks. Do not
+      duplicate mapping or insert logic.
+- [ ] **Step 4: Add the cron to `web/vercel.json`** — `{"path":"/api/cron/reconcile",
+      "schedule":"0 8 * * *"}` (08:00 UTC = 03:00 America/New_York, after the US trough).
+      Keep the existing 60s sync cron.
+- [ ] **Step 5: Run the full suite**, confirm no regression (91/91 before this task).
+- [ ] **Step 6: Add an integration test** against the real Neon test DB: insert a row, run
+      the reconcile path over that window, assert the row count is unchanged and `inserted`
+      is 0. Clean up with a unique marker, never truncate.
+- [ ] **Step 7: Commit** — `feat(sync): nightly reconciliation for late-arriving events`
+
+---
+
 ## Phase 1 Definition of Done
 
 - [ ] `npm test` green — all tests from Tasks 2–7.
@@ -2146,6 +2201,8 @@ git commit -m "feat(verify): row-count and partition-health verification against
 - [ ] `quarantine` is empty, or every row is individually explained.
 - [ ] `events_default` has zero rows.
 - [ ] Watermark age holds near 10 minutes for 30+ minutes without growing.
+- [ ] Nightly reconciliation (Task 11) is deployed, and its `inserted` count is being
+      recorded so the adequacy of `WATERMARK_LAG_MS` is measured rather than assumed.
 - [ ] The IAM write-denial probe from Task 0 Step 3 still returns `AccessDeniedException`.
 - [ ] `git diff --stat main -- app.py hl_volume.py test_hl_volume.py requirements.txt` is empty —
       the Streamlit app is untouched and still serving.
