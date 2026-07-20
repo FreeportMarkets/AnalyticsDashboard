@@ -22,6 +22,11 @@ Every task's requirements implicitly include this section.
 - **The Python Streamlit app at the repo root is untouched.** `app.py`, `hl_volume.py`, `test_hl_volume.py`, and `requirements.txt` stay exactly as they are. All new code lives under `web/`.
 - **Never silently drop a row.** Parse and validation failures go to `quarantine` with the raw item and a reason. Never a silent skip, never a batch-fatal throw.
 - **All sync operations are idempotent.** Re-running any sync or backfill over any range must not change the resulting data.
+- **Neon driver API.** `@neondatabase/serverless` has NO `sql.query()` method. The value
+  returned by `neon()` is called as a tagged template (``sql`...` ``) or directly as
+  `sql(text, params, opts)`. Each call sends exactly ONE statement over HTTP -- a
+  multi-statement string is rejected. Pass `{ fullResults: true }` when you need
+  `rowCount`; without it the call resolves to a bare rows array.
 - Node 20+. Package manager: `npm`.
 - Timezone constant, used everywhere: `America/New_York`.
 
@@ -395,6 +400,29 @@ const url = process.env.DATABASE_URL
 if (!url) throw new Error('DATABASE_URL is not set')
 const sql = neon(url)
 
+/**
+ * Split a migration file into individual statements.
+ *
+ * Neon's HTTP driver executes exactly ONE statement per call and rejects
+ * multi-statement strings, so a migration file cannot be sent as a single query.
+ *
+ * This splitter is deliberately simple: it strips `--` line comments and splits
+ * on semicolons. That is sufficient for plain DDL and is all this project's
+ * migrations contain. If a future migration introduces a function body, a
+ * dollar-quoted string, or a semicolon inside a string literal, this splitter
+ * MUST be replaced with a real parser -- it will silently split such a file in
+ * the wrong place.
+ */
+export function splitStatements(sqlText: string): string[] {
+  return sqlText
+    .split('\n')
+    .map(line => line.replace(/--.*$/, ''))
+    .join('\n')
+    .split(';')
+    .map(s => s.trim())
+    .filter(s => s.length > 0)
+}
+
 async function main() {
   await sql`CREATE TABLE IF NOT EXISTS _migrations (
     name text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now()
@@ -409,7 +437,9 @@ async function main() {
       continue
     }
     console.log(`apply ${file}`)
-    await sql.query(readFileSync(path.join(dir, file), 'utf8'))
+    for (const stmt of splitStatements(readFileSync(path.join(dir, file), 'utf8'))) {
+      await sql(stmt)
+    }
     await sql`INSERT INTO _migrations (name) VALUES (${file})`
   }
   console.log('migrations complete')
@@ -831,13 +861,21 @@ export function partitionBoundsFor(date: string): { from: string; to: string } {
   return { from, to }
 }
 
-type SqlQuery = { query: (q: string, params?: unknown[]) => Promise<unknown> }
+import type { neon } from '@neondatabase/serverless'
+
+type SqlTag = ReturnType<typeof neon>
 
 /**
  * Create any missing monthly partitions plus their indexes.
  * Idempotent -- safe to call on every sync tick.
+ *
+ * NOTE ON THE NEON API: `@neondatabase/serverless` has NO `sql.query()` method.
+ * The function returned by `neon()` is called either as a tagged template
+ * (sql`...`) or directly as sql(text, params, opts). Each call sends exactly ONE
+ * statement over HTTP -- multi-statement strings are rejected. Every raw query in
+ * this codebase therefore uses the sql(text, params) form, one statement per call.
  */
-export async function ensurePartitions(sql: SqlQuery, dates: string[]): Promise<string[]> {
+export async function ensurePartitions(sql: SqlTag, dates: string[]): Promise<string[]> {
   const names = new Set<string>()
   for (const d of dates) names.add(partitionNameFor(d))
 
@@ -845,13 +883,15 @@ export async function ensurePartitions(sql: SqlQuery, dates: string[]): Promise<
   for (const name of names) {
     const date = `${name.slice(7, 11)}-${name.slice(12, 14)}-01`
     const { from, to } = partitionBoundsFor(date)
-    await sql.query(
+    // DDL cannot be parameterized; `name`, `from`, and `to` are all derived from
+    // a string already validated against DATE_RE by assertDate().
+    await sql(
       `CREATE TABLE IF NOT EXISTS ${name} PARTITION OF events
        FOR VALUES FROM ('${from}') TO ('${to}')`
     )
-    await sql.query(`CREATE INDEX IF NOT EXISTS ${name}_event_ts_idx   ON ${name} (event, ts)`)
-    await sql.query(`CREATE INDEX IF NOT EXISTS ${name}_wallet_ts_idx  ON ${name} (wallet_address, ts)`)
-    await sql.query(`CREATE INDEX IF NOT EXISTS ${name}_session_ts_idx ON ${name} (session_id, ts)`)
+    await sql(`CREATE INDEX IF NOT EXISTS ${name}_event_ts_idx   ON ${name} (event, ts)`)
+    await sql(`CREATE INDEX IF NOT EXISTS ${name}_wallet_ts_idx  ON ${name} (wallet_address, ts)`)
+    await sql(`CREATE INDEX IF NOT EXISTS ${name}_session_ts_idx ON ${name} (session_id, ts)`)
     created.push(name)
   }
   return created
@@ -1123,7 +1163,12 @@ export async function insertEvents(sql: SqlTag, rows: EventRow[]): Promise<numbe
   let total = 0
   for (let i = 0; i < rows.length; i += CHUNK) {
     const chunk = rows.slice(i, i + CHUNK)
-    const result = (await sql.query(
+    // `fullResults: true` is REQUIRED. Without it neon resolves to a bare rows
+    // array and rowCount is undefined -- the function would then report the
+    // ATTEMPTED count rather than the count actually inserted, silently hiding
+    // how many rows ON CONFLICT skipped. On a project whose entire premise is
+    // data correctness, the sync must not overstate what it wrote.
+    const result = (await sql(
       `INSERT INTO events (date, sk, ts, event, screen, component,
                            wallet_address, session_id, platform, app_version, metadata)
        SELECT * FROM UNNEST(
@@ -1143,9 +1188,10 @@ export async function insertEvents(sql: SqlTag, rows: EventRow[]): Promise<numbe
         chunk.map(r => r.platform),
         chunk.map(r => r.app_version),
         chunk.map(r => (r.metadata === null ? null : JSON.stringify(r.metadata))),
-      ]
-    )) as unknown as { rowCount?: number }
-    total += result?.rowCount ?? chunk.length
+      ],
+      { fullResults: true }
+    )) as unknown as { rowCount: number }
+    total += result.rowCount
   }
   return total
 }
@@ -1566,12 +1612,13 @@ export async function insertTrades(sql: SqlTag, rows: TradeRow[]): Promise<numbe
       .filter(c => c !== 'wallet_address' && c !== 'timestamp')
       .map(c => `${c} = EXCLUDED.${c}`)
       .join(', ')
-    await sql.query(
+    const result = (await sql(
       `INSERT INTO trades (${COLUMNS.join(',')}) VALUES ${values}
        ON CONFLICT (wallet_address, timestamp) DO UPDATE SET ${updates}, synced_at = now()`,
-      params
-    )
-    total += chunk.length
+      params,
+      { fullResults: true }
+    )) as unknown as { rowCount: number }
+    total += result.rowCount
   }
   return total
 }
@@ -1762,7 +1809,7 @@ export async function GET(request: Request) {
     now,
     readWatermark: () => readWatermark(sql, EVENTS_SOURCE, COLD_START),
     advanceWatermark: (source, ts) => advanceWatermark(sql, source, ts),
-    ensurePartitions: dates => ensurePartitions(sql as never, dates),
+    ensurePartitions: dates => ensurePartitions(sql, dates),
     fetchEvents,
     insertEvents: rows => insertEvents(sql, rows),
     quarantine: (raw, reason) => quarantineRow(sql, EVENTS_SOURCE, raw, reason),
@@ -1893,7 +1940,7 @@ async function main() {
 
   for (const date of dates) {
     if (source === 'events') {
-      await ensurePartitions(sql as never, [date])
+      await ensurePartitions(sql, [date])
       const items = await fetchEvents(date, '')
       const rows = []
       for (const item of items) {
