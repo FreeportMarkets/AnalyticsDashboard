@@ -1,7 +1,108 @@
 @import "tailwindcss";
 
-:root { color-scheme: dark; }
+/*
+ * Operator-console design tokens.
+ *
+ * Thesis: near-black surfaces, hairline rules instead of card chrome,
+ * tabular monospace numerals so columns align and scan cleanly. ONE cyan
+ * accent for the active/primary series. ONE amber, reserved exclusively for
+ * staleness / alert states -- never decorative.
+ *
+ * @theme registers these as Tailwind v4 utilities (CSS-first, no config
+ * file): each --color-x below yields bg-x, text-x, and border-x utilities;
+ * --font-tab yields the font-tab utility.
+ */
+@theme {
+  --color-canvas: #09090b;      /* page background, near-black */
+  --color-surface: #0e0f12;     /* slightly elevated: sticky header, hover fill */
+  --color-hairline: #27272a;    /* divider rule -- pair with /60 opacity, e.g. border-hairline/60 */
+
+  --color-ink-1: #f4f4f5;       /* primary text -- values, headings */
+  --color-ink-2: #a1a1aa;       /* secondary text -- labels, captions */
+  --color-ink-3: #52525b;       /* tertiary text -- disabled, placeholder */
+
+  --color-accent: #22d3ee;      /* the one cyan: active/primary series */
+  --color-accent-dim: #164e63;  /* cyan at low emphasis: bars, fills */
+
+  --color-alert: #f59e0b;       /* the one amber: staleness / alert ONLY */
+  --color-alert-dim: #451a03;
+
+  --color-positive: #4ade80;    /* delta up */
+  --color-negative: #f87171;    /* delta down */
+
+  --font-tab:
+    ui-monospace, "SF Mono", "SFMono-Regular", "Cascadia Code", "Roboto Mono",
+    Menlo, Consolas, "Liberation Mono", monospace;
+}
+
+:root {
+  color-scheme: dark;
+}
 
 body {
-  @apply bg-neutral-950 text-neutral-100 antialiased;
+  background-color: var(--color-canvas);
+  color: var(--color-ink-1);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+/* Tabular monospace numeral stack -- every numeral in the app uses this so
+   digits align in columns. Distinct from Tailwind's built-in `tabular-nums`
+   (which only sets font-variant-numeric); this also swaps the font stack. */
+@utility numeral {
+  font-family: var(--font-tab);
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum" 1;
+}
+
+/*
+ * Motion -- exactly three, all CSS keyframes/transitions. No animation
+ * dependency.
+ *   1. numeral-in    -- numerals count up on mount (paired with a JS rAF
+ *                        digit tween in AnimatedNumber; this keyframe is the
+ *                        entrance half of that single motion).
+ *   2. row-reveal     -- table/list rows reveal a subtle background on hover.
+ *   3. content-fade   -- content crossfades when the date range changes.
+ */
+@keyframes numeral-in {
+  from { opacity: 0; transform: translateY(2px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes row-reveal {
+  from { background-color: transparent; }
+  to { background-color: var(--color-surface); }
+}
+
+@keyframes content-fade {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.animate-numeral-in {
+  animation: numeral-in 400ms ease-out both;
+}
+
+.animate-content-fade {
+  animation: content-fade 260ms ease-out both;
+}
+
+.row-hover {
+  transition: background-color 150ms ease-out;
+}
+.row-hover:hover,
+.row-hover:focus-within {
+  animation: row-reveal 150ms ease-out forwards;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-numeral-in,
+  .animate-content-fade {
+    animation: none;
+  }
+  .row-hover:hover,
+  .row-hover:focus-within {
+    animation: none;
+    background-color: var(--color-surface);
+  }
 }
