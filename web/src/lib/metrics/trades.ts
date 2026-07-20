@@ -43,8 +43,15 @@ const SYSTEM_WALLETS = ['server', 'unknown', 'system', '']
  * SQL CASE expression reconstructing per-row notional exactly like
  * `apply_perps_leverage` + `_detect_ostium` in app.py. Constant string, no
  * user input -- safe to inline directly into query text.
+ *
+ * `amount_usd` on a perps row is MARGIN, not notional -- this expression
+ * multiplies by leverage (or falls back to size * price / raw size for
+ * Ostium) to reconstruct notional. THIS IS THE ONLY VOLUME EXPRESSION IN
+ * THE APP -- every volume figure, on every page, must sum this, not raw
+ * `amount_usd`. A second copy of this CASE expression anywhere else is how
+ * the Overview-vs-Trades volume mismatch bug (fixed 2026-07-20) recurs.
  */
-const VOLUME_USD_EXPR = `
+export const VOLUME_USD_EXPR = `
     CASE
       WHEN type = 'perps' THEN
         CASE

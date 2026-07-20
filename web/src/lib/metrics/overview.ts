@@ -1,6 +1,7 @@
 import { sql } from '@/lib/db'
 import { nyDateExpr } from '@/lib/time'
 import { nyRangeToUtc } from './nyRange'
+import { VOLUME_USD_EXPR } from './trades'
 
 /**
  * Same two rules as queries.ts: bucket with nyDateExpr('ts'), filter `ts`
@@ -11,6 +12,20 @@ import { nyRangeToUtc } from './nyRange'
  * exactly, and is applied to every person-shaped count (unique users,
  * sessions, trades, volume). Raw event/hourly totals are left unfiltered,
  * matching dailyEventCounts's existing behavior.
+ *
+ * VOLUME: every volume figure below sums `VOLUME_USD_EXPR` (imported from
+ * trades.ts), never raw `amount_usd`. `amount_usd` on a perps row is MARGIN,
+ * not notional -- summing it directly understates volume by ~40%+ (fixed
+ * 2026-07-20; Overview and Trades disagreed on the same window). Like the
+ * Trades page, this reconstruction is an ESTIMATE (~15% high vs Hyperliquid's
+ * authoritative per-fill volume) and must be labeled "est." wherever shown.
+ *
+ * Every trade/volume query here also filters `type IN ('swap', 'perps')`,
+ * matching trades.ts's `trades_only = pd.concat([swap_df, perps_df])` scope
+ * (app.py) -- the `trades` table also carries `type = 'deposit'` rows, which
+ * are not trades and must not be counted as trade volume (they were the
+ * second half of the Overview-vs-Trades mismatch: 85 deposit rows / ~$13k
+ * inflated the 30d "Trades" KPI before this fix).
  */
 const SYSTEM_WALLETS = ['server', 'unknown', 'system', '']
 
@@ -99,10 +114,11 @@ export async function kpiSummary(startDate: string, endDate: string): Promise<Kp
     `SELECT
         count(*) FILTER (WHERE ts >= $3 AND wallet_address <> ALL($4::text[]))::int AS trades_current,
         count(*) FILTER (WHERE ts < $3 AND wallet_address <> ALL($4::text[]))::int AS trades_previous,
-        coalesce(sum(amount_usd) FILTER (WHERE ts >= $3 AND wallet_address <> ALL($4::text[])), 0)::float8 AS volume_current,
-        coalesce(sum(amount_usd) FILTER (WHERE ts < $3 AND wallet_address <> ALL($4::text[])), 0)::float8 AS volume_previous
+        coalesce(sum(${VOLUME_USD_EXPR}) FILTER (WHERE ts >= $3 AND wallet_address <> ALL($4::text[])), 0)::float8 AS volume_current,
+        coalesce(sum(${VOLUME_USD_EXPR}) FILTER (WHERE ts < $3 AND wallet_address <> ALL($4::text[])), 0)::float8 AS volume_previous
        FROM trades
-      WHERE ts >= $1 AND ts < $2`,
+      WHERE ts >= $1 AND ts < $2
+        AND type IN ('swap', 'perps')`,
     [prevFromUtc.toISOString(), toUtc.toISOString(), fromUtc.toISOString(), SYSTEM_WALLETS]
   )) as Array<{
     trades_current: number
@@ -188,9 +204,10 @@ export async function dailySeries(startDate: string, endDate: string): Promise<D
   const tradeRows = (await sql(
     `SELECT ${nyDateExpr('ts')} AS day,
             count(*) FILTER (WHERE wallet_address <> ALL($3::text[]))::int AS trades,
-            coalesce(sum(amount_usd) FILTER (WHERE wallet_address <> ALL($3::text[])), 0)::float8 AS volume_usd
+            coalesce(sum(${VOLUME_USD_EXPR}) FILTER (WHERE wallet_address <> ALL($3::text[])), 0)::float8 AS volume_usd
        FROM trades
       WHERE ts >= $1 AND ts < $2
+        AND type IN ('swap', 'perps')
       GROUP BY 1
       ORDER BY 1`,
     [fromUtc.toISOString(), toUtc.toISOString(), SYSTEM_WALLETS]
@@ -238,9 +255,10 @@ export async function tradeSummary(startDate: string, endDate: string): Promise<
   const byType = (await sql(
     `SELECT coalesce(type, 'unknown') AS type,
             count(*)::int AS count,
-            coalesce(sum(amount_usd), 0)::float8 AS volume_usd
+            coalesce(sum(${VOLUME_USD_EXPR}), 0)::float8 AS volume_usd
        FROM trades
       WHERE ts >= $1 AND ts < $2 AND wallet_address <> ALL($3::text[])
+        AND type IN ('swap', 'perps')
       GROUP BY 1
       ORDER BY volume_usd DESC`,
     [fromUtc.toISOString(), toUtc.toISOString(), SYSTEM_WALLETS]
@@ -249,9 +267,10 @@ export async function tradeSummary(startDate: string, endDate: string): Promise<
   const byClient = (await sql(
     `SELECT coalesce(client, 'unknown') AS client,
             count(*)::int AS count,
-            coalesce(sum(amount_usd), 0)::float8 AS volume_usd
+            coalesce(sum(${VOLUME_USD_EXPR}), 0)::float8 AS volume_usd
        FROM trades
       WHERE ts >= $1 AND ts < $2 AND wallet_address <> ALL($3::text[])
+        AND type IN ('swap', 'perps')
       GROUP BY 1
       ORDER BY volume_usd DESC`,
     [fromUtc.toISOString(), toUtc.toISOString(), SYSTEM_WALLETS]

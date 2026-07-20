@@ -53,6 +53,24 @@ const usd = (n: number) =>
   `$${Math.round(n).toLocaleString('en-US')}`
 const compact = (n: number) => Math.round(n).toLocaleString('en-US')
 
+/**
+ * Every volume figure on this page is the DB reconstruction of perps
+ * notional (`VOLUME_USD_EXPR` in lib/metrics/trades.ts, imported by
+ * overview.ts) -- it multiplies margin by leverage, not Hyperliquid's
+ * authoritative per-fill data, and runs ~15% high as a result. Same "est."
+ * tag as the Trades page, so the two pages read consistently.
+ */
+function EstTag() {
+  return (
+    <span
+      className="numeral ml-1.5 rounded-sm bg-alert-dim px-1 py-px align-middle text-[10px] uppercase tracking-wide text-alert"
+      title="Perps volume is reconstructed from intended order size (opens: margin × leverage; closes: size × price), not Hyperliquid's per-fill data. Runs ~15% high vs the authoritative HL figure. Swap volume is exact."
+    >
+      est.
+    </span>
+  )
+}
+
 export default async function OverviewPage({
   searchParams,
 }: {
@@ -151,7 +169,7 @@ export default async function OverviewPage({
           </div>
           <div className="sm:pl-6">
             <StatTile
-              label="Volume"
+              label="Volume (est.)"
               value={kpis.volumeUsd.current}
               previousValue={kpis.volumeUsd.previous}
               format={usd}
@@ -159,6 +177,9 @@ export default async function OverviewPage({
             />
           </div>
         </section>
+        <p className="mt-2 text-xs text-ink-3" title="Perps volume is reconstructed from intended order size (opens: margin × leverage; closes: size × price), not Hyperliquid's per-fill data. Runs ~15% high vs the authoritative HL figure. Swap volume is exact.">
+          <span className="text-alert">est.</span> volume includes reconstructed perps volume — see tooltip.
+        </p>
 
         <section
           aria-label="Breakdowns"
@@ -189,7 +210,9 @@ export default async function OverviewPage({
           className="mt-8 grid gap-x-10 gap-y-8 divide-y divide-hairline/60 border-t border-hairline/60 pt-8 md:grid-cols-2 md:divide-x md:divide-y-0"
         >
           <div>
-            <h2 className="text-xs font-semibold uppercase tracking-wide text-ink-2">Volume by type</h2>
+            <h2 className="text-xs font-semibold uppercase tracking-wide text-ink-2">
+              Volume by type <EstTag />
+            </h2>
             <div className="mt-3">
               <BarList
                 items={trades.byType.map(t => ({ label: t.type, value: t.volumeUsd, sublabel: `${compact(t.count)}x` }))}
@@ -198,7 +221,9 @@ export default async function OverviewPage({
             </div>
           </div>
           <div className="pt-8 md:pl-10 md:pt-0">
-            <h2 className="text-xs font-semibold uppercase tracking-wide text-ink-2">Volume by client</h2>
+            <h2 className="text-xs font-semibold uppercase tracking-wide text-ink-2">
+              Volume by client <EstTag />
+            </h2>
             <div className="mt-3">
               <BarList
                 items={trades.byClient.map(t => ({ label: t.client, value: t.volumeUsd, sublabel: `${compact(t.count)}x` }))}
@@ -245,7 +270,7 @@ export default async function OverviewPage({
                 { key: 'events', header: 'Events', align: 'right', render: r => compact(r.events) },
                 { key: 'users', header: 'Users', align: 'right', render: r => compact(r.users) },
                 { key: 'trades', header: 'Trades', align: 'right', render: r => compact(r.trades) },
-                { key: 'volume', header: 'Volume', align: 'right', render: r => usd(r.volumeUsd) },
+                { key: 'volume', header: 'Volume (est.)', align: 'right', render: r => usd(r.volumeUsd) },
               ]}
             />
           </div>
