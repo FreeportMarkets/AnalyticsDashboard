@@ -1,59 +1,39 @@
-'use client'
-
-import { useEffect, useRef } from 'react'
-
 function defaultFormat(n: number): string {
   return Math.round(n).toLocaleString('en-US')
 }
 
 /**
- * A numeral that counts up from 0 to `value` on mount, then settles.
+ * A formatted numeral.
  *
- * Server-rendered markup already shows the final formatted value (no
- * hydration mismatch, correct value for no-JS / SSR snapshots). The mount
- * effect then imperatively rewrites the node's textContent frame-by-frame
- * via a ref, bypassing React state so the tween doesn't cause 60 re-renders
- * a second. `prefers-reduced-motion: reduce` skips straight to the final
- * value.
+ * THIS IS DELIBERATELY A SERVER COMPONENT. It previously carried a
+ * `'use client'` directive and counted up from 0 on mount, which crashed every
+ * page that used it:
+ *
+ *   Error: Functions cannot be passed directly to Client Components unless you
+ *   explicitly expose it by marking it with "use server".
+ *     {value: 39311, format: function F, className: ...}
+ *
+ * The `format` prop is a function, and functions cannot be serialized across
+ * the server -> client boundary. The build succeeded because the failure only
+ * happens at render time, so it reached production before anyone saw it.
+ *
+ * Keeping this a Server Component means `format` never has to cross that
+ * boundary, so callers can pass any formatter they like. The count-up tween is
+ * gone; the page-level `content-fade` animation still provides entrance motion
+ * without needing client JS. Do not re-add `'use client'` here without also
+ * changing every call site to pass a serializable format token instead of a
+ * function.
  */
 export function AnimatedNumber({
   value,
   format = defaultFormat,
-  durationMs = 700,
   className,
 }: {
   value: number
   format?: (n: number) => string
+  /** Accepted and ignored; retained so existing call sites keep type-checking. */
   durationMs?: number
   className?: string
 }) {
-  const ref = useRef<HTMLSpanElement>(null)
-
-  useEffect(() => {
-    const el = ref.current
-    if (!el) return
-
-    const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches
-    if (reduceMotion || value === 0) {
-      el.textContent = format(value)
-      return
-    }
-
-    let raf = 0
-    const start = performance.now()
-    const tick = (now: number) => {
-      const t = Math.min(1, (now - start) / durationMs)
-      const eased = 1 - Math.pow(1 - t, 3) // ease-out cubic
-      el.textContent = format(value * eased)
-      if (t < 1) raf = requestAnimationFrame(tick)
-    }
-    raf = requestAnimationFrame(tick)
-    return () => cancelAnimationFrame(raf)
-  }, [value, durationMs, format])
-
-  return (
-    <span ref={ref} className={className} suppressHydrationWarning>
-      {format(value)}
-    </span>
-  )
+  return <span className={className}>{format(value)}</span>
 }
