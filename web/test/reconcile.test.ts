@@ -7,6 +7,7 @@ import { reconcileTrades } from '@/lib/sync/reconcileTrades'
 import { insertEvents } from '@/lib/sync/insertEvents'
 import { ensurePartitions } from '@/lib/sync/partitions'
 import { quarantineRow } from '@/lib/sync/quarantine'
+import { FULL_READ_FLOOR } from '@/lib/ddbFetchers'
 import type { EventRow } from '@/lib/sync/types'
 
 function eventItem(overrides: Record<string, unknown> = {}) {
@@ -72,16 +73,16 @@ describe('reconcileEvents', () => {
       // A watermark of 13:50 (now - WATERMARK_LAG_MS) would have already
       // excluded this row from the 60s sync's next fetch window had that
       // sync's afterSk bound been used here. reconcileEvents is passed no
-      // watermark at all -- fetchEvents below is called with '' regardless
-      // of how "late" this row's timestamp is, and the row is still mapped
-      // and inserted.
+      // watermark at all -- fetchEvents below is called with FULL_READ_FLOOR
+      // regardless of how "late" this row's timestamp is, and the row is
+      // still mapped and inserted.
       const lateItem = eventItem({ timestamp: '2026-07-20T13:00:00.000Z' })
       const d = eventDeps([lateItem])
       const r = await reconcileEvents(d.args as never)
 
       expect(r.inserted).toBe(2) // fetched for both scanned dates (prev + current)
-      expect(d.args.fetchEvents).toHaveBeenCalledWith('2026-07-19', '')
-      expect(d.args.fetchEvents).toHaveBeenCalledWith('2026-07-20', '')
+      expect(d.args.fetchEvents).toHaveBeenCalledWith('2026-07-19', FULL_READ_FLOOR)
+      expect(d.args.fetchEvents).toHaveBeenCalledWith('2026-07-20', FULL_READ_FLOOR)
     }
   )
 
@@ -142,8 +143,8 @@ describe('reconcileTrades', () => {
     const d = tradeDeps([tradeItem])
     const r = await reconcileTrades(d.args as never)
     expect(r.inserted).toBe(2)
-    expect(d.args.fetchTrades).toHaveBeenCalledWith('2026-07-19', '')
-    expect(d.args.fetchTrades).toHaveBeenCalledWith('2026-07-20', '')
+    expect(d.args.fetchTrades).toHaveBeenCalledWith('2026-07-19', FULL_READ_FLOOR)
+    expect(d.args.fetchTrades).toHaveBeenCalledWith('2026-07-20', FULL_READ_FLOOR)
   })
 
   it('(b) never calls advanceWatermark', async () => {

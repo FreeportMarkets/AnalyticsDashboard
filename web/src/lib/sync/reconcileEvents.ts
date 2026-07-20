@@ -1,5 +1,6 @@
 import { mapEvent } from './mapEvent'
 import { datesToScan } from './watermark'
+import { FULL_READ_FLOOR } from '@/lib/ddbFetchers'
 import type { EventFetcher } from './syncEvents'
 import type { EventRow, SyncResult } from './types'
 
@@ -42,8 +43,10 @@ export interface ReconcileEventsDeps {
  * undercounted metrics.
  *
  * This function closes that hole by re-reading each partition from its
- * start (`afterSk` = '', the same full-window read `scripts/backfill.ts`
- * does) rather than from the watermark, and it never reads sync_state to
+ * start (`afterSk` = FULL_READ_FLOOR, the same full-window read
+ * `scripts/backfill.ts` does -- see that constant's doc comment in
+ * ddbFetchers.ts for why it must be a non-empty sentinel, not `''`) rather
+ * than from the watermark, and it never reads sync_state to
  * decide what to scan or calls `advanceWatermark` afterward. Moving the
  * cursor here -- in either direction -- would defeat the incremental sync:
  * reading it to bound the scan could re-narrow a window the 60s sync already
@@ -75,10 +78,11 @@ export async function reconcileEvents(deps: ReconcileEventsDeps): Promise<SyncRe
   let quarantined = 0
 
   for (const date of dates) {
-    // '' is a valid exclusive lower bound for the key-condition range query
-    // (see ddbFetchers.ts) -- it selects every sk in the partition, the same
-    // full re-read scripts/backfill.ts performs.
-    const items = await deps.fetchEvents(date, '')
+    // FULL_READ_FLOOR sorts before every real sk, selecting every row in
+    // the partition -- the same full re-read scripts/backfill.ts performs.
+    // NOT '' -- DynamoDB rejects an empty string for a key attribute; see
+    // FULL_READ_FLOOR's doc comment in ddbFetchers.ts.
+    const items = await deps.fetchEvents(date, FULL_READ_FLOOR)
     scanned += items.length
 
     const rows: EventRow[] = []

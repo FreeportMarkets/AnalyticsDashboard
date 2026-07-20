@@ -26,7 +26,7 @@
  * re-run just omits both and lets the resume cursor pick up where it left off.
  */
 import { sql } from '../src/lib/db'
-import { fetchEvents, fetchTrades } from '../src/lib/ddbFetchers'
+import { fetchEvents, fetchTrades, FULL_READ_FLOOR } from '../src/lib/ddbFetchers'
 import { mapEvent } from '../src/lib/sync/mapEvent'
 import { mapTrade, type TradeRow } from '../src/lib/sync/mapTrade'
 import { insertEvents } from '../src/lib/sync/insertEvents'
@@ -45,33 +45,6 @@ import type { EventRow } from '../src/lib/sync/types'
  * is known to exist there.
  */
 const DEFAULT_START = '2026-02-01'
-
-/**
- * Exclusive lower bound used for a "full read of this date" query.
- *
- * ddbFetchers.ts's doc comment (and reconcileEvents.ts's/reconcileTrades.ts's
- * nightly re-read) claim `''` is a valid lower bound for both `sk` and
- * `timestamp` because "every real sk sorts after it". That is FALSE against
- * the real DynamoDB API, verified empirically 2026-07-20 with
- * `aws dynamodb query`: both `sk` (freeport-analytics-events) and `timestamp`
- * (freeport-trades-history via trade_date-timestamp-index) are KEY attributes
- * of their respective table/index, and DynamoDB unconditionally rejects an
- * empty string for any key attribute in a KeyConditionExpression --
- * `ValidationException: The AttributeValue for a key attribute cannot contain
- * an empty string value` -- regardless of the comparison operator. This is
- * not specific to a comparison direction; it is that AttributeValue itself
- * being invalid for a key attribute.
- *
- * Both sort keys are ISO-8601 timestamps (optionally followed by
- * `#wallet8#rand8`), so a real timestamp string that is lexicographically
- * less than any timestamp this table will ever contain is a valid substitute
- * lower bound -- confirmed against the real table (see task-9-report.md).
- * `reconcileEvents.ts`/`reconcileTrades.ts` still pass `''` today and would
- * hit the same ValidationException in production; that is a pre-existing bug
- * outside this script's scope (see task-9-report.md) and NOT something this
- * backfill script should copy.
- */
-const FULL_READ_FLOOR = '0000-01-01T00:00:00.000Z'
 
 type Source = 'events' | 'trades'
 
@@ -124,9 +97,10 @@ async function lastDoneDate(source: Source): Promise<string | null> {
 }
 
 /**
- * Backfill one UTC date partition of events. `FULL_READ_FLOOR` is a valid
- * exclusive lower bound for the key-condition range query (see its doc
- * comment for why `''` is not), so this is a full re-read of the date.
+ * Backfill one UTC date partition of events. `FULL_READ_FLOOR` (imported
+ * from ddbFetchers.ts -- see its doc comment for why `''` is not a valid
+ * substitute) is a valid exclusive lower bound for the key-condition range
+ * query, so this is a full re-read of the date.
  */
 async function backfillEventsDate(date: string): Promise<DateResult> {
   let quarantined = 0

@@ -1,5 +1,6 @@
 import { mapTrade, type TradeRow } from './mapTrade'
 import { datesToScan } from './watermark'
+import { FULL_READ_FLOOR } from '@/lib/ddbFetchers'
 import type { TradeFetcher } from './syncTrades'
 import type { SyncResult } from './types'
 import { NOT_ADVANCED } from './reconcileEvents'
@@ -30,7 +31,9 @@ export async function reconcileTrades(deps: ReconcileTradesDeps): Promise<SyncRe
   let quarantined = 0
 
   for (const date of dates) {
-    const items = await deps.fetchTrades(date, '')
+    // FULL_READ_FLOOR, not '' -- DynamoDB rejects an empty string for a key
+    // attribute; see FULL_READ_FLOOR's doc comment in ddbFetchers.ts.
+    const items = await deps.fetchTrades(date, FULL_READ_FLOOR)
     scanned += items.length
 
     const rows: TradeRow[] = []
