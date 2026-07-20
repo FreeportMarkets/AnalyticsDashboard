@@ -9,7 +9,10 @@ export interface SyncTradesDeps {
   readWatermark: () => Promise<Date>
   advanceWatermark: (source: string, ts: Date) => Promise<void>
   fetchTrades: TradeFetcher
-  insertTrades: (rows: TradeRow[]) => Promise<number>
+  insertTrades: (
+    rows: TradeRow[],
+    onRowFailure?: (row: TradeRow, reason: string) => Promise<void>
+  ) => Promise<number>
   quarantine: (raw: unknown, reason: string) => Promise<void>
 }
 
@@ -37,7 +40,9 @@ export async function syncTrades(deps: SyncTradesDeps): Promise<SyncResult> {
         quarantined += 1
       }
     }
-    if (rows.length > 0) inserted += await deps.insertTrades(rows)
+    if (rows.length > 0) {
+      inserted += await deps.insertTrades(rows, (row, reason) => deps.quarantine(row, reason))
+    }
   }
 
   const next = computeNextWatermark(deps.now)

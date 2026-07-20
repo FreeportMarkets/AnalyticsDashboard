@@ -69,4 +69,22 @@ describe('mapTrade', () => {
   it('quarantines an unparseable timestamp', () => {
     expect(mapTrade({ ...perp, timestamp: 'nope' }).ok).toBe(false)
   })
+
+  it.each(['not-a-date', '0000-01-01', '2026-02-30'])(
+    'quarantines a malformed trade_date: %s',
+    malformed => {
+      const r = mapTrade({ ...perp, trade_date: malformed })
+      expect(r.ok).toBe(false)
+      if (r.ok) return
+      expect(r.reason).toMatch(/trade_date/)
+    }
+  )
+
+  it('maps an absent trade_date to null and still succeeds', () => {
+    const { trade_date, ...noTradeDate } = perp
+    const r = mapTrade(noTradeDate)
+    expect(r.ok).toBe(true)
+    if (!r.ok) return
+    expect(r.value.trade_date).toBeNull()
+  })
 })

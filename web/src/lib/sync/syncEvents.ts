@@ -10,7 +10,10 @@ export interface SyncEventsDeps {
   advanceWatermark: (source: string, ts: Date) => Promise<void>
   ensurePartitions: (dates: string[]) => Promise<string[]>
   fetchEvents: EventFetcher
-  insertEvents: (rows: EventRow[]) => Promise<number>
+  insertEvents: (
+    rows: EventRow[],
+    onRowFailure?: (row: EventRow, reason: string) => Promise<void>
+  ) => Promise<number>
   quarantine: (raw: unknown, reason: string) => Promise<void>
 }
 
@@ -50,7 +53,9 @@ export async function syncEvents(deps: SyncEventsDeps): Promise<SyncResult> {
         quarantined += 1
       }
     }
-    if (rows.length > 0) inserted += await deps.insertEvents(rows)
+    if (rows.length > 0) {
+      inserted += await deps.insertEvents(rows, (row, reason) => deps.quarantine(row, reason))
+    }
   }
 
   const next = computeNextWatermark(deps.now)

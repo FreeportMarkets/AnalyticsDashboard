@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest'
-import { syncEvents } from '@/lib/sync/syncEvents'
+import { syncEvents, EVENTS_SOURCE } from '@/lib/sync/syncEvents'
 
 function item(overrides: Record<string, unknown> = {}) {
   return {
@@ -60,6 +60,21 @@ describe('syncEvents', () => {
     const d = deps([item()])
     await syncEvents(d.args as never)
     expect(d.args.ensurePartitions).toHaveBeenCalledWith(['2026-07-19', '2026-07-20'])
+    // Argument-only assertions pass even if a mutant reordered these calls
+    // (e.g. ran ensurePartitions after the insert loop). Assert the real
+    // invocation order via each mock's own call-order sequence number.
+    const ensurePartitionsOrder = (d.args.ensurePartitions as ReturnType<typeof vi.fn>).mock
+      .invocationCallOrder[0]!
+    const insertEventsOrder = (d.args.insertEvents as ReturnType<typeof vi.fn>).mock
+      .invocationCallOrder[0]!
+    expect(ensurePartitionsOrder).toBeLessThan(insertEventsOrder)
+  })
+
+  it('advances the watermark for the events source', async () => {
+    const d = deps([item()])
+    await syncEvents(d.args as never)
+    const arg = (d.args.advanceWatermark as ReturnType<typeof vi.fn>).mock.calls[0]![0]
+    expect(arg).toBe(EVENTS_SOURCE)
   })
 
   it('does not advance the watermark when an insert throws', async () => {

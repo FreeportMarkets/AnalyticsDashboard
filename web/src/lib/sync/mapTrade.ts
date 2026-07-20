@@ -1,4 +1,5 @@
 import type { MapResult } from './types'
+import { isValidCalendarDate } from '../time'
 
 export interface TradeRow {
   wallet_address: string
@@ -77,6 +78,18 @@ export function mapTrade(item: unknown): MapResult<TradeRow> {
   const ts = new Date(o.timestamp as string)
   if (Number.isNaN(ts.getTime())) {
     return { ok: false, reason: `unparseable timestamp: ${String(o.timestamp)}` }
+  }
+
+  // `trade_date` is optional -- an absent value maps to `null` and succeeds.
+  // But `trades.trade_date` is a Postgres `date` column (same class of
+  // exposure `mapEvent` was hardened against for `events.date`), so a
+  // PRESENT-but-malformed value must be caught here rather than passing
+  // mapping and blowing up the insert -- or worse, wedging the whole insert
+  // batch (see insertTrades.ts's bisection).
+  if (typeof o.trade_date === 'string' && o.trade_date.length > 0) {
+    if (!isValidCalendarDate(o.trade_date)) {
+      return { ok: false, reason: `invalid trade_date: ${String(o.trade_date)}` }
+    }
   }
 
   return {
