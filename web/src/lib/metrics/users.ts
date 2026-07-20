@@ -1,6 +1,7 @@
 import { sql } from '@/lib/db'
 import { nyDateExpr } from '@/lib/time'
 import { nyRangeToUtc } from './nyRange'
+import { VOLUME_USD_EXPR } from './trades'
 
 /**
  * Ported from app.py `with tab_users:` (~1695-1863) and `with tab_retention:`
@@ -229,7 +230,15 @@ export interface TopTrader {
   volumeUsd: number
 }
 
-/** Mirrors app.py's "Top Traders" section, which excludes type == 'deposit' (app.py:1760). */
+/**
+ * Mirrors app.py's "Top Traders" section, which excludes type == 'deposit'
+ * (app.py:1760). Volume sums `VOLUME_USD_EXPR` (imported from trades.ts),
+ * never raw `amount_usd` -- `amount_usd` on a perps row is MARGIN, not
+ * notional (same trap documented in trades.ts). Scoped to
+ * `type IN ('swap', 'perps')`, matching trades.ts/overview.ts exactly,
+ * rather than the looser `type <> 'deposit'` (equivalent today, but explicit
+ * about the intended trade-type set).
+ */
 export async function topTraders(
   startDate: string,
   endDate: string,
@@ -239,11 +248,11 @@ export async function topTraders(
   const rows = (await sql(
     `SELECT wallet_address,
             count(*)::int AS trades,
-            coalesce(sum(amount_usd), 0)::float8 AS volume_usd
+            coalesce(sum(${VOLUME_USD_EXPR}), 0)::float8 AS volume_usd
        FROM trades
       WHERE ts >= $1 AND ts < $2
         AND wallet_address IS NOT NULL AND wallet_address <> ALL($3::text[])
-        AND coalesce(type, '') <> 'deposit'
+        AND type IN ('swap', 'perps')
       GROUP BY 1
       ORDER BY volume_usd DESC
       LIMIT $4`,
