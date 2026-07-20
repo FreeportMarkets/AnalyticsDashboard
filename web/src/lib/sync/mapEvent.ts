@@ -144,6 +144,7 @@ export function mapEvent(item: unknown): MapResult<EventRow> {
       platform: optString(o.platform),
       app_version: optString(o.app_version),
       metadata,
+      raw: o,
     },
   }
 }

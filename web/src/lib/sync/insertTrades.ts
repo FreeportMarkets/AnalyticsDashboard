@@ -42,6 +42,46 @@ async function runInsert(sql: SqlTag, chunk: TradeRow[]) {
 }
 
 /**
+ * Deduplicate rows by their `(wallet_address, timestamp)` conflict key,
+ * keeping the LAST occurrence of each key.
+ *
+ * A fourth route to the permanent-wedge bug: a single `INSERT ... ON
+ * CONFLICT (wallet_address, timestamp) DO UPDATE` statement cannot affect
+ * the same row twice. If a chunk contains two rows sharing that key (e.g. a
+ * pagination-boundary duplicate from the trade fetcher), Postgres raises
+ * SQLSTATE 21000 (cardinality_violation, "ON CONFLICT DO UPDATE command
+ * cannot affect row a second time") -- confirmed empirically against the
+ * real Neon DB. `isDataError` only matches SQLSTATE classes 22/23, so 21000
+ * is NOT a data error and is rethrown unbisected: the caller never advances
+ * its watermark, the next tick re-fetches the same duplicate, and the
+ * pipeline wedges permanently, same failure mode as the bisection hazard
+ * `insertChunk` guards against below.
+ *
+ * This is fixed by construction, not by classification: a duplicate key is
+ * a legitimate row (not bad data), so adding class 21 to `isDataError` and
+ * quarantining it would silently discard real trade data. Deduplicating up
+ * front, keeping the last occurrence, is correct: both DynamoDB writers use
+ * `PutCommand`, which overwrites in place on a repeated key, so the later
+ * item in the fetch is the current truth -- the same reasoning behind `DO
+ * UPDATE` itself (see `insertTrades`'s doc comment).
+ *
+ * This MUST run over the full input BEFORE it is split into chunks, not
+ * per-chunk after slicing. A duplicate pair that straddles a chunk boundary
+ * would otherwise land in two separate single-statement INSERTs -- neither
+ * one alone contains a cardinality violation, so a chunk-local dedup would
+ * never even see the conflict. Deduplicating globally first guarantees a
+ * single, well-defined winner independent of where the chunk boundary
+ * happens to fall.
+ */
+function dedupeByConflictKey(rows: TradeRow[]): TradeRow[] {
+  const byKey = new Map<string, TradeRow>()
+  for (const row of rows) {
+    byKey.set(`${row.wallet_address}|${row.timestamp}`, row)
+  }
+  return [...byKey.values()]
+}
+
+/**
  * Insert one chunk, bisecting on failure so one poisoned row cannot sink its
  * neighbors. See insertEvents.ts's `insertChunk` for the full rationale --
  * same multi-row-statement-is-atomic hazard, same fix.
@@ -88,9 +128,10 @@ export async function insertTrades(
   onRowFailure?: (row: TradeRow, reason: string) => Promise<void>
 ): Promise<number> {
   if (rows.length === 0) return 0
+  const deduped = dedupeByConflictKey(rows)
   let total = 0
-  for (let i = 0; i < rows.length; i += 500) {
-    total += await insertChunk(sql, rows.slice(i, i + 500), onRowFailure)
+  for (let i = 0; i < deduped.length; i += 500) {
+    total += await insertChunk(sql, deduped.slice(i, i + 500), onRowFailure)
   }
   return total
 }

@@ -69,7 +69,14 @@ export async function syncEvents(deps: SyncEventsDeps): Promise<SyncResult> {
     if (rows.length > 0) {
       const rowDates = [...new Set(rows.map(r => r.date))]
       await deps.ensurePartitions(rowDates)
-      inserted += await deps.insertEvents(rows, (row, reason) => deps.quarantine(row, reason))
+      inserted += await deps.insertEvents(rows, async (row, reason) => {
+        // Store the RAW item, not the normalized row -- see EventRow.raw's
+        // doc comment. `mapEvent` deliberately nulls type-confused optional
+        // fields; the raw item is what's needed to actually debug a
+        // bisection-time failure.
+        await deps.quarantine(row.raw, reason)
+        quarantined += 1
+      })
     }
   }
 

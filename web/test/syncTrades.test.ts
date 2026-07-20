@@ -35,6 +35,34 @@ describe('syncTrades', () => {
     expect(r.inserted).toBe(2)
   })
 
+  it(
+    'REGRESSION: counts rows quarantined via insertTrades\' onRowFailure bisection ' +
+      'path (not just map-time failures) -- without this, scanned !== inserted + ' +
+      'quarantined whenever bisection quarantines anything',
+    async () => {
+      const args = {
+        now: new Date('2026-07-20T14:00:00.000Z'),
+        readWatermark: vi.fn(async () => new Date('2026-07-20T00:00:00.000Z')),
+        advanceWatermark: vi.fn(async () => {}),
+        fetchTrades: vi.fn(async () => [row]),
+        // Simulate insertTrades bisecting: the row is rejected and reported
+        // via onRowFailure -- the pre-fix mocks in this file never invoked it.
+        insertTrades: vi.fn(
+          async (rows: unknown[], onRowFailure?: (row: never, reason: string) => Promise<void>) => {
+            if (onRowFailure) await onRowFailure(rows[0] as never, 'simulated data error')
+            return rows.length - 1
+          }
+        ),
+        quarantine: vi.fn(async () => {}),
+      }
+      const r = await syncTrades(args as never)
+      // 2 fetch windows x 1 bisection-quarantined row each, 0 inserted.
+      expect(r.inserted).toBe(0)
+      expect(r.quarantined).toBe(2)
+      expect(r.scanned).toBe(r.inserted + r.quarantined)
+    }
+  )
+
   it('does not advance the watermark when an insert throws', async () => {
     const args = {
       now: new Date('2026-07-20T14:00:00.000Z'),

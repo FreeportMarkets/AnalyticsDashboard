@@ -60,6 +60,7 @@ function eventRow(overrides: Partial<EventRow> = {}): EventRow {
     platform: null,
     app_version: null,
     metadata: null,
+    raw: { marker: MARKER },
     ...overrides,
   }
 }
@@ -176,6 +177,36 @@ describe.skipIf(!TEST_DATABASE_URL)('integration (real Neon test database)', () 
   })
 
   describe('insertTrades', () => {
+    it(
+      'REGRESSION: two rows in the same insert sharing (wallet_address, timestamp) do ' +
+        'not raise SQLSTATE 21000 (cardinality_violation) -- a chunk-internal duplicate ' +
+        'conflict key is deduplicated by construction (keeping the LAST row), not sent ' +
+        'to Postgres as two rows in one ON CONFLICT DO UPDATE statement, which Postgres ' +
+        'rejects outright, leaving the caller unable to advance its watermark and the ' +
+        'duplicate permanently wedging the next tick',
+      async () => {
+        const ts = `${MARKER}-dup-ts-1`
+        const first = tradeRow({ timestamp: ts, amount_usd: 111 })
+        const second = tradeRow({ timestamp: ts, amount_usd: 222 })
+        try {
+          const n = await insertTrades(sql, [first, second])
+          expect(n).toBe(1)
+
+          const rows = (await sql`
+            SELECT amount_usd FROM trades
+            WHERE wallet_address = ${first.wallet_address} AND timestamp = ${ts}
+          `) as Array<{ amount_usd: string }>
+          expect(rows.length).toBe(1)
+          // Last occurrence wins -- matches DO UPDATE / PutCommand semantics.
+          expect(Number(rows[0]!.amount_usd)).toBe(222)
+        } finally {
+          await sql`
+            DELETE FROM trades WHERE wallet_address = ${first.wallet_address} AND timestamp = ${ts}
+          `
+        }
+      }
+    )
+
     it('upserts: a second insert with a changed amount_usd UPDATES the existing row', async () => {
       const row = tradeRow({ timestamp: `${MARKER}-ts-1` })
       try {

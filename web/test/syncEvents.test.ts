@@ -107,6 +107,53 @@ describe('syncEvents', () => {
     expect(d.args.advanceWatermark).not.toHaveBeenCalled()
   })
 
+  it(
+    'REGRESSION: counts rows quarantined via insertEvents\' onRowFailure bisection ' +
+      'path (not just map-time failures) -- without this, scanned !== inserted + ' +
+      'quarantined whenever bisection quarantines anything, understating the real ' +
+      'problem rate to any monitoring built on this number',
+    async () => {
+      const d = deps([item(), item({ sk: 'b', event: 'trade_success' })])
+      // Simulate insertEvents bisecting: one row inserts fine, one is
+      // rejected and reported via onRowFailure -- the mock actually invokes
+      // the callback, which the pre-fix mocks in this file never did.
+      d.args.insertEvents = vi.fn(
+        async (rows: unknown[], onRowFailure?: (row: never, reason: string) => Promise<void>) => {
+          if (onRowFailure) await onRowFailure(rows[0] as never, 'simulated data error')
+          return rows.length - 1
+        }
+      )
+      const r = await syncEvents(d.args as never)
+      // 2 fetch windows x (1 inserted + 1 bisection-quarantined) each.
+      expect(r.inserted).toBe(2)
+      expect(r.quarantined).toBe(2)
+      expect(r.scanned).toBe(r.inserted + r.quarantined)
+    }
+  )
+
+  it(
+    'REGRESSION: an insert-time (bisection) quarantine failure stores the RAW item, ' +
+      'not the normalized row -- a type-confused optional field mapEvent coerced to ' +
+      'null must still be recoverable from the quarantine record',
+    async () => {
+      // wallet_address is present-but-wrong-typed, so mapEvent nulls it in the
+      // normalized row while the raw item keeps the original value.
+      const d = deps([item({ wallet_address: 999999 })])
+      d.args.insertEvents = vi.fn(
+        async (rows: unknown[], onRowFailure?: (row: never, reason: string) => Promise<void>) => {
+          if (onRowFailure) await onRowFailure(rows[0] as never, 'simulated bisection failure')
+          return 0
+        }
+      )
+      await syncEvents(d.args as never)
+      expect(d.quarantined.length).toBe(2) // one per scanned date's fetch call
+      const stored = d.quarantined[0]!.raw as { wallet_address: unknown }
+      // The stored value is the RAW item's wallet_address (999999), not the
+      // normalized row's coerced-to-null value.
+      expect(stored.wallet_address).toBe(999999)
+    }
+  )
+
   it('is a no-op when there is nothing new', async () => {
     const d = deps([])
     const r = await syncEvents(d.args as never)

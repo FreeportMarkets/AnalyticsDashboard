@@ -43,7 +43,10 @@ export async function reconcileTrades(deps: ReconcileTradesDeps): Promise<SyncRe
       }
     }
     if (rows.length > 0) {
-      inserted += await deps.insertTrades(rows, (row, reason) => deps.quarantine(row, reason))
+      inserted += await deps.insertTrades(rows, async (row, reason) => {
+        await deps.quarantine(row, reason)
+        quarantined += 1
+      })
     }
   }
 

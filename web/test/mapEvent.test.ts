@@ -220,6 +220,24 @@ describe('mapEvent', () => {
     })
   })
 
+  it(
+    'carries the original raw item on `raw`, even after fields mapEvent coerced ' +
+      'away (e.g. a type-confused optional field nulled to null) -- this is what ' +
+      'lets an insert-time (bisection) quarantine failure store the true raw item ' +
+      'instead of the already-normalized row',
+    () => {
+      const item = { ...valid, wallet_address: 12345 }
+      const r = mapEvent(item)
+      expect(r.ok).toBe(true)
+      if (!r.ok) return
+      // The normalized field was coerced to null...
+      expect(r.value.wallet_address).toBeNull()
+      // ...but the raw item still has the original, un-coerced value.
+      expect(r.value.raw).toEqual(item)
+      expect((r.value.raw as { wallet_address: unknown }).wallet_address).toBe(12345)
+    }
+  )
+
   it('allows metadata with a null-prototype top-level object', () => {
     const metadata = Object.create(null) as Record<string, unknown>
     metadata.asset = 'BTC'

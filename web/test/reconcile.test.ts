@@ -223,6 +223,7 @@ describe.skipIf(!TEST_DATABASE_URL)('reconcileEvents (real Neon test database)',
         platform: null,
         app_version: null,
         metadata: null,
+        raw: { marker: MARKER },
       }
 
       try {

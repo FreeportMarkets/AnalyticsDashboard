@@ -93,7 +93,12 @@ export async function reconcileEvents(deps: ReconcileEventsDeps): Promise<SyncRe
     if (rows.length > 0) {
       const rowDates = [...new Set(rows.map(r => r.date))]
       await deps.ensurePartitions(rowDates)
-      inserted += await deps.insertEvents(rows, (row, reason) => deps.quarantine(row, reason))
+      inserted += await deps.insertEvents(rows, async (row, reason) => {
+        // Store the RAW item, not the normalized row -- see EventRow.raw's
+        // doc comment and syncEvents.ts's identical handling.
+        await deps.quarantine(row.raw, reason)
+        quarantined += 1
+      })
     }
   }
 
