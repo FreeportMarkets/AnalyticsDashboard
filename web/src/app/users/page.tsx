@@ -11,7 +11,8 @@ import {
 } from '@/lib/metrics/users'
 import { watermarkAge } from '@/lib/metrics/staleness'
 import { NY_TZ } from '@/lib/time'
-import { fetchPrivyUsers } from '@/lib/privy'
+import { sql } from '@/lib/db'
+import { fetchWalletIdentities } from '@/lib/privyIdentities'
 import { PageHeader } from '@/components/PageHeader'
 import { StatTile } from '@/components/StatTile'
 import { DataTable } from '@/components/DataTable'
@@ -81,7 +82,7 @@ export default async function UsersPage({
   const [session, end] = [await auth(), today()]
   const start = addDays(end, -(RANGES[range].days - 1))
 
-  const [au, ss, topUsers, traders, heatmap, nvr, curve, cohorts, ages, privyMap] = await Promise.all([
+  const [au, ss, topUsers, traders, heatmap, nvr, curve, cohorts, ages] = await Promise.all([
     activeUsers(start, end),
     sessionStats(start, end),
     topUsersByActivity(start, end, 20),
@@ -91,8 +92,10 @@ export default async function UsersPage({
     retentionCurve(start, end),
     cohortRetention(start, end),
     watermarkAge(),
-    fetchPrivyUsers(),
   ])
+  // Identity lookup scoped to just the wallets on this page -- see
+  // src/lib/privyIdentities.ts and the identical comment on /trades.
+  const privyMap = await fetchWalletIdentities(sql, [...topUsers.map(u => u.wallet), ...traders.map(t => t.wallet)])
 
   const maxDau = Math.max(...au.daily.map(d => d.users), 1)
   const maxHeat = Math.max(...heatmap.map(c => c.count), 1)

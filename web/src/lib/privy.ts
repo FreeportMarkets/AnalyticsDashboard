@@ -14,14 +14,24 @@
  * request rate -- newer accounts past that window would otherwise render as
  * bare DIDs/addresses forever. Ported here (`fetchPrivyUserByDid`) for
  * completeness and for any future DID-keyed table (referrals, redemptions,
- * etc. -- see `enrich_did_df` in app.py); today's callers (trades/users
- * pages) only have wallet addresses, not DIDs, so they only exercise the
- * bulk wallet-keyed path.
+ * etc. -- see `enrich_did_df` in app.py).
  *
  * FAILS SOFT EVERYWHERE: an unreachable/unauthorized/slow Privy API must
  * never take the dashboard down. Every network call is timeout-guarded and
  * wrapped so failures collapse to an empty map / null, and callers fall
  * back to a truncated wallet address.
+ *
+ * NOT CALLED FROM PAGE RENDER ANYMORE. `fetchPrivyUsers()` (this file's
+ * bulk listing) measured 14.4s cold and indexes ~5,830 wallets -- it used to
+ * be awaited directly inside /trades, /users, and /referrals' render path,
+ * which was the dashboard's "slow as hell" complaint (every cold Vercel
+ * instance re-ran the full 14s fetch). It's now called ONLY from the
+ * nightly /api/cron/reconcile refresh (see src/lib/privyIdentities.ts),
+ * which mirrors identities into Postgres; pages read that mirror instead,
+ * scoped to just the wallets/DIDs they need. `fetchPrivyUserByDid` remains
+ * page-callable (referrals' capped live fallback for identities the nightly
+ * mirror hasn't caught up to yet) since it's a single cheap per-DID call,
+ * not a full bulk listing.
  */
 
 const PRIVY_API_BASE = 'https://auth.privy.io/api/v1'
@@ -261,25 +271,13 @@ export interface DidIdentity {
   loginType: LoginType | ''
 }
 
-/**
- * DID-keyed lookup, derived lazily from the wallet-keyed bulk map. The same
- * Privy DID can have multiple linked wallets, so dedupe on the way in.
- * Ported from `_did_lookup_from_privy_map` (app.py ~919-933).
- */
-export function didLookupFromPrivyMap(map: PrivyWalletMap): Map<string, DidIdentity> {
-  const out = new Map<string, DidIdentity>()
-  if (!map) return out
-  for (const ident of map.values()) {
-    const did = ident.privyDid
-    if (!did || out.has(did)) continue
-    out.set(did, {
-      label: ident.label ?? '',
-      email: ident.email ?? '',
-      loginType: ident.loginType ?? '',
-    })
-  }
-  return out
-}
+// The DID-keyed lookup used to be derived lazily from the wallet-keyed bulk
+// map here (`didLookupFromPrivyMap`, ported from app.py's
+// `_did_lookup_from_privy_map`). /referrals now gets its DID map from
+// `fetchIdentitiesByDid` in src/lib/privyIdentities.ts -- a direct indexed
+// query against the privy_identities mirror's `did` column -- so that
+// derivation step is gone; this file's job is now only talking to the live
+// Privy API (bulk + per-DID), not deriving one map shape from another.
 
 const didCache = new Map<string, { identity: PrivyIdentity | null; expiresAt: number }>()
 

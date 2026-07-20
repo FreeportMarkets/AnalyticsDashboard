@@ -59,12 +59,20 @@ const compact = (n: number) => Math.round(n).toLocaleString('en-US')
  * overview.ts) -- it multiplies margin by leverage, not Hyperliquid's
  * authoritative per-fill data, and runs ~15% high as a result. Same "est."
  * tag as the Trades page, so the two pages read consistently.
+ *
+ * Styled as quiet secondary text (ink-2, no amber, no filled background),
+ * NOT the alert color -- `--color-alert` is reserved exclusively for
+ * staleness/alert states (see StalenessBadge). This is a routine caveat
+ * about methodology, not a warning, and shouldn't read like one.
  */
+const EST_TAG_TITLE =
+  "Perps stores amount_usd as margin, not notional, so volume here is reconstructed as margin × leverage (opens) or size × price (closes). That runs roughly 15% above Hyperliquid's actual per-fill data, which reflects filled size rather than the intended order size this reconstruction uses. Swap volume is exact."
+
 function EstTag() {
   return (
     <span
-      className="numeral ml-1.5 rounded-sm bg-alert-dim px-1 py-px align-middle text-[10px] uppercase tracking-wide text-alert"
-      title="Perps volume is reconstructed from intended order size (opens: margin × leverage; closes: size × price), not Hyperliquid's per-fill data. Runs ~15% high vs the authoritative HL figure. Swap volume is exact."
+      className="numeral ml-1.5 align-middle text-[10px] uppercase tracking-wide text-ink-2"
+      title={EST_TAG_TITLE}
     >
       est.
     </span>
@@ -177,8 +185,8 @@ export default async function OverviewPage({
             />
           </div>
         </section>
-        <p className="mt-2 text-xs text-ink-3" title="Perps volume is reconstructed from intended order size (opens: margin × leverage; closes: size × price), not Hyperliquid's per-fill data. Runs ~15% high vs the authoritative HL figure. Swap volume is exact.">
-          <span className="text-alert">est.</span> volume includes reconstructed perps volume — see tooltip.
+        <p className="mt-2 text-xs text-ink-3" title={EST_TAG_TITLE}>
+          <span className="text-ink-2">est.</span> volume includes reconstructed perps volume — see tooltip.
         </p>
 
         <section

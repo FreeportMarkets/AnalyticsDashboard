@@ -10,6 +10,7 @@ import { insertTrades } from '@/lib/sync/insertTrades'
 import { quarantineRow } from '@/lib/sync/quarantine'
 import { reconcileEvents } from '@/lib/sync/reconcileEvents'
 import { reconcileTrades } from '@/lib/sync/reconcileTrades'
+import { refreshPrivyIdentities } from '@/lib/privyIdentities'
 
 export const dynamic = 'force-dynamic'
 export const maxDuration = 60
@@ -57,5 +58,22 @@ export async function GET(request: Request) {
       `events.scanned=${events.scanned} trades.scanned=${trades.scanned})`
   )
 
-  return NextResponse.json({ events, trades })
+  // Nightly refresh of the privy_identities mirror (see privyIdentities.ts /
+  // db/migrations/0004_privy_identities.sql) -- this is what lets /trades,
+  // /users, /referrals read identities via a single indexed Postgres query
+  // instead of a 14s live Privy fetch on every render. Explicitly try/caught
+  // here (not left to propagate) so a Privy-side or DB-side hiccup in this
+  // step can never take down the events/trades reconcile response above --
+  // that data has already been written by the time we get here.
+  let privy: { fetchedWallets: number; upserted: number } | { error: string }
+  try {
+    privy = await refreshPrivyIdentities(sql)
+    console.log(`[reconcile] privy.fetchedWallets=${privy.fetchedWallets} privy.upserted=${privy.upserted}`)
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err)
+    privy = { error: message }
+    console.error(`[reconcile] privy identity refresh failed: ${message}`)
+  }
+
+  return NextResponse.json({ events, trades, privy })
 }

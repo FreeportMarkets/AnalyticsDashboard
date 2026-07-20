@@ -19,7 +19,13 @@
 
   --color-ink-1: #f4f4f5;       /* primary text -- values, headings */
   --color-ink-2: #a1a1aa;       /* secondary text -- labels, captions */
-  --color-ink-3: #52525b;       /* tertiary text -- disabled, placeholder */
+  /* tertiary text -- disabled, placeholder, truncated wallet addresses.
+   * #52525b measured 2.57:1 vs --color-canvas and 2.48:1 vs --color-surface
+   * -- both fail WCAG AA (4.5:1) for normal-size text. #828282 clears both
+   * (5.18:1 canvas, 4.99:1 surface; WCAG relative-luminance formula) while
+   * staying visibly dimmer than ink-2 (7.76:1 / 7.48:1) so the hierarchy
+   * survives. */
+  --color-ink-3: #828282;
 
   --color-accent: #22d3ee;      /* the one cyan: active/primary series */
   --color-accent-dim: #164e63;  /* cyan at low emphasis: bars, fills */

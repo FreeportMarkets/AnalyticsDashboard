@@ -6,7 +6,9 @@ import {
   type PromoCode,
   type RewardValue,
 } from '@/lib/points'
-import { fetchPrivyUsers, didLookupFromPrivyMap, fetchPrivyUserByDid, type DidIdentity } from '@/lib/privy'
+import { fetchPrivyUserByDid, type DidIdentity } from '@/lib/privy'
+import { sql } from '@/lib/db'
+import { fetchIdentitiesByDid } from '@/lib/privyIdentities'
 import { PageHeader } from '@/components/PageHeader'
 import { StatTile } from '@/components/StatTile'
 import { DataTable } from '@/components/DataTable'
@@ -56,12 +58,20 @@ function formatIdentity(did: string, label?: string | null, email?: string | nul
   return label || email || shortDid(did)
 }
 
+// Hard cap on live per-DID Privy fallback calls per page render. The
+// privy_identities table (refreshed nightly, see src/lib/privyIdentities.ts)
+// covers the vast majority of DIDs; this fallback exists only for identities
+// created since the last refresh. Without a cap, a page with hundreds of
+// uncovered DIDs (e.g. right after a promo-code campaign) could fire
+// hundreds of sequential Privy network calls in one render.
+const MAX_DID_FALLBACK = 25
+
 /**
  * Resolve a set of Privy DIDs to display labels. Two-tier, matching
- * app.py's `_beneficiary_display` / `enrich_did_df`: the bulk wallet-keyed
- * map first (zero extra API cost), then a parallel per-DID fallback fetch
- * for anything the bulk listing's pagination cap missed (see privy.ts's
- * module doc -- Privy rate-limits the bulk listing past ~3000 users).
+ * app.py's `_beneficiary_display` / `enrich_did_df`: the privy_identities
+ * mirror first (a single indexed Postgres query, see `fetchIdentitiesByDid`
+ * in src/lib/privyIdentities.ts), then a capped parallel per-DID live fetch
+ * for anything the mirror doesn't have yet.
  * FAILS SOFT: fetchPrivyUserByDid already never throws, so any resolution
  * failure just falls back to the truncated DID string here.
  */
@@ -80,11 +90,15 @@ async function resolveDidLabels(dids: Iterable<string>, didMap: Map<string, DidI
     }
   }
   if (needFallback.length > 0) {
-    const fetched = await Promise.all(needFallback.map(d => fetchPrivyUserByDid(d)))
-    needFallback.forEach((did, i) => {
+    const capped = needFallback.slice(0, MAX_DID_FALLBACK)
+    const overflow = needFallback.slice(MAX_DID_FALLBACK)
+    const fetched = await Promise.all(capped.map(d => fetchPrivyUserByDid(d)))
+    capped.forEach((did, i) => {
       const f = fetched[i]
       out.set(did, f ? formatIdentity(did, f.label, f.email) : shortDid(did))
     })
+    // Past the cap: truncated DID rather than an unbounded fetch burst.
+    for (const did of overflow) out.set(did, shortDid(did))
   }
   return out
 }
@@ -104,22 +118,24 @@ export default async function ReferralsPage({
   const resultMsg = typeof params.msg === 'string' ? params.msg : undefined
   const inspectCode = typeof params.inspect === 'string' ? params.inspect.toUpperCase() : undefined
 
-  const [session, codes, topReferrers, privyMap] = await Promise.all([
+  const [session, codes, topReferrers] = await Promise.all([
     auth(),
     fetchPromoCodes(),
     fetchTopReferrers(50),
-    fetchPrivyUsers(),
   ])
 
   const detail = inspectCode ? await fetchPromoCodeDetail(inspectCode) : null
   const redemptions = detail?.redemptions ?? []
 
-  const didMap = didLookupFromPrivyMap(privyMap)
   const allDids = [
     ...codes.map(c => c.beneficiary_did).filter((d): d is string => !!d),
     ...topReferrers.map(r => r.referrer_did).filter(Boolean),
     ...redemptions.map(r => r.privy_did).filter((d): d is string => !!d),
   ]
+  // DID-scoped lookup against the privy_identities mirror -- a single
+  // indexed query for exactly the DIDs on this page, not a 14s live Privy
+  // fetch of the whole user base. See src/lib/privyIdentities.ts.
+  const didMap = await fetchIdentitiesByDid(sql, allDids)
   const didLabels = await resolveDidLabels(allDids, didMap)
 
   // --- KPIs (client-side over the full list, mirrors app.py) --------------
