@@ -5,14 +5,13 @@ import { usePathname } from 'next/navigation'
 
 const LIVE_LINKS: Array<{ href: string; label: string }> = [
   { href: '/', label: 'Overview' },
+  { href: '/funnels', label: 'Funnels' },
   { href: '/notifications', label: 'Notifications' },
   { href: '/trades', label: 'Trades' },
+  { href: '/users', label: 'Users' },
 ]
 
-const SOON_LINKS: Array<{ label: string }> = [
-  { label: 'Users' },
-  { label: 'Funnels' },
-]
+const SOON_LINKS: Array<{ label: string }> = []
 
 /**
  * Left rail. Only routes that actually exist are real links (Overview
