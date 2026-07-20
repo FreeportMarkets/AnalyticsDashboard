@@ -94,6 +94,76 @@ When any two of these conflict, the earlier one wins:
 
 ---
 
+## Volume integrity — the load-bearing guarantee
+
+Volume has broken before (`project_trade_logger_phantom_fills_jun18`, and commit `c79fd3e`
+killing a close-side double-count). It is the metric this project is least permitted to
+disturb. Three structural facts make that guarantee hold by construction rather than by
+discipline.
+
+### 1. The dashboard is read-only
+
+`app.py` and `hl_volume.py` contain **zero** `put_item`, `batch_writer`, `update_item`,
+`delete_item`, or `BatchWrite` calls. The only non-GET HTTP calls are an Arbitrum RPC balance
+read (`app.py:749`) and three promo-code admin POSTs (`app.py:1248`, `:1270`, `:1298`) which
+hit the points API and never touch trades. The replacement keeps this property: **the
+dashboard's only writes are to its own Neon database and to the points admin API.**
+
+### 2. Authoritative perp volume is not stored in our data source
+
+`hl_perp_volume_usd()` (`app.py:702`) recomputes perp volume live from Hyperliquid
+`userFillsByTime` on every load: Σ(px × size) over the four perp directions, deduped by `tid`,
+paginated past HL's 2000-fill response cap (`hl_volume.py:hl_fills_fetcher`). This is the same
+per-fill notional HL charges builder fees on.
+
+**Hyperliquid is the source of truth.** `freeport-trades-history` contributes only the wallet
+list. There is therefore nothing in our storage for this project to corrupt — the failure mode
+is reduced to "the new dashboard computes it wrong", which the parity harness gates on
+directly.
+
+### 3. Both volume writers live outside this project's blast radius
+
+| Writer | Location | Touched by this project |
+|---|---|---|
+| Perp trade rows | `freeport-trading-backend/apps/api-gateway/src/services/trade-logger.ts:195` | No |
+| Swap trade rows | `Swap_Server/src/services/dynamodb.ts:67-107` | No |
+| Order submission | `FreeApp/hooks/trading/useSwap.ts`, `hooks/trading/usePerpsHandlers.ts` | No |
+| Web-vs-mobile attribution (`x-client` header) | `Web_Terminal/app/src/lib/tradingApi.ts:480` → `trade-logger.ts:189` | No |
+
+**Do-not-touch list.** The files above must show a zero diff in every PR of this project,
+including Phase 3 telemetry PRs. Enforced by a CI check that fails if any of them appear in
+the diff. This matters most for `tradingApi.ts`: Phase 3 instruments Web Terminal, and the
+mobile-vs-web volume split depends on that file's `x-client` header.
+
+**Telemetry isolation rule.** Screen and feature instrumentation is added at *view* components
+and navigation boundaries, never inside trading, balance, or order-submission hooks. If a
+trade-related interaction needs a `feature_use` event, it is emitted from the component that
+renders the control, not from the hook that executes the trade.
+
+### Two pre-existing behaviors being carried forward, not fixed
+
+Documented so they are not mistaken for regressions introduced here.
+
+**Two different volume numbers coexist today.** `app.py:1445` uses authoritative HL data — on
+the Overview tab only. Every other volume figure uses `_volume_usd`, the DB reconstruction,
+across roughly 20 call sites including the iOS/Android split (`:1556`), the mobile-vs-web perp
+split (`:2094`), per-asset breakdowns (`:1632`, `:1639`), the Trades tab (`:2076-2078`), and
+the user deep-dive (`:1853`). The docstring at `app.py:705` states this reconstruction **runs
+~15% hot**, because trade rows store intended order size rather than filled size.
+
+Both are ported **exactly as they are**. The only change is presentational: figures derived
+from `_volume_usd` are labeled as estimates rather than rendering identically to the
+HL-sourced number. Unifying everything onto HL per-fill data would change published numbers
+and is therefore a separate, explicit decision — not something this migration does silently.
+
+**HL failure silently degrades accuracy.** `hl_perp_volume_usd` returns `None` on any
+exception (`app.py:719`) and the caller falls back to the DB estimate with no indication, so
+Overview volume can quietly switch from exact to ~15% hot. The fallback behavior is preserved;
+the silence is not. The new dashboard shows a visible badge when volume is served from the
+fallback.
+
+---
+
 ## Known correctness risks
 
 Enumerated deliberately. Each has a named defense; the shadow run exists to catch the ones
@@ -543,4 +613,12 @@ exists, so each PR is immediately verifiable.
   route including API handlers; no AWS credential or admin key appears in any client bundle.
 - **Telemetry:** for a scripted session across N screens, `screen_sessions` dwell values match
   wall-clock within tolerance; app-kill produces a `is_lower_bound` row rather than a gap.
-- **Non-disturbance:** trade, volume, and balance code paths show zero diff in Phase 3 PRs.
+- **Non-disturbance (CI-enforced):** every PR in this project is checked against the
+  do-not-touch list in "Volume integrity". A diff touching `trade-logger.ts`,
+  `Swap_Server/src/services/dynamodb.ts`, `useSwap.ts`, `usePerpsHandlers.ts`, or
+  `Web_Terminal/app/src/lib/tradingApi.ts` fails CI. This is a mechanical gate, not a review
+  convention.
+- **Volume write-path audit:** before Phase 3 merges, confirm the new dashboard issues no
+  DynamoDB write of any kind — assert the IAM role backing the sync job holds
+  read-only permissions on `freeport-trades-history` and `freeport-analytics-events`. The
+  guarantee should be enforced by IAM, not only by code review.
