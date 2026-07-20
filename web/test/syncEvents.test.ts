@@ -59,7 +59,11 @@ describe('syncEvents', () => {
   it('ensures partitions before inserting', async () => {
     const d = deps([item()])
     await syncEvents(d.args as never)
-    expect(d.args.ensurePartitions).toHaveBeenCalledWith(['2026-07-19', '2026-07-20'])
+    // Partitions come from the MAPPED ROW'S OWN `date` field ('2026-07-20',
+    // item()'s default), not the scan window ['2026-07-19', '2026-07-20'].
+    // This is the corrected contract: ensuring the scan window instead of the
+    // row's actual date is exactly the bug (see the regression test below).
+    expect(d.args.ensurePartitions).toHaveBeenCalledWith(['2026-07-20'])
     // Argument-only assertions pass even if a mutant reordered these calls
     // (e.g. ran ensurePartitions after the insert loop). Assert the real
     // invocation order via each mock's own call-order sequence number.
@@ -69,6 +73,25 @@ describe('syncEvents', () => {
       .invocationCallOrder[0]!
     expect(ensurePartitionsOrder).toBeLessThan(insertEventsOrder)
   })
+
+  it(
+    'REGRESSION: ensures a partition for a row date far outside the scan window, ' +
+      'not the scan window itself -- without the fix, a row dated 2031-03-15 would ' +
+      'only get partitions ensured for the scan dates (e.g. 2026-07-19/20), landing ' +
+      'in events_default and permanently blocking that month\'s partition',
+    async () => {
+      const d = deps([
+        item({
+          date: '2031-03-15',
+          sk: '2031-03-15T12:00:00.000Z#0xabc#bbbb2222',
+          timestamp: '2031-03-15T12:00:00.000Z',
+        }),
+      ])
+      await syncEvents(d.args as never)
+      expect(d.args.ensurePartitions).toHaveBeenCalledWith(['2031-03-15'])
+      expect(d.args.ensurePartitions).not.toHaveBeenCalledWith(['2026-07-19', '2026-07-20'])
+    }
+  )
 
   it('advances the watermark for the events source', async () => {
     const d = deps([item()])

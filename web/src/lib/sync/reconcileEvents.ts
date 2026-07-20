@@ -58,10 +58,17 @@ export interface ReconcileEventsDeps {
  * no try/catch here to swallow it. A non-data Postgres error (connection,
  * auth, missing table) must fail the run loudly, not be absorbed as "nothing
  * to reconcile."
+ *
+ * Partitions are ensured from the DISTINCT DATES OF THE MAPPED ROWS actually
+ * about to be inserted, NOT from the scan window (`dates`, below) -- same
+ * reasoning as syncEvents.ts. The ingest endpoint is unauthenticated, so a
+ * row fetched while re-reading "today"/"yesterday" can still carry any `date`
+ * mapEvent accepts; ensuring only the scan window would let such a row land
+ * in `events_default` and permanently block that month's dedicated partition
+ * from ever being created.
  */
 export async function reconcileEvents(deps: ReconcileEventsDeps): Promise<SyncResult> {
   const dates = datesToScan(deps.now)
-  await deps.ensurePartitions(dates)
 
   let scanned = 0
   let inserted = 0
@@ -84,6 +91,8 @@ export async function reconcileEvents(deps: ReconcileEventsDeps): Promise<SyncRe
       }
     }
     if (rows.length > 0) {
+      const rowDates = [...new Set(rows.map(r => r.date))]
+      await deps.ensurePartitions(rowDates)
       inserted += await deps.insertEvents(rows, (row, reason) => deps.quarantine(row, reason))
     }
   }

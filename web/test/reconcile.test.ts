@@ -110,8 +110,22 @@ describe('reconcileEvents', () => {
   it('ensures partitions before inserting', async () => {
     const d = eventDeps([eventItem()])
     await reconcileEvents(d.args as never)
-    expect(d.args.ensurePartitions).toHaveBeenCalledWith(['2026-07-19', '2026-07-20'])
+    // Partitions come from the MAPPED ROW'S OWN `date` field ('2026-07-20',
+    // eventItem()'s default), not the scan window ['2026-07-19', '2026-07-20']
+    // -- same fix as syncEvents.ts, see its module doc comment.
+    expect(d.args.ensurePartitions).toHaveBeenCalledWith(['2026-07-20'])
   })
+
+  it(
+    'REGRESSION: ensures a partition for a row date far outside the scan window, ' +
+      'not the scan window itself',
+    async () => {
+      const d = eventDeps([eventItem({ date: '2031-03-15', timestamp: '2031-03-15T12:00:00.000Z' })])
+      await reconcileEvents(d.args as never)
+      expect(d.args.ensurePartitions).toHaveBeenCalledWith(['2031-03-15'])
+      expect(d.args.ensurePartitions).not.toHaveBeenCalledWith(['2026-07-19', '2026-07-20'])
+    }
+  )
 
   it('reports a non-timestamp watermark value so callers cannot mistake it for a moved cursor', async () => {
     const d = eventDeps([])

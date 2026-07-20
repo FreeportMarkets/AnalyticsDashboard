@@ -6,6 +6,7 @@ import { insertEvents } from '@/lib/sync/insertEvents'
 import { insertTrades } from '@/lib/sync/insertTrades'
 import { quarantineRow } from '@/lib/sync/quarantine'
 import { isDataError } from '@/lib/sync/pgError'
+import { ensurePartitions } from '@/lib/sync/partitions'
 import type { EventRow } from '@/lib/sync/types'
 import type { TradeRow } from '@/lib/sync/mapTrade'
 
@@ -213,6 +214,72 @@ describe.skipIf(!TEST_DATABASE_URL)('integration (real Neon test database)', () 
         await sql`DELETE FROM quarantine WHERE source = ${source}`
       }
     })
+  })
+
+  describe('partition creation from row dates', () => {
+    it(
+      'REGRESSION (Task 11): a row dated in a month with no existing partition gets ' +
+        'its own monthly partition created before insert, and never lands in ' +
+        'events_default -- proving ensurePartitions must be called with the mapped ' +
+        "ROW's date, not the scan window, or Postgres permanently refuses to ever " +
+        "create that month's partition once a row for it sits in the DEFAULT partition",
+      async () => {
+        // Year 2088 is a year no other test file uses (integration.test.ts's own
+        // fixtures above use 2026; reconcile.test.ts uses 2031). Vitest runs test
+        // files concurrently, and creating a partition for a month races with any
+        // concurrent raw insert() into that SAME month -- Task 11 hit this for
+        // real: a concurrent insert lands in events_default first, and Postgres
+        // then rejects "CREATE TABLE ... PARTITION OF events" for that month with
+        // "updated partition constraint ... would be violated". A dedicated,
+        // otherwise-untouched year sidesteps that race entirely.
+        const date = '2088-05-15'
+        const partitionName = 'events_2088_05'
+        const sk = `${MARKER}#partition-regression`
+        const row = eventRow({ sk, date, ts: new Date(`${date}T12:00:00.000Z`) })
+
+        try {
+          // Mirrors the real 60s sync's contract post-fix: partitions ensured
+          // from the row's own date before it is inserted.
+          await ensurePartitions(sql as never, [date])
+          const n = await insertEvents(sql, [row])
+          expect(n).toBe(1)
+
+          // Prove which partition the row actually landed in -- not merely that
+          // it exists. `tableoid::regclass` resolves the physical child table an
+          // inherited/partitioned row is stored in.
+          const located = (await sql`
+            SELECT tableoid::regclass::text AS partition FROM events WHERE sk = ${sk}
+          `) as Array<{ partition: string }>
+          expect(located.length).toBe(1)
+          expect(located[0]!.partition).toBe(partitionName)
+
+          // Cross-check via pg_inherits/pg_class that the partition is a real
+          // child of `events`, not a same-named coincidence.
+          const inherited = (await sql`
+            SELECT c.relname
+            FROM pg_inherits i
+            JOIN pg_class c ON c.oid = i.inhrelid
+            JOIN pg_class p ON p.oid = i.inhparent
+            WHERE p.relname = 'events' AND c.relname = ${partitionName}
+          `) as unknown[]
+          expect(inherited.length).toBe(1)
+
+          // The whole point of the fix: this row must NOT be sitting in the
+          // DEFAULT partition.
+          const defaultRows = (await sql`
+            SELECT sk FROM events_default WHERE sk = ${sk}
+          `) as unknown[]
+          expect(defaultRows.length).toBe(0)
+        } finally {
+          await sql`DELETE FROM events WHERE sk = ${sk}`
+          // DDL cannot be parameterized; `partitionName` is the hardcoded
+          // literal above, not user input. Dropping the partition (rather than
+          // leaving it around) keeps reruns idempotent without ever truncating
+          // `events` itself.
+          await sql(`DROP TABLE IF EXISTS ${partitionName}`)
+        }
+      }
+    )
   })
 
   describe('non-data errors', () => {
