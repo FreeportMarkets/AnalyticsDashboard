@@ -1,22 +1,9 @@
 import { sql } from '@/lib/db'
 
-/**
- * The incremental sync deliberately holds its watermark 10 minutes behind
- * wall-clock so late-arriving client events are not stepped over. 15 minutes
- * therefore means the cron itself has stopped, not that it is working normally.
- */
-export const STALE_THRESHOLD_SECONDS = 15 * 60
-
-export function isStale(ageSeconds: number): boolean {
-  return ageSeconds > STALE_THRESHOLD_SECONDS
-}
-
-export function formatAge(seconds: number): string {
-  const s = Math.max(0, Math.floor(seconds))
-  if (s < 60) return `${s}s`
-  if (s < 3600) return `${Math.floor(s / 60)}m ${s % 60}s`
-  return `${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m`
-}
+// Pure helpers live in staleness-format.ts (no db.ts import, so they can be
+// imported without DATABASE_URL being set). Re-exported here so existing
+// `from '@/lib/metrics/staleness'` call sites keep working unchanged.
+export { STALE_THRESHOLD_SECONDS, isStale, formatAge } from './staleness-format'
 
 export async function watermarkAge(): Promise<Array<{ source: string; ageSeconds: number }>> {
   const rows = (await sql(

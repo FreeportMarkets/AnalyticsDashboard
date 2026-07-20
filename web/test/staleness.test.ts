@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { formatAge, isStale, STALE_THRESHOLD_SECONDS } from '@/lib/metrics/staleness'
+import { formatAge, isStale, STALE_THRESHOLD_SECONDS } from '@/lib/metrics/staleness-format'
 
 describe('staleness', () => {
   it('treats 10 minutes as the threshold', () => {

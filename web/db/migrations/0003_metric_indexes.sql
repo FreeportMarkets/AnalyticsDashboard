@@ -1,0 +1,44 @@
+-- Every metrics query in src/lib/metrics/{queries,overview}.ts filters `events`
+-- with `WHERE ts >= $1 AND ts < $2` as its ONLY selective predicate (wallet_address,
+-- session_id, platform, event are residual filters applied after the ts bound, not
+-- leading equality conditions). The existing per-partition indexes created by
+-- src/lib/sync/partitions.ts -- (event, ts), (wallet_address, ts), (session_id, ts)
+-- -- all have `ts` as the SECOND column, so a plain ts-range query cannot seek them;
+-- Postgres either does a full index scan (cheap only on near-empty partitions) or
+-- falls back to Seq Scan (on the larger ones). Confirmed via EXPLAIN ANALYZE against
+-- the live DB on 2026-07-20 for the 2026-06-21..2026-07-20 window: events_2026_02,
+-- events_2026_05, events_2026_06, events_2026_07 all Seq Scan; events_2026_03/04
+-- only avoided it because they happened to hold ~0 matching rows.
+--
+-- `trades` was also inspected (pg_indexes) and already carries trades_ts_idx and
+-- trades_type_ts_idx from 0001_init.sql -- kpiSummary's trades-side query already
+-- runs via Index Scan in ~4ms. No trades changes needed.
+--
+-- FIX SHAPE: this creates ONE index directly on the partitioned PARENT table
+-- (`events`), not one per child partition. Verified empirically (throwaway
+-- partitioned table, same Postgres) that this single statement:
+--   (a) cascades to build a matching index on every EXISTING partition, and
+--   (b) is automatically attached to every FUTURE partition created via
+--       `CREATE TABLE ... PARTITION OF events`, with no further action.
+-- This is why src/lib/sync/partitions.ts was NOT changed: because the index is
+-- declared once on the parent, next month's partition inherits it for free --
+-- the "add it there too or it silently regresses" trap in the task brief only
+-- applies to the per-partition CREATE INDEX style already used for the other
+-- three indexes, which this migration deliberately does not repeat. It is also
+-- why one statement works against both prod (partitions events_2026_02..07)
+-- and the test DB (a different, smaller set of partitions) without having to
+-- hardcode or special-case partition names per database.
+--
+-- CREATE INDEX (not CONCURRENTLY): CONCURRENTLY cannot run inside a transaction
+-- block, and more fundamentally cannot be used at all to build an index on a
+-- partitioned parent table in one statement (each partition would need its own
+-- CONCURRENTLY build, reintroducing per-partition/per-database hardcoding this
+-- migration exists to avoid). The migration runner (db/migrate.ts) also sends
+-- one statement per HTTP call with no explicit surrounding transaction. Every
+-- partition is at most ~490k rows (events_2026_04, the largest), this DB is a
+-- read-mirror of DynamoDB rather than a primary of record, and the 7k/day
+-- insert rate means a brief exclusive lock during index build has no
+-- meaningful availability impact. Plain CREATE INDEX IF NOT EXISTS is the
+-- simpler, sufficient choice.
+
+CREATE INDEX IF NOT EXISTS events_ts_idx ON events (ts);
