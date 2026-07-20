@@ -5,13 +5,13 @@ import { usePathname } from 'next/navigation'
 
 const LIVE_LINKS: Array<{ href: string; label: string }> = [
   { href: '/', label: 'Overview' },
+  { href: '/notifications', label: 'Notifications' },
+  { href: '/trades', label: 'Trades' },
 ]
 
 const SOON_LINKS: Array<{ label: string }> = [
   { label: 'Users' },
-  { label: 'Trades' },
   { label: 'Funnels' },
-  { label: 'Notifications' },
 ]
 
 /**
