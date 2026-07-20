@@ -53,8 +53,21 @@ describe('mapEvent', () => {
     expect(r.ok).toBe(true)
     if (!r.ok) return
     expect(r.value.screen).toBeNull()
+    expect(r.value.component).toBeNull()
+    expect(r.value.wallet_address).toBe('0x1')
+    expect(r.value.session_id).toBe('s')
     expect(r.value.platform).toBeNull()
+    expect(r.value.app_version).toBeNull()
     expect(r.value.metadata).toBeNull()
+  })
+
+  it('nulls a present-but-wrong-typed optional field rather than quarantining the row', () => {
+    // Documents the deliberate optString tradeoff: type-confused optional
+    // fields are absorbed as null, not treated as row-level corruption.
+    const r = mapEvent({ ...valid, wallet_address: 12345 })
+    expect(r.ok).toBe(true)
+    if (!r.ok) return
+    expect(r.value.wallet_address).toBeNull()
   })
 
   it('quarantines a missing required field', () => {
@@ -64,6 +77,18 @@ describe('mapEvent', () => {
     if (r.ok) return
     expect(r.reason).toMatch(/date/)
   })
+
+  it.each(['sk', 'event', 'timestamp'] as const)(
+    'quarantines a missing required field: %s',
+    (field) => {
+      const clone = { ...valid } as Record<string, unknown>
+      delete clone[field]
+      const r = mapEvent(clone)
+      expect(r.ok).toBe(false)
+      if (r.ok) return
+      expect(r.reason).toMatch(new RegExp(field))
+    },
+  )
 
   it('quarantines an unparseable timestamp', () => {
     const r = mapEvent({ ...valid, timestamp: 'not-a-date' })
@@ -75,6 +100,8 @@ describe('mapEvent', () => {
   it('quarantines a non-object', () => {
     expect(mapEvent(null).ok).toBe(false)
     expect(mapEvent('nope').ok).toBe(false)
+    expect(mapEvent([1, 2, 3]).ok).toBe(false)
+    expect(mapEvent(42).ok).toBe(false)
   })
 
   it('quarantines non-string metadata rather than coercing', () => {
@@ -82,5 +109,50 @@ describe('mapEvent', () => {
     expect(r.ok).toBe(false)
     if (r.ok) return
     expect(r.reason).toMatch(/metadata/)
+  })
+
+  it.each(['not-a-date', '2026-13-45', '2026-02-30', '26-01-01'])(
+    'quarantines an invalid date: %s',
+    (badDate) => {
+      const r = mapEvent({ ...valid, date: badDate })
+      expect(r.ok).toBe(false)
+      if (r.ok) return
+      expect(r.reason).toMatch(/date/)
+    },
+  )
+
+  it('quarantines metadata that is a Set (would silently vanish on JSON.stringify)', () => {
+    const r = mapEvent({ ...valid, metadata: new Set([1, 2]) })
+    expect(r.ok).toBe(false)
+    if (r.ok) return
+    expect(r.reason).toMatch(/metadata/)
+  })
+
+  it('quarantines metadata that is a Map', () => {
+    const r = mapEvent({ ...valid, metadata: new Map([['a', 1]]) })
+    expect(r.ok).toBe(false)
+    if (r.ok) return
+    expect(r.reason).toMatch(/metadata/)
+  })
+
+  it('quarantines metadata that is a Date', () => {
+    const r = mapEvent({ ...valid, metadata: new Date() })
+    expect(r.ok).toBe(false)
+    if (r.ok) return
+    expect(r.reason).toMatch(/metadata/)
+  })
+
+  it('allows plain-object metadata with nested objects and arrays', () => {
+    const r = mapEvent({
+      ...valid,
+      metadata: { asset: 'BTC', tags: ['a', 'b'], nested: { x: 1, y: [1, 2, 3] } },
+    })
+    expect(r.ok).toBe(true)
+    if (!r.ok) return
+    expect(r.value.metadata).toEqual({
+      asset: 'BTC',
+      tags: ['a', 'b'],
+      nested: { x: 1, y: [1, 2, 3] },
+    })
   })
 })
