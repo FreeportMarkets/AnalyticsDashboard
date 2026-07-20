@@ -9,6 +9,7 @@ const LIVE_LINKS: Array<{ href: string; label: string }> = [
   { href: '/notifications', label: 'Notifications' },
   { href: '/trades', label: 'Trades' },
   { href: '/users', label: 'Users' },
+  { href: '/referrals', label: 'Referrals' },
 ]
 
 const SOON_LINKS: Array<{ label: string }> = []
