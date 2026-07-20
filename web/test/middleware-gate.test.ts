@@ -49,6 +49,26 @@ describe('gateDecision', () => {
     expect(gateDecision('/login', null)).toBe('bypass')
   })
 
+  it('bypasses /robots.txt', () => {
+    expect(gateDecision('/robots.txt', null)).toBe('bypass')
+  })
+
+  it('bypasses /sitemap.xml', () => {
+    expect(gateDecision('/sitemap.xml', null)).toBe('bypass')
+  })
+
+  it('bypasses /manifest.webmanifest', () => {
+    expect(gateDecision('/manifest.webmanifest', null)).toBe('bypass')
+  })
+
+  it('redirects /robots.txt/secret (exact match, not prefix)', () => {
+    expect(gateDecision('/robots.txt/secret', null)).toBe('redirect')
+  })
+
+  it('redirects /robotsxtxt (no loose matching)', () => {
+    expect(gateDecision('/robotsxtxt', null)).toBe('redirect')
+  })
+
   it('allows / with a real authenticated user', () => {
     expect(gateDecision('/', realUser)).toBe('allow')
   })

@@ -28,6 +28,12 @@ export function gateDecision(
   if (pathname.startsWith('/api/auth/')) return 'bypass'
   if (pathname === '/login') return 'bypass'
 
+  // Public crawler and PWA files — search engines and user agents fetch these
+  // without a session, and gating them would make the no-index signal unreachable.
+  if (pathname === '/robots.txt') return 'bypass'
+  if (pathname === '/sitemap.xml') return 'bypass'
+  if (pathname === '/manifest.webmanifest') return 'bypass'
+
   return auth?.user ? 'allow' : 'redirect'
 }
 
