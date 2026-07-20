@@ -15,9 +15,9 @@ const sql = neon(url)
  * This splitter is deliberately simple: it strips `--` line comments and splits
  * on semicolons. That is sufficient for plain DDL and is all this project's
  * migrations contain. If a future migration introduces a function body, a
- * dollar-quoted string, or a semicolon inside a string literal, this splitter
- * MUST be replaced with a real parser -- it will silently split such a file in
- * the wrong place.
+ * dollar-quoted string, a semicolon inside a string literal, or a `--` sequence
+ * inside a string literal, this splitter MUST be replaced with a real parser --
+ * it will silently split such a file in the wrong place.
  */
 export function splitStatements(sqlText: string): string[] {
   return sqlText
@@ -43,6 +43,12 @@ async function main() {
       continue
     }
     console.log(`apply ${file}`)
+    // Design tradeoff: each statement is committed independently via separate HTTP calls.
+    // Migration files are therefore not atomic — if a statement fails midway, previous
+    // statements remain applied and the file is never recorded in _migrations. This is
+    // acceptable only while every statement in the migration is idempotent (IF NOT EXISTS).
+    // A future migration containing a non-idempotent statement such as ALTER TABLE or a
+    // data backfill must switch this loop to sql.transaction() for atomicity.
     for (const stmt of splitStatements(readFileSync(path.join(dir, file), 'utf8'))) {
       await sql(stmt)
     }
