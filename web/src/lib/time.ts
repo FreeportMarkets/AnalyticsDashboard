@@ -25,15 +25,25 @@ export function utcDateOf(ts: Date): string {
 }
 
 /**
- * True only for a real calendar date in strict YYYY-MM-DD form.
+ * True only for a real calendar date in strict YYYY-MM-DD form that Postgres's
+ * `date` type will also accept.
  *
  * A regex plus `new Date()` is NOT sufficient on its own: the Date constructor
  * silently rolls invalid days over rather than returning NaN, so '2026-02-30'
  * becomes March 2 and '2026-02-29' becomes March 1 in a non-leap year. The
  * round-trip comparison is what actually rejects them.
+ *
+ * That round-trip alone still isn't enough, though: JS `Date` uses proleptic
+ * year numbering and has a year zero, so '0000-06-15' round-trips cleanly
+ * through `new Date()`. Postgres's `date` type has no year zero -- `SELECT
+ * '0000-06-15'::date` errors with "date/time field value out of range". JS
+ * and Postgres model different calendars here, and this validator's whole
+ * job is to accept only what Postgres's `date` type will accept, so the
+ * year is additionally bounded to Postgres's non-era range, 0001-9999.
  */
 export function isValidCalendarDate(value: string): boolean {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false
+  if (value.slice(0, 4) === '0000') return false
   const d = new Date(`${value}T00:00:00Z`)
   return !Number.isNaN(d.getTime()) && d.toISOString().slice(0, 10) === value
 }

@@ -155,4 +155,77 @@ describe('mapEvent', () => {
       nested: { x: 1, y: [1, 2, 3] },
     })
   })
+
+  // DynamoDBDocumentClient unmarshals DynamoDB SS/NS/BS set types to native
+  // Set, so a nested Set is a real shape for this pipeline, not a
+  // hypothetical. A shallow top-level check would miss it -- the object
+  // itself is a plain object, only the nested value is unsafe -- and it
+  // would silently JSON.stringify to `{}` in the jsonb column.
+  it('quarantines metadata containing a nested Set', () => {
+    const r = mapEvent({ ...valid, metadata: { tags: new Set(['a', 'b']) } })
+    expect(r.ok).toBe(false)
+    if (r.ok) return
+    expect(r.reason).toMatch(/metadata/)
+  })
+
+  it('quarantines metadata containing a nested Map', () => {
+    const r = mapEvent({ ...valid, metadata: { nested: { m: new Map([['k', 1]]) } } })
+    expect(r.ok).toBe(false)
+    if (r.ok) return
+    expect(r.reason).toMatch(/metadata/)
+  })
+
+  it('quarantines metadata containing a nested Date', () => {
+    const r = mapEvent({ ...valid, metadata: { createdAt: new Date() } })
+    expect(r.ok).toBe(false)
+    if (r.ok) return
+    expect(r.reason).toMatch(/metadata/)
+  })
+
+  it('quarantines metadata containing NaN', () => {
+    const r = mapEvent({ ...valid, metadata: { amount_usd: NaN } })
+    expect(r.ok).toBe(false)
+    if (r.ok) return
+    expect(r.reason).toMatch(/metadata/)
+  })
+
+  it('quarantines metadata containing Infinity', () => {
+    const r = mapEvent({ ...valid, metadata: { amount_usd: Infinity } })
+    expect(r.ok).toBe(false)
+    if (r.ok) return
+    expect(r.reason).toMatch(/metadata/)
+  })
+
+  it('quarantines cyclic metadata without throwing or hanging', () => {
+    const cyclic: Record<string, unknown> = { asset: 'BTC' }
+    cyclic.self = cyclic
+    expect(() => mapEvent({ ...valid, metadata: cyclic })).not.toThrow()
+    const r = mapEvent({ ...valid, metadata: cyclic })
+    expect(r.ok).toBe(false)
+    if (r.ok) return
+    expect(r.reason).toMatch(/metadata/)
+  })
+
+  it('allows deeply nested plain-object/array metadata', () => {
+    const r = mapEvent({
+      ...valid,
+      metadata: {
+        a: { b: { c: [1, 2, { d: ['e', 'f', { g: null, h: true, i: 3.5 }] }] } },
+      },
+    })
+    expect(r.ok).toBe(true)
+    if (!r.ok) return
+    expect(r.value.metadata).toEqual({
+      a: { b: { c: [1, 2, { d: ['e', 'f', { g: null, h: true, i: 3.5 }] }] } },
+    })
+  })
+
+  it('allows metadata with a null-prototype top-level object', () => {
+    const metadata = Object.create(null) as Record<string, unknown>
+    metadata.asset = 'BTC'
+    const r = mapEvent({ ...valid, metadata })
+    expect(r.ok).toBe(true)
+    if (!r.ok) return
+    expect(r.value.metadata).toEqual({ asset: 'BTC' })
+  })
 })

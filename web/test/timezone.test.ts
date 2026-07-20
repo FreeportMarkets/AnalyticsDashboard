@@ -42,9 +42,12 @@ describe('timezone handling', () => {
 })
 
 describe('isValidCalendarDate', () => {
-  it.each(['2026-07-19', '2024-02-29'])('accepts a real calendar date: %s', (value) => {
-    expect(isValidCalendarDate(value)).toBe(true)
-  })
+  it.each(['2026-07-19', '2024-02-29', '0001-01-01', '9999-12-31'])(
+    'accepts a real calendar date: %s',
+    (value) => {
+      expect(isValidCalendarDate(value)).toBe(true)
+    },
+  )
 
   it.each([
     '2026-02-30',
@@ -56,6 +59,17 @@ describe('isValidCalendarDate', () => {
     'not-a-date',
     '',
   ])('rejects an invalid or malformed date: %s', (value) => {
+    expect(isValidCalendarDate(value)).toBe(false)
+  })
+
+  // JS `Date` uses proleptic year numbering and round-trips year zero
+  // cleanly; Postgres's `date` type has no year zero and errors on it.
+  // Verified live against postgres:16-alpine: `SELECT '0000-06-15'::date`
+  // -> "ERROR: date/time field value out of range". Left unrejected, a row
+  // with this date reaches the UNNEST-based bulk insert and throws, wedging
+  // the sync watermark permanently (the ingest endpoint is unauthenticated,
+  // so this is trivially craftable).
+  it.each(['0000-01-01', '0000-06-15'])('rejects a year-zero date: %s', (value) => {
     expect(isValidCalendarDate(value)).toBe(false)
   })
 })
