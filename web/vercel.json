@@ -2,5 +2,13 @@
   "crons": [
     { "path": "/api/cron/reconcile", "schedule": "0 8 * * *" },
     { "path": "/api/cron/sync", "schedule": "* * * * *" }
+  ],
+  "headers": [
+    {
+      "source": "/(.*)",
+      "headers": [
+        { "key": "X-Robots-Tag", "value": "noindex, nofollow, noarchive" }
+      ]
+    }
   ]
 }
