@@ -8,7 +8,8 @@
     "test:watch": "vitest",
     "migrate": "tsx db/migrate.ts",
     "backfill": "tsx scripts/backfill.ts",
-    "verify": "tsx scripts/verify.ts"
+    "verify": "tsx scripts/verify.ts",
+    "lint:dates": "tsx scripts/lint-no-date-grouping.ts"
   },
   "dependencies": {
     "@aws-sdk/client-dynamodb": "^3.700.0",
