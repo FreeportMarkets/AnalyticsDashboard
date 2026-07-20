@@ -18,6 +18,7 @@ import { StatTile } from '@/components/StatTile'
 import { DataTable } from '@/components/DataTable'
 import { StalenessBadge } from '@/components/StalenessBadge'
 import { TraderCell } from '@/components/TraderCell'
+import { TimeSeriesBars } from '@/components/TimeSeriesBars'
 
 export const dynamic = 'force-dynamic'
 
@@ -97,7 +98,6 @@ export default async function UsersPage({
   // src/lib/privyIdentities.ts and the identical comment on /trades.
   const privyMap = await fetchWalletIdentities(sql, [...topUsers.map(u => u.wallet), ...traders.map(t => t.wallet)])
 
-  const maxDau = Math.max(...au.daily.map(d => d.users), 1)
   const maxHeat = Math.max(...heatmap.map(c => c.count), 1)
   const maxNvr = Math.max(...nvr.map(d => d.newUsers + d.returningUsers), 1)
   const heatByKey = new Map(heatmap.map(c => [`${c.dayOfWeek}-${c.hour}`, c.count]))
@@ -141,7 +141,7 @@ export default async function UsersPage({
 
       <div key={range} className="animate-content-fade">
         <section aria-label="Key metrics" className="mt-8 grid gap-x-6 divide-y divide-hairline/60 sm:grid-cols-5 sm:divide-x sm:divide-y-0">
-          <StatTile label="DAU" value={au.dau} format={compact} sparklineValues={au.daily.map(d => d.users)} />
+          <StatTile label="DAU" value={au.dau} format={compact} />
           <div className="sm:pl-6">
             <StatTile label="WAU" value={au.wau} format={compact} />
           </div>
@@ -149,7 +149,7 @@ export default async function UsersPage({
             <StatTile label="MAU" value={au.mau} format={compact} />
           </div>
           <div className="sm:pl-6">
-            <StatTile label="Sessions" value={ss.sessionCount} format={compact} sparklineValues={ss.daily.map(d => d.totalMinutes)} />
+            <StatTile label="Sessions" value={ss.sessionCount} format={compact} />
           </div>
           <div className="sm:pl-6">
             <StatTile label="Median session" value={ss.medianDurationMin} format={minutes} />
@@ -166,22 +166,12 @@ export default async function UsersPage({
           <h2 className="text-xs font-semibold uppercase tracking-wide text-ink-2">
             Daily active users · {NY_TZ}
           </h2>
-          <div className="mt-4 flex h-20 items-end gap-[2px]">
-            {au.daily.map(d => (
-              <div key={d.day} className="group relative flex-1">
-                <div
-                  className="rounded-t-[1px] bg-accent-dim transition-colors group-hover:bg-accent"
-                  style={{ height: `${Math.max((d.users / maxDau) * 100, d.users > 0 ? 3 : 1)}%` }}
-                />
-                <span className="pointer-events-none absolute -top-6 left-1/2 z-10 hidden -translate-x-1/2 whitespace-nowrap rounded-sm bg-surface px-1.5 py-0.5 text-[10px] text-ink-1 group-hover:block">
-                  {shortDay(d.day)} · {compact(d.users)}
-                </span>
-              </div>
-            ))}
-          </div>
-          <div className="numeral mt-1.5 flex justify-between text-[10px] text-ink-3">
-            <span>{shortDay(au.daily[0]?.day ?? start)}</span>
-            <span>{shortDay(au.daily[au.daily.length - 1]?.day ?? end)}</span>
+          <div className="mt-4">
+            <TimeSeriesBars
+              data={au.daily.map(d => ({ day: d.day, value: d.users }))}
+              formatValue={compact}
+              formatDay={shortDay}
+            />
           </div>
         </section>
 
@@ -199,7 +189,7 @@ export default async function UsersPage({
               const newPct = total > 0 ? (d.newUsers / maxNvr) * 100 : 0
               const retPct = total > 0 ? (d.returningUsers / maxNvr) * 100 : 0
               return (
-                <div key={d.day} className="group relative flex flex-1 flex-col justify-end">
+                <div key={d.day} className="group relative flex h-full flex-1 flex-col justify-end">
                   <div className="rounded-t-[1px] bg-accent transition-opacity group-hover:opacity-80" style={{ height: `${newPct}%` }} />
                   <div className="bg-accent-dim transition-opacity group-hover:opacity-80" style={{ height: `${retPct}%` }} />
                   <span className="pointer-events-none absolute -top-6 left-1/2 z-10 hidden -translate-x-1/2 whitespace-nowrap rounded-sm bg-surface px-1.5 py-0.5 text-[10px] text-ink-1 group-hover:block">
@@ -250,7 +240,7 @@ export default async function UsersPage({
 
         <section
           aria-label="Top users and traders"
-          className="mt-8 grid gap-x-10 gap-y-8 divide-y divide-hairline/60 border-t border-hairline/60 pt-8 md:grid-cols-2 md:divide-x md:divide-y-0"
+          className="mt-8 grid items-start gap-x-10 gap-y-8 divide-y divide-hairline/60 border-t border-hairline/60 pt-8 md:grid-cols-2 md:divide-x md:divide-y-0"
         >
           <div>
             <h2 className="text-xs font-semibold uppercase tracking-wide text-ink-2">Top users by activity</h2>
@@ -285,14 +275,21 @@ export default async function UsersPage({
 
         <section aria-label="Retention curve" className="mt-8 border-t border-hairline/60 pt-8">
           <h2 className="text-xs font-semibold uppercase tracking-wide text-ink-2">Average retention curve</h2>
-          <div className="mt-4 flex h-24 items-end gap-4">
+          <div className="mt-4 flex items-start gap-4">
             {curve.map(pt => (
-              <div key={pt.offsetDay} className="group relative flex flex-1 flex-col items-center justify-end">
+              <div key={pt.offsetDay} className="group relative flex flex-1 flex-col items-center">
                 <span className="numeral mb-1 text-[10px] text-ink-2">{pt.avgPct.toFixed(0)}%</span>
-                <div
-                  className="w-full max-w-8 rounded-t-[1px] bg-accent-dim transition-colors group-hover:bg-accent"
-                  style={{ height: `${Math.max(pt.avgPct, pt.avgPct > 0 ? 3 : 1)}%` }}
-                />
+                {/* Fixed-height track so the percentage height below resolves
+                    against a real pixel value instead of an auto-height
+                    ancestor (the flex column here isn't itself given a
+                    height -- see TimeSeriesBars for the same fix applied to
+                    the page's primary chart). */}
+                <div className="flex h-16 w-full max-w-8 items-end">
+                  <div
+                    className="w-full rounded-t-[1px] bg-accent-dim transition-colors group-hover:bg-accent"
+                    style={{ height: `${Math.max(pt.avgPct, pt.avgPct > 0 ? 3 : 1)}%` }}
+                  />
+                </div>
                 <span className="numeral mt-1.5 text-[10px] text-ink-3">{pt.label}</span>
               </div>
             ))}

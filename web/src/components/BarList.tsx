@@ -28,7 +28,7 @@ export function BarList({
             key={item.label}
             className="row-hover -mx-2 flex items-center gap-3 rounded-sm px-2 py-1.5"
           >
-            <div className="w-28 shrink-0 truncate text-sm text-ink-2" title={item.label}>
+            <div className="w-44 shrink-0 truncate text-sm text-ink-2" title={item.label}>
               {item.label}
               {item.sublabel && (
                 <span className="ml-1.5 text-xs text-ink-3">{item.sublabel}</span>

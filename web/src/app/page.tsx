@@ -14,6 +14,7 @@ import { StatTile } from '@/components/StatTile'
 import { BarList } from '@/components/BarList'
 import { DataTable } from '@/components/DataTable'
 import { StalenessBadge } from '@/components/StalenessBadge'
+import { TimeSeriesBars } from '@/components/TimeSeriesBars'
 
 export const dynamic = 'force-dynamic'
 
@@ -47,6 +48,10 @@ function formatDateRange(start: string, end: string): string {
   const endLabel = new Intl.DateTimeFormat('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
     .format(new Date(`${end}T12:00:00Z`))
   return `${startLabel} – ${endLabel}`
+}
+
+function shortDay(day: string): string {
+  return new Intl.DateTimeFormat('en-US', { month: 'short', day: 'numeric' }).format(new Date(`${day}T12:00:00Z`))
 }
 
 const usd = (n: number) =>
@@ -147,7 +152,6 @@ export default async function OverviewPage({
             value={kpis.events.current}
             previousValue={kpis.events.previous}
             format={compact}
-            sparklineValues={series.map(d => d.events)}
           />
           <div className="sm:pl-6">
             <StatTile
@@ -155,7 +159,6 @@ export default async function OverviewPage({
               value={kpis.users.current}
               previousValue={kpis.users.previous}
               format={compact}
-              sparklineValues={series.map(d => d.users)}
             />
           </div>
           <div className="sm:pl-6">
@@ -172,7 +175,6 @@ export default async function OverviewPage({
               value={kpis.trades.current}
               previousValue={kpis.trades.previous}
               format={compact}
-              sparklineValues={series.map(d => d.trades)}
             />
           </div>
           <div className="sm:pl-6">
@@ -181,7 +183,6 @@ export default async function OverviewPage({
               value={kpis.volumeUsd.current}
               previousValue={kpis.volumeUsd.previous}
               format={usd}
-              sparklineValues={series.map(d => d.volumeUsd)}
             />
           </div>
         </section>
@@ -189,9 +190,22 @@ export default async function OverviewPage({
           <span className="text-ink-2">est.</span> volume includes reconstructed perps volume — see tooltip.
         </p>
 
+        <section aria-label="Daily events" className="mt-8 border-t border-hairline/60 pt-8">
+          <h2 className="text-xs font-semibold uppercase tracking-wide text-ink-2">
+            Daily events · {NY_TZ}
+          </h2>
+          <div className="mt-4">
+            <TimeSeriesBars
+              data={series.map(d => ({ day: d.day, value: d.events }))}
+              formatValue={compact}
+              formatDay={shortDay}
+            />
+          </div>
+        </section>
+
         <section
           aria-label="Breakdowns"
-          className="mt-10 grid gap-x-10 gap-y-8 divide-y divide-hairline/60 border-t border-hairline/60 pt-8 md:grid-cols-2 md:divide-x md:divide-y-0"
+          className="mt-10 grid items-start gap-x-10 gap-y-8 divide-y divide-hairline/60 border-t border-hairline/60 pt-8 md:grid-cols-2 md:divide-x md:divide-y-0"
         >
           <div>
             <h2 className="text-xs font-semibold uppercase tracking-wide text-ink-2">Platform split</h2>
@@ -215,7 +229,7 @@ export default async function OverviewPage({
 
         <section
           aria-label="Trade breakdowns"
-          className="mt-8 grid gap-x-10 gap-y-8 divide-y divide-hairline/60 border-t border-hairline/60 pt-8 md:grid-cols-2 md:divide-x md:divide-y-0"
+          className="mt-8 grid items-start gap-x-10 gap-y-8 divide-y divide-hairline/60 border-t border-hairline/60 pt-8 md:grid-cols-2 md:divide-x md:divide-y-0"
         >
           <div>
             <h2 className="text-xs font-semibold uppercase tracking-wide text-ink-2">
@@ -247,9 +261,9 @@ export default async function OverviewPage({
           </h2>
           <div className="mt-4 flex h-20 items-end gap-[3px]">
             {hourly.map(h => (
-              <div key={h.hour} className="group relative flex-1">
+              <div key={h.hour} className="group relative h-full flex-1">
                 <div
-                  className="rounded-t-[1px] bg-accent-dim transition-colors group-hover:bg-accent"
+                  className="absolute inset-x-0 bottom-0 rounded-t-[1px] bg-accent-dim transition-colors group-hover:bg-accent"
                   style={{ height: `${Math.max((h.count / maxHour) * 100, h.count > 0 ? 3 : 1)}%` }}
                 />
                 <span className="pointer-events-none absolute -top-6 left-1/2 hidden -translate-x-1/2 whitespace-nowrap rounded-sm bg-surface px-1.5 py-0.5 text-[10px] text-ink-1 group-hover:block">

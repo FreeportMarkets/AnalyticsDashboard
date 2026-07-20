@@ -163,10 +163,9 @@ export default async function TradesPage({
             label="Trading Volume (est.)"
             value={vol.totalVolumeUsd}
             format={usd}
-            sparklineValues={daily.map(d => d.swapVolumeUsd + d.perpsVolumeUsd)}
           />
           <div className="sm:pl-6">
-            <StatTile label="Total Trades" value={vol.totalTrades} format={compact} sparklineValues={daily.map(d => d.tradeCount)} />
+            <StatTile label="Total Trades" value={vol.totalTrades} format={compact} />
           </div>
           <div className="sm:pl-6">
             <StatTile label="Unique Traders" value={vol.uniqueTraders} format={compact} />
@@ -221,7 +220,7 @@ export default async function TradesPage({
               const heightPct = Math.max((total / maxDailyTotal) * 100, total > 0 ? 3 : 1)
               const swapShare = total > 0 ? (d.swapVolumeUsd / total) * 100 : 0
               return (
-                <div key={d.day} className="group relative min-w-[6px] flex-1">
+                <div key={d.day} className="group relative h-full min-w-[6px] flex-1">
                   <div
                     className="flex w-full flex-col justify-end overflow-hidden rounded-t-[1px]"
                     style={{ height: `${heightPct}%` }}
@@ -261,7 +260,7 @@ export default async function TradesPage({
         {/* --- Top assets / Venue split --- */}
         <section
           aria-label="Perps breakdowns"
-          className="mt-8 grid gap-x-10 gap-y-8 divide-y divide-hairline/60 border-t border-hairline/60 pt-8 md:grid-cols-2 md:divide-x md:divide-y-0"
+          className="mt-8 grid items-start gap-x-10 gap-y-8 divide-y divide-hairline/60 border-t border-hairline/60 pt-8 md:grid-cols-2 md:divide-x md:divide-y-0"
         >
           <div>
             <h2 className="text-xs font-semibold uppercase tracking-wide text-ink-2">

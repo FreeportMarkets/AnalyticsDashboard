@@ -122,14 +122,12 @@ export default async function NotificationsPage({
             label="Sent"
             value={summary.sent}
             format={compact}
-            sparklineValues={byDay.map(d => d.sent)}
           />
           <div className="sm:pl-6">
             <StatTile
               label="Tap rate"
               value={summary.tapRatePct}
               format={pct}
-              sparklineValues={byDay.map(d => d.tapRatePct)}
             />
           </div>
           <div className="sm:pl-6">
@@ -137,7 +135,6 @@ export default async function NotificationsPage({
               label="Tapped"
               value={summary.tapped}
               format={compact}
-              sparklineValues={byDay.map(d => d.tapped)}
             />
           </div>
           <div className="sm:pl-6">
@@ -158,7 +155,7 @@ export default async function NotificationsPage({
 
         <section
           aria-label="Sends and tap rate"
-          className="mt-10 grid gap-x-10 gap-y-8 divide-y divide-hairline/60 border-t border-hairline/60 pt-8 md:grid-cols-2 md:divide-x md:divide-y-0"
+          className="mt-10 grid items-start gap-x-10 gap-y-8 divide-y divide-hairline/60 border-t border-hairline/60 pt-8 md:grid-cols-2 md:divide-x md:divide-y-0"
         >
           <div>
             <h2 className="text-xs font-semibold uppercase tracking-wide text-ink-2">Sends by type</h2>
@@ -179,9 +176,9 @@ export default async function NotificationsPage({
             </h2>
             <div className="mt-4 flex h-20 items-end gap-[3px]">
               {byDay.map(d => (
-                <div key={d.day} className="group relative flex-1">
+                <div key={d.day} className="group relative h-full flex-1">
                   <div
-                    className="rounded-t-[1px] bg-accent-dim transition-colors group-hover:bg-accent"
+                    className="absolute inset-x-0 bottom-0 rounded-t-[1px] bg-accent-dim transition-colors group-hover:bg-accent"
                     style={{ height: `${Math.max((d.tapRatePct / maxTapRate) * 100, d.tapRatePct > 0 ? 3 : 1)}%` }}
                   />
                   <span className="pointer-events-none absolute -top-6 left-1/2 hidden -translate-x-1/2 whitespace-nowrap rounded-sm bg-surface px-1.5 py-0.5 text-[10px] text-ink-1 group-hover:block">
@@ -199,7 +196,7 @@ export default async function NotificationsPage({
 
         <section
           aria-label="Tapped tickers and engaged users"
-          className="mt-8 grid gap-x-10 gap-y-8 divide-y divide-hairline/60 border-t border-hairline/60 pt-8 md:grid-cols-2 md:divide-x md:divide-y-0"
+          className="mt-8 grid items-start gap-x-10 gap-y-8 divide-y divide-hairline/60 border-t border-hairline/60 pt-8 md:grid-cols-2 md:divide-x md:divide-y-0"
         >
           <div>
             <h2 className="text-xs font-semibold uppercase tracking-wide text-ink-2">Most tapped tickers</h2>
