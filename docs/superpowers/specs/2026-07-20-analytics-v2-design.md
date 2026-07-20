@@ -391,6 +391,28 @@ middleware on every route including API handlers. AWS credentials and the points
 are server-only. This replaces a dashboard that is currently **publicly reachable** on
 streamlit.app while holding promo-code mutation powers.
 
+**Why not Privy, despite it already being in the stack (decided 2026-07-20).** Two reasons.
+
+*Blast radius.* Privy's user pool is the product's end users. Sharing an identity provider
+between a consumer app with 1000+ users and an internal dashboard that can mutate promo codes
+means a single allowlist bug exposes revenue data to customers. Internal tooling gets its own
+provider.
+
+*Enforcement point.* Privy stores its access token in localStorage, which Next.js middleware
+cannot read. Gating would have to be repeated inside every server component and every API
+route — many chances to miss one, each failure silently public. Auth.js sets an httpOnly
+cookie, so `middleware.ts` enforces default-deny across the entire app at one choke point.
+
+*Alternative considered.* Vercel Deployment Protection gates the deployment before any
+application code runs and needs zero lines, but authenticates against Vercel team membership,
+requiring a paid seat per viewer. Preferable only for a single-user audience.
+
+**Not indexed.** The dashboard stays on `*.vercel.app` with no custom domain, serves
+`X-Robots-Tag: noindex, nofollow` on all routes via `vercel.json`, and ships a `robots.txt`
+disallowing everything. Auth gating means a crawler only ever reaches a login wall regardless.
+Note that Vercel sends `noindex` automatically on preview deployments but **not** on
+production `.vercel.app` URLs, so the explicit header is required rather than redundant.
+
 **Mutations:** promo-code CRUD and beneficiary attachment (currently `app.py:1238-1312`) move
 to Server Actions, each writing an `audit_log` row. Streamlit has no record of who did what.
 
