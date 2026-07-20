@@ -24,6 +24,20 @@ export function utcDateOf(ts: Date): string {
   return ts.toISOString().slice(0, 10)
 }
 
+/**
+ * True only for a real calendar date in strict YYYY-MM-DD form.
+ *
+ * A regex plus `new Date()` is NOT sufficient on its own: the Date constructor
+ * silently rolls invalid days over rather than returning NaN, so '2026-02-30'
+ * becomes March 2 and '2026-02-29' becomes March 1 in a non-leap year. The
+ * round-trip comparison is what actually rejects them.
+ */
+export function isValidCalendarDate(value: string): boolean {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false
+  const d = new Date(`${value}T00:00:00Z`)
+  return !Number.isNaN(d.getTime()) && d.toISOString().slice(0, 10) === value
+}
+
 export function nyDateOf(ts: Date): string {
   // Built from formatToParts rather than format() because locale fallback is
   // silent: en-CA is expected to yield YYYY-MM-DD, but on a small-ICU Node

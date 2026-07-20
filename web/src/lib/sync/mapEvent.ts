@@ -1,24 +1,7 @@
 import type { EventRow, MapResult } from './types'
+import { isValidCalendarDate } from '../time'
 
 const REQUIRED = ['date', 'sk', 'event', 'timestamp'] as const
-
-const DATE_RE = /^\d{4}-\d{2}-\d{2}$/
-
-/**
- * Validate that `value` is a real calendar date in YYYY-MM-DD form.
- *
- * Format alone (the regex) is not enough: `2026-13-45` matches the regex but
- * is not a date. We parse it as UTC midnight and round-trip it back through
- * `toISOString` -- `Date` silently normalizes out-of-range components (e.g.
- * `2026-02-30` becomes March 2), so a round-trip mismatch is how we catch
- * that normalization instead of accepting it.
- */
-function isValidCalendarDate(value: string): boolean {
-  if (!DATE_RE.test(value)) return false
-  const d = new Date(`${value}T00:00:00Z`)
-  if (Number.isNaN(d.getTime())) return false
-  return d.toISOString().slice(0, 10) === value
-}
 
 /**
  * Optional nullable-column fields: if present but the wrong type, we absorb

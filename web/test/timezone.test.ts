@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { NY_TZ, nyDateExpr, utcDateOf, nyDateOf } from '@/lib/time'
+import { NY_TZ, nyDateExpr, utcDateOf, nyDateOf, isValidCalendarDate } from '@/lib/time'
 
 describe('timezone handling', () => {
   it('uses America/New_York', () => {
@@ -38,5 +38,24 @@ describe('timezone handling', () => {
     expect(nyDateOf(new Date('2026-11-01T06:30:00.000Z'))).toBe('2026-11-01')
     // 2026-01-15 02:30Z is 21:30 EST (UTC-5) on Jan 14.
     expect(nyDateOf(new Date('2026-01-15T02:30:00.000Z'))).toBe('2026-01-14')
+  })
+})
+
+describe('isValidCalendarDate', () => {
+  it.each(['2026-07-19', '2024-02-29'])('accepts a real calendar date: %s', (value) => {
+    expect(isValidCalendarDate(value)).toBe(true)
+  })
+
+  it.each([
+    '2026-02-30',
+    '2026-02-29',
+    '2026-04-31',
+    '2026-13-01',
+    '2026-00-10',
+    '26-01-01',
+    'not-a-date',
+    '',
+  ])('rejects an invalid or malformed date: %s', (value) => {
+    expect(isValidCalendarDate(value)).toBe(false)
   })
 })
