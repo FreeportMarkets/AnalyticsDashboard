@@ -68,6 +68,18 @@ altering a single line of trade, volume, or balance logic.
 
 ---
 
+## Priority order
+
+When any two of these conflict, the earlier one wins:
+
+1. **Data correctness.** A wrong number is worse than no number. Every metric must be
+   provably equal to Streamlit's, or provably better for a documented reason.
+2. **Usability.** Fast, obvious, no manual refreshing, honest staleness indication.
+3. **Coverage.** New screens, dwell, funnels.
+4. **Polish.** Animation and visual refinement come last and never at the cost of the above.
+
+---
+
 ## Non-goals / hard constraints
 
 - **No change to any money path.** Trade, volume, balance, and order write paths are frozen.
@@ -77,6 +89,100 @@ altering a single line of trade, volume, or balance logic.
 - **Volume math is ported verbatim**, not reinterpreted. Parity with Streamlit is a gate.
 - Infrastructure-health tabs (Backend, Services) are deleted, not migrated. CloudWatch
   dashboards and alarms already own that job.
+- **Streamlit is not retired until the replacement has run correct in parallel for a full
+  shadow period.** See "Shadow run and cutover".
+
+---
+
+## Known correctness risks
+
+Enumerated deliberately. Each has a named defense; the shadow run exists to catch the ones
+not listed here.
+
+### 1. Timezone skew — highest risk
+
+`app.py:1040-1048` re-derives `date`, `hour`, and `day_of_week` in **America/New_York** from
+the raw timestamp. The DynamoDB partition key `date` and its denormalized `hour` /
+`day_of_week` columns are **UTC** (`Swap_Server/src/services/analytics.ts:70-92`).
+
+Grouping SQL by the mirrored `date` column shifts every daily figure by up to 5 hours and
+disagrees with Streamlit in a way that looks plausible.
+
+**Rule: the `date` partition key is storage only and must never appear in a `GROUP BY` or a
+date-range filter for a metric.** All aggregation derives from
+`ts AT TIME ZONE 'America/New_York'`. Enforced by a lint rule or code-review checklist item,
+and by the parity harness, which would catch a violation immediately.
+
+The sync job must also read both the current and previous UTC date partitions for the same
+reason `app.py:631-646` fetches one extra day.
+
+### 2. Decimal precision
+
+`decimal_to_float()` (`app.py:110`) casts DynamoDB `Decimal` to Python `float`. Mirroring into
+Postgres `numeric` preserves full precision, making the new dashboard **more** correct.
+
+Volume parity will therefore show small diffs that are the new implementation being right.
+The parity harness compares within a documented tolerance and flags any diff that exceeds it,
+so an actual bug is not hidden inside expected float noise.
+
+### 3. Silent row drops
+
+pandas `errors="coerce"` turns unparseable timestamps into `NaT`, and those rows silently
+disappear from Streamlit's numbers. SQL will instead fail the whole insert batch. Neither is
+acceptable.
+
+**Defense:** rows that fail parse or validation go to a `quarantine` table with the raw item
+and a reason. The quarantine count is displayed in the dashboard. Never silently dropped,
+never batch-fatal.
+
+### 4. Partition management
+
+Inserting into a month with no partition errors out. **Defense:** partitions are created
+ahead of time by the cron, plus a `DEFAULT` partition as a backstop so an insert can never
+fail on a missing partition. A non-empty default partition raises an alert.
+
+### 5. Rollup drift
+
+If backfill and incremental sync overlap, incrementally-maintained rollups double-count.
+**Defense:** `daily_rollups` is always **recomputed from raw** for affected dates, never
+incremented. Recomputation is idempotent.
+
+### 6. Ported filter and math semantics
+
+Easy to lose in translation, each silently shifting numbers:
+
+| Semantic | Source |
+|---|---|
+| `SYSTEM_WALLETS` exclusion — `server`, `unknown`, `system`, `''`, plus `platform != 'server'` | `app.py:1155-1163` |
+| Ostium `size` is USD notional, not base units | `app.py:127-135` |
+| Perps leverage application | `app.py:136-173` |
+| HL per-fill volume, pagination past the 2000-cap, no close double-count | `hl_volume.py`, commits `c79fd3e`, `27148c3` |
+| `amount_usd` on perps rows is **margin**, not notional | `freeport-trading-backend/apps/api-gateway/src/services/trade-logger.ts:39-46` |
+
+Each is covered by an explicit parity assertion.
+
+### 7. Trade row overwrites
+
+Both writers use `PutCommand` with no updates (`trade-logger.ts:195`; Swap_Server swap path),
+but a Put on an existing `(wallet_address, timestamp)` key overwrites in place. **Defense:**
+trades sync uses `ON CONFLICT DO UPDATE`, not `DO NOTHING`, so a rewritten row propagates.
+Events remain `DO NOTHING` — they are append-only.
+
+### 8. Event lateness — bounded, and pre-existing
+
+The client queue is **in-memory only** (`FreeApp/services/AnalyticsService.ts:32`) with no
+persistence. Events are therefore *lost* on app kill, not delayed; maximum lateness is bounded
+by a single foreground session. The 10-minute watermark lag plus the nightly 2-day
+reconciliation covers this comfortably.
+
+Note this loss is **pre-existing and unchanged** — Streamlit reads the same incomplete data.
+It is a known gap in absolute event counts, not a migration risk, and not something this
+project introduces or is required to fix.
+
+### 9. Backfill throughput
+
+1.5M rows. **Defense:** chunked inserts with a resumable cursor, so a failure resumes rather
+than restarts, and the job cannot exhaust a Neon connection pool.
 
 ---
 
@@ -180,6 +286,13 @@ daily_rollups (date, metric text, dims jsonb, value numeric);
 
 -- Who mutated what, from the dashboard
 audit_log (id, actor_email, action, target, payload jsonb, created_at);
+
+-- Rows that failed parse or validation. Never silently dropped.
+quarantine (id, source text, raw jsonb, reason text, created_at timestamptz);
+
+-- Daily metric-by-metric diff between Streamlit and the new implementation
+parity_runs (run_at, metric, dims jsonb, streamlit_value numeric,
+             postgres_value numeric, abs_diff numeric, pct_diff numeric, passed boolean);
 ```
 
 **Retention:** raw `events` kept 90 days hot (drop old partitions); `daily_rollups` and
@@ -241,6 +354,75 @@ drop-off. Split and comparable by `platform`, which is what makes FreeApp-vs-WT 
 Ostium notional-vs-base-units special case (`app.py:127-135`), port 1:1 to TypeScript.
 `test_hl_volume.py` (154 lines) is translated to a TS test suite. **Cutover is blocked until
 the new dashboard reproduces Streamlit's volume numbers over the same date ranges.**
+
+---
+
+## Shadow run and cutover
+
+Streamlit stays live and untouched throughout. The new dashboard runs in parallel against the
+same underlying data, and **cutover is gated on measured agreement, not on a subjective
+look-over.**
+
+### Parity harness
+
+A script (`scripts/parity.ts`, plus a `/api/cron/parity` daily run) computes the same metric
+set two ways — Streamlit's exact pandas logic against DynamoDB, and the new SQL against
+Postgres — and writes every comparison to `parity_runs`.
+
+Metric set, each across 1d / 7d / 30d windows:
+
+- event counts, total and per event name
+- DAU / WAU / MAU, unique wallets
+- session count and total session duration
+- swap volume, perp volume, deposit volume — total and per venue
+- perp volume split by surface (mobile vs web)
+- trade counts by type and status
+- funnel step counts for the three legacy hardcoded funnels
+- retention curve values (D1, D7, D30)
+- notification tap rate, time-to-trade-after-tap
+- top-10 traders and top-10 active users, compared as ordered sets
+
+Pass criteria:
+
+- Count metrics: **exact equality.** Any diff is a bug.
+- Currency metrics: within a documented float-precision tolerance. Anything above tolerance
+  fails and must be explained before it is waived (see risk #2).
+- Ordered-set metrics: identical membership and order.
+
+A failed run surfaces as a banner in the new dashboard naming the failing metric. Parity is
+not "checked once at the end" — it runs every day of the shadow period, so an intermittent or
+date-boundary-specific bug has a chance to appear.
+
+### Shadow period
+
+**Minimum 7 consecutive days with zero unexplained parity failures**, not one. Seven days
+because it is the shortest window that covers:
+
+- a full weekly cycle, including a weekend traffic trough
+- at least 7 UTC-midnight boundaries, where the timezone risk (#1) would manifest
+- a D1 and D7 retention window computed entirely on mirrored data
+- at least one full 90-day partition-management and rollup-refresh cycle tick
+
+During the shadow period the team uses the new dashboard for real work while Streamlit remains
+the source of truth for any decision. Usability problems found here are fixed before cutover,
+not after.
+
+### Cutover
+
+Only when all of the following hold:
+
+1. 7 consecutive clean parity days.
+2. Watermark age held under 2 minutes in steady state for the full period.
+3. Quarantine table empty, or every entry individually explained.
+4. Volume-math TS test suite green (translated `test_hl_volume.py`).
+5. The team says the new dashboard is genuinely more usable — an explicit sign-off, not an
+   assumption.
+
+Streamlit is then **left running but unlinked** for a further 2 weeks as a rollback path, and
+only deleted after that. It costs nothing to leave up.
+
+**Rollback:** re-share the Streamlit URL. It reads DynamoDB, which this project never modifies,
+so it cannot be broken by anything here.
 
 ---
 
@@ -326,8 +508,11 @@ HL per-fill data), but raw event counts may be marginally inflated until this is
 backfill, rollup refresh. Verified by row-count and spot-value parity against DynamoDB.
 
 **Phase 2 — Dashboard.** Next.js app, Google SSO, all surviving tabs on the existing 38
-events, volume-math parity gate, Streamlit decommissioned. **This is the point at which the
-current pain stops.**
+events, volume-math parity gate. Streamlit stays live.
+
+**Phase 2.5 — Shadow run.** Both dashboards running, parity harness green for 7 consecutive
+days, team using the new one for real work. Streamlit retired only at the end. **This is the
+point at which the current pain stops** — and it is a gate, not a formality.
 
 **Phase 3 — Telemetry.** WT analytics client, then FreeApp screen tracking broken into
 per-surface PRs (top-level tabs → detail pages → sheets/modals) rather than one mega-PR, per
@@ -345,6 +530,13 @@ exists, so each PR is immediately verifiable.
 - **Volume parity:** ported TS volume math passes the translated `test_hl_volume.py` suite,
   and total perp/swap/deposit volume matches Streamlit across 1d / 7d / 30d ranges. Blocking
   gate for cutover.
+- **Full parity harness:** 7 consecutive clean daily runs across the whole metric set (see
+  "Shadow run and cutover"). The single blocking gate for retiring Streamlit.
+- **Timezone:** a deliberate test asserts that a metric grouped by the UTC `date` partition key
+  disagrees with the same metric grouped in America/New_York — proving the harness would
+  actually catch risk #1 rather than assuming it.
+- **Quarantine:** an intentionally malformed event lands in `quarantine` with a reason, does
+  not abort its batch, and raises the visible count.
 - **Freshness:** watermark age stays under 2 minutes in steady state; the staleness banner
   fires correctly when the cron is deliberately paused.
 - **Auth:** unauthenticated and non-allowlisted requests are rejected at middleware on every
