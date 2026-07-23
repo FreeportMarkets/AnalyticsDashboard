@@ -1,7 +1,8 @@
 {
   "crons": [
     { "path": "/api/cron/reconcile", "schedule": "0 8 * * *" },
-    { "path": "/api/cron/sync", "schedule": "* * * * *" }
+    { "path": "/api/cron/sync", "schedule": "* * * * *" },
+    { "path": "/api/cron/volume", "schedule": "*/5 * * * *" }
   ],
   "headers": [
     {
