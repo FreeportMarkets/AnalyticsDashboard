@@ -12,6 +12,7 @@ import { NY_TZ } from '@/lib/time'
 import { RANGES, isRangeKey, rangeStart, todayNy, type RangeKey } from '@/lib/ranges'
 import { sql } from '@/lib/db'
 import { fetchWalletIdentities } from '@/lib/privyIdentities'
+import { hlVolumeTotal, hlVolumeDaily } from '@/lib/metrics/hlVolumeRead'
 import { PageHeader } from '@/components/PageHeader'
 import { SectionHeading } from '@/components/SectionHeading'
 import { StatTile } from '@/components/StatTile'
@@ -82,7 +83,7 @@ export default async function TradesPage({
   const [session, end] = [await auth(), todayNy()]
   const start = rangeStart(end, range)
 
-  const [vol, daily, assets, venues, recent, deposits, ages] = await Promise.all([
+  const [vol, daily, assets, venues, recent, deposits, ages, hlTotal, hlDaily] = await Promise.all([
     volumeSummary(start, end),
     dailyVolume(start, end),
     topAssets(start, end, 15),
@@ -90,7 +91,15 @@ export default async function TradesPage({
     recentTrades(start, end, 50),
     depositSummary(start, end),
     watermarkAge(),
+    hlVolumeTotal(start, end).catch(() => ({ notionalUsd: 0, builderFeeUsd: 0, fillCount: 0 })),
+    hlVolumeDaily(start, end).catch(() => [] as Array<{ day: string; notionalUsd: number; fillCount: number }>),
   ])
+
+  // Prefer HL builder-fee-authoritative PERPS volume once the backfill has
+  // populated the table; swap volume is always exact from our own DB. Falls
+  // back to the reconstruction (labeled "est.") until then. Mirrors Overview.
+  const hlHasData = hlTotal.fillCount > 0
+  const hlDailyByDay = new Map(hlDaily.map(d => [d.day, d.notionalUsd]))
   // Identity lookup is scoped to just the wallets on this page (a single
   // indexed query against the privy_identities mirror), not a 14s live Privy
   // fetch of all ~5,830 wallets -- see src/lib/privyIdentities.ts. Runs after
@@ -98,7 +107,16 @@ export default async function TradesPage({
   const privyMap = await fetchWalletIdentities(sql, recent.map(r => r.walletAddress))
 
   const swap = vol.byType.find(t => t.type === 'swap') ?? { type: 'swap', count: 0, volumeUsd: 0 }
-  const perps = vol.byType.find(t => t.type === 'perps') ?? { type: 'perps', count: 0, volumeUsd: 0 }
+  const perpsDb = vol.byType.find(t => t.type === 'perps') ?? { type: 'perps', count: 0, volumeUsd: 0 }
+
+  // Authoritative when available, reconstruction otherwise. `perpsVolume` and
+  // `totalVolume` drive every headline figure; the surface breakdown below
+  // stays reconstruction-based (HL fills carry no client tag) and keeps "est."
+  const perpsVolume = hlHasData ? hlTotal.notionalUsd : perpsDb.volumeUsd
+  const totalVolume = perpsVolume + swap.volumeUsd
+  const volSource: 'hl' | 'est' = hlHasData ? 'hl' : 'est'
+  const perpsLabel = volSource === 'hl' ? 'Perps Volume' : 'Perps Volume (est.)'
+  const totalLabel = volSource === 'hl' ? 'Trading Volume' : 'Trading Volume (est.)'
 
   return (
     <main className="mx-auto w-full max-w-[1600px] px-8 py-8">
@@ -140,8 +158,8 @@ export default async function TradesPage({
         {/* --- Volume KPIs --- */}
         <section aria-label="Volume KPIs" className="mt-8 grid gap-x-6 divide-y divide-hairline sm:grid-cols-4 sm:divide-x sm:divide-y-0">
           <StatTile
-            label="Trading Volume (est.)"
-            value={vol.totalVolumeUsd}
+            label={totalLabel}
+            value={totalVolume}
             format={usd}
           />
           <div className="sm:pl-6">
@@ -151,22 +169,33 @@ export default async function TradesPage({
             <StatTile label="Unique Traders" value={vol.uniqueTraders} format={compact} />
           </div>
           <div className="sm:pl-6">
-            <StatTile label="Avg Trade Size (est.)" value={vol.avgTradeSize} format={usd} />
+            <StatTile
+              label={volSource === 'hl' ? 'Avg Trade Size' : 'Avg Trade Size (est.)'}
+              value={vol.totalTrades > 0 ? totalVolume / vol.totalTrades : 0}
+              format={usd}
+            />
           </div>
         </section>
-        <p className="mt-2 text-xs text-ink-3" title={EST_TAG_TITLE}>
-          <span className="text-ink-2">est.</span> figures include reconstructed perps volume — see tooltip.
+        <p className="mt-2 text-xs text-ink-3">
+          {volSource === 'hl' ? (
+            <>Perps volume is Hyperliquid per-fill data (builder-fee attributed); swap volume is exact.</>
+          ) : (
+            <>
+              <span className="text-ink-2" title={EST_TAG_TITLE}>est.</span>{' '}
+              figures include reconstructed perps volume (authoritative HL volume not yet backfilled).
+            </>
+          )}
         </p>
 
         {/* --- Perps vs Swaps --- */}
         <section aria-label="Perps vs swaps" className="mt-8 grid gap-x-6 divide-y divide-hairline border-t border-hairline pt-8 sm:grid-cols-2 sm:divide-x sm:divide-y-0">
           <StatTile label="Swap Volume" value={swap.volumeUsd} format={usd} />
           <div className="sm:pl-6">
-            <StatTile label="Perps Volume (est.)" value={perps.volumeUsd} format={usd} />
+            <StatTile label={perpsLabel} value={perpsVolume} format={usd} />
           </div>
         </section>
         <p className="numeral mt-2 text-xs text-ink-3">
-          {compact(swap.count)} swaps · {compact(perps.count)} perps orders
+          {compact(swap.count)} swaps · {compact(perpsDb.count)} perps orders
         </p>
 
         {/* --- Mobile vs Web --- */}
@@ -191,22 +220,28 @@ export default async function TradesPage({
 
         {/* --- Daily volume --- */}
         <section aria-label="Daily volume" className="mt-8 border-t border-hairline pt-8">
-          <SectionHeading>
-            Daily trades & volume <EstTag />
+          <SectionHeading meta={volSource === 'hl' ? undefined : <EstTag />}>
+            Daily trades & volume
           </SectionHeading>
           <div className="mt-4">
             <TimeSeriesLine
-              data={daily.map(d => ({
-                day: d.day,
-                value: d.swapVolumeUsd + d.perpsVolumeUsd,
-                tooltip: (
-                  <>
-                    <span className="numeral">{usd(d.swapVolumeUsd + d.perpsVolumeUsd)} total</span>
-                    <span className="text-ink-3">{compact(d.tradeCount)} trades</span>
-                    <span className="text-ink-3">perps {usd(d.perpsVolumeUsd)} · swap {usd(d.swapVolumeUsd)}</span>
-                  </>
-                ),
-              }))}
+              data={daily.map(d => {
+                // Authoritative HL perps per day when backfilled, else the
+                // reconstruction. Swap is always exact.
+                const perpsForDay = hlHasData ? (hlDailyByDay.get(d.day) ?? 0) : d.perpsVolumeUsd
+                const totalForDay = perpsForDay + d.swapVolumeUsd
+                return {
+                  day: d.day,
+                  value: totalForDay,
+                  tooltip: (
+                    <>
+                      <span className="numeral">{usd(totalForDay)} total</span>
+                      <span className="text-ink-3">{compact(d.tradeCount)} trades</span>
+                      <span className="text-ink-3">perps {usd(perpsForDay)} · swap {usd(d.swapVolumeUsd)}</span>
+                    </>
+                  ),
+                }
+              })}
               formatValue={usd}
               formatDay={d => new Intl.DateTimeFormat('en-US', { month: 'short', day: 'numeric' }).format(new Date(`${d}T12:00:00Z`))}
             />
@@ -219,8 +254,18 @@ export default async function TradesPage({
                 { key: 'day', header: 'Day', render: r => r.day },
                 { key: 'trades', header: 'Trades', align: 'right', render: r => compact(r.tradeCount) },
                 { key: 'swap', header: 'Swap Volume', align: 'right', render: r => usd(r.swapVolumeUsd) },
-                { key: 'perps', header: 'Perps Volume (est.)', align: 'right', render: r => usd(r.perpsVolumeUsd) },
-                { key: 'total', header: 'Total (est.)', align: 'right', render: r => usd(r.swapVolumeUsd + r.perpsVolumeUsd) },
+                {
+                  key: 'perps',
+                  header: volSource === 'hl' ? 'Perps Volume' : 'Perps Volume (est.)',
+                  align: 'right',
+                  render: r => usd(hlHasData ? (hlDailyByDay.get(r.day) ?? 0) : r.perpsVolumeUsd),
+                },
+                {
+                  key: 'total',
+                  header: volSource === 'hl' ? 'Total' : 'Total (est.)',
+                  align: 'right',
+                  render: r => usd((hlHasData ? (hlDailyByDay.get(r.day) ?? 0) : r.perpsVolumeUsd) + r.swapVolumeUsd),
+                },
               ]}
             />
           </div>
