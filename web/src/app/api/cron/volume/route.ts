@@ -69,11 +69,14 @@ export async function GET(request: Request) {
     deadlineMs: HARD_BUDGET_MS - 12_000,
   })
 
-  // 2. Reconcile (best-effort, deadline-bounded HL call).
+  // 2. Reconcile (best-effort, deadline-bounded HL call). walletsTracked is
+  //    the full tracked registry (consistent with the backfill's reconcile),
+  //    not just the active subset -- it's the coverage denominator.
+  const trackedCountRows = (await sql`SELECT count(*)::int AS n FROM tracked_wallets`) as Array<{ n: number }>
   let recon = null
   try {
     recon = await reconcile(sql, {
-      walletsTracked: active.length,
+      walletsTracked: trackedCountRows[0]?.n ?? 0,
       note: 'cron',
       log: true,
       deadlineMs: startedAt + HARD_BUDGET_MS - 3_000,
@@ -94,7 +97,9 @@ export async function GET(request: Request) {
           process.env.PRIVY_APP_ID && process.env.PRIVY_APP_SECRET
             ? privyRegistrySource()
             : analyticsWalletSource(sql)
-        const wallets = await source.list()
+        // Bounded by the same hard deadline -- a slow/rate-limited Privy
+        // pagination returns the partial registry rather than overrunning.
+        const wallets = await source.list(deadlineMs)
         registryDiscovered = await upsertTrackedWallets(sql, wallets, source.name)
         await writeSyncState(sql, REGISTRY_STATE_KEY, new Date())
       }

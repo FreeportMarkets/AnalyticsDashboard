@@ -19,7 +19,13 @@ type SqlTag = ReturnType<typeof neon<boolean, boolean>>
 
 export interface WalletSource {
   readonly name: string
-  list(): Promise<string[]>
+  /**
+   * `deadlineMs` (absolute epoch ms) bounds the enumeration for callers under
+   * a hard time budget (the cron). Past it, pagination stops and whatever was
+   * collected so far is returned -- a partial registry is safe because the
+   * next refresh continues, and tracked_wallets is a monotonic superset.
+   */
+  list(deadlineMs?: number): Promise<string[]>
 }
 
 // --- Privy registry (authoritative) ---
@@ -72,33 +78,38 @@ export function privyRegistrySource(
 ): WalletSource {
   return {
     name: 'privy-registry',
-    async list() {
+    async list(deadlineMs = Infinity) {
       if (!appId || !appSecret) throw new Error('PRIVY_APP_ID / PRIVY_APP_SECRET not set')
       const auth = `Basic ${Buffer.from(`${appId}:${appSecret}`).toString('base64')}`
       const wallets = new Set<string>()
       let cursor: string | undefined
+      const remaining = () => deadlineMs - Date.now()
 
       do {
+        if (remaining() <= 0) break // deadline hit -> return the partial registry
         const url = new URL(PRIVY_USERS_URL)
         url.searchParams.set('limit', String(PRIVY_PAGE_LIMIT))
         if (cursor) url.searchParams.set('cursor', cursor)
 
         let res: Response | undefined
         for (let attempt = 0; attempt < PRIVY_MAX_RETRIES; attempt++) {
+          if (remaining() <= 0) return [...wallets]
           res = await fetchImpl(url, { headers: { Authorization: auth, 'privy-app-id': appId } })
           if (res.ok) break
           if (res.status !== 429 && res.status < 500) {
             throw new Error(`privy GET /users ${res.status}: ${await res.text()}`)
           }
           const retryAfter = Number(res.headers.get('retry-after'))
-          await sleep(retryAfter > 0 ? retryAfter * 1000 : Math.min(60_000, 2_000 * 2 ** attempt))
+          const wait = retryAfter > 0 ? retryAfter * 1000 : Math.min(60_000, 2_000 * 2 ** attempt)
+          if (wait >= remaining()) return [...wallets] // don't sleep past the deadline
+          await sleep(wait)
         }
         if (!res?.ok) throw new Error(`privy GET /users failed after ${PRIVY_MAX_RETRIES} retries`)
 
         const body = (await res.json()) as { data?: PrivyUser[]; next_cursor?: string | null }
         for (const w of embeddedEvmWallets(body.data ?? [])) wallets.add(w)
         cursor = body.next_cursor ?? undefined
-        if (cursor) await sleep(PRIVY_PAGE_DELAY_MS)
+        if (cursor && remaining() > PRIVY_PAGE_DELAY_MS) await sleep(PRIVY_PAGE_DELAY_MS)
       } while (cursor)
 
       return [...wallets]

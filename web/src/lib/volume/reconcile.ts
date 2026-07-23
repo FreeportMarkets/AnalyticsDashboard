@@ -34,10 +34,15 @@ export async function reconcile(
   } = { walletsTracked: 0 }
 ): Promise<Reconciliation> {
   const tolerance = opts.tolerance ?? 0.01
-  // Bound the single HL fee call so reconcile can't hang the cron: short
-  // retry budget and the shared deadline.
+  // Bound the single HL fee call so reconcile can't hang the cron: under a
+  // deadline (cron), a short retry budget; without one (backfill script, not
+  // under the 60s budget), keep the full default retries so a transient
+  // 429/5xx doesn't fail an otherwise-complete backfill.
   const feePost = (body: unknown) =>
-    hlInfoPost<unknown>(body, { deadlineMs: opts.deadlineMs, maxRetries: 3 })
+    hlInfoPost<unknown>(body, {
+      deadlineMs: opts.deadlineMs,
+      ...(opts.deadlineMs !== undefined ? { maxRetries: 3 } : {}),
+    })
   const [bottomUp, top] = await Promise.all([
     bottomUpBuilderFee(sql),
     builderFeeTotals(FREEPORT_BUILDER_ADDRESS, feePost),
