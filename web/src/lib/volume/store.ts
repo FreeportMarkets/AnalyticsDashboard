@@ -42,6 +42,55 @@ export async function listTrackedWallets(sql: SqlTag): Promise<string[]> {
   return rows.map(r => r.evm_address)
 }
 
+/**
+ * Wallets that have ever produced a volume row -- the "active traders". The
+ * every-few-minutes cron syncs only these (a few dozen), keeping today's
+ * number live without sweeping all 4k wallets against HL's rate limit.
+ */
+export async function activeTraderWallets(sql: SqlTag): Promise<string[]> {
+  const rows = (await sql`SELECT DISTINCT evm_address FROM wallet_volume_daily`) as Array<{
+    evm_address: string
+  }>
+  return rows.map(r => r.evm_address)
+}
+
+/**
+ * Tracked wallets that have NEVER been scanned (no sync-state row). The
+ * discovery phase works through these in batches so new signups get picked up
+ * without rescanning the whole registry every run. Once scanned (even with
+ * zero fills) a wallet gets a sync-state row via markScanned and drops out of
+ * this set.
+ */
+export async function unscannedWallets(sql: SqlTag, limit: number): Promise<string[]> {
+  const rows = (await sql(
+    `SELECT t.evm_address
+       FROM tracked_wallets t
+       LEFT JOIN hl_fill_sync_state s ON s.evm_address = t.evm_address
+      WHERE s.evm_address IS NULL
+      LIMIT $1`,
+    [limit]
+  )) as Array<{ evm_address: string }>
+  return rows.map(r => r.evm_address)
+}
+
+/**
+ * Mark a wallet scanned by seeding its watermark, even when it had zero fills.
+ * Without this an empty wallet keeps no state row and is rescanned from
+ * scratch every discovery run. The seeded watermark means the next
+ * incremental sync fetches only fills after this instant, so a wallet that
+ * starts trading later is still caught.
+ */
+export async function markScanned(sql: SqlTag, address: string, watermarkMs: number): Promise<void> {
+  await sql(
+    `INSERT INTO hl_fill_sync_state (evm_address, last_fill_ms, updated_at)
+     VALUES ($1, $2, now())
+     ON CONFLICT (evm_address) DO UPDATE
+       SET last_fill_ms = GREATEST(hl_fill_sync_state.last_fill_ms, EXCLUDED.last_fill_ms),
+           updated_at   = now()`,
+    [address.toLowerCase(), watermarkMs]
+  )
+}
+
 export async function readWatermark(sql: SqlTag, address: string): Promise<number> {
   const rows = (await sql(
     `SELECT last_fill_ms FROM hl_fill_sync_state WHERE evm_address = $1`,

@@ -11,6 +11,7 @@ import { watermarkAge } from '@/lib/metrics/staleness'
 import { NY_TZ } from '@/lib/time'
 import { RANGES, addDays, isRangeKey, rangeSpanDays, rangeStart, todayNy, type RangeKey } from '@/lib/ranges'
 import { hlVolumeKpi } from '@/lib/metrics/hlVolumeRead'
+import { AutoRefresh } from '@/components/AutoRefresh'
 import { PageHeader } from '@/components/PageHeader'
 import { SectionHeading } from '@/components/SectionHeading'
 import { StatTile } from '@/components/StatTile'
@@ -145,6 +146,7 @@ export default async function OverviewPage({
         }
         right={
           <div className="flex items-center gap-4">
+            <AutoRefresh intervalMs={60_000} />
             <StalenessBadge ages={ages} />
             <form action={async () => { 'use server'; await signOut({ redirectTo: '/login' }) }}>
               <button className="text-xs text-ink-2 outline-none transition-colors hover:text-ink-1 focus-visible:ring-2 focus-visible:ring-accent">

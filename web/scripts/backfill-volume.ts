@@ -73,41 +73,63 @@ async function main() {
   const todo = force ? tracked : tracked.filter(a => (watermarks.get(a.toLowerCase()) ?? 0) === 0)
   console.log(`scanning ${todo.length} wallets (concurrency ${concurrency}, ${force ? 'force' : 'resume'})...`)
 
-  let done = 0
   let traded = 0
-  let errored = 0
   let totalNotional = 0
-  let next = 0
-  const failedWallets: string[] = []
-  async function worker() {
-    for (;;) {
-      const i = next++
-      if (i >= todo.length) return
-      const w = todo[i]!
-      const r = await syncWalletVolume(w, deps, { additive: false })
-      done++
-      if (r.error) {
-        errored++
-        failedWallets.push(w)
-      } else if (r.notionalUsd > 0) {
-        traded++
-        totalNotional += r.notionalUsd
-      }
-      if (done % 200 === 0 || done === todo.length) {
-        console.log(
-          `  ${done}/${todo.length}  traded=${traded}  errored=${errored}  Σnotional=$${(totalNotional / 1e6).toFixed(1)}M`
-        )
+
+  /** Scan a list once; return the wallets that errored (for retry). */
+  async function scanOnce(list: string[], conc: number): Promise<string[]> {
+    let done = 0
+    let errored = 0
+    let next = 0
+    const failed: string[] = []
+    async function worker() {
+      for (;;) {
+        const i = next++
+        if (i >= list.length) return
+        const w = list[i]!
+        const r = await syncWalletVolume(w, deps, { additive: false })
+        done++
+        if (r.error) {
+          errored++
+          failed.push(w)
+        } else if (r.notionalUsd > 0) {
+          traded++
+          totalNotional += r.notionalUsd
+        }
+        if (done % 200 === 0 || done === list.length) {
+          console.log(
+            `  ${done}/${list.length}  traded=${traded}  errored=${errored}  Σnotional=$${(totalNotional / 1e6).toFixed(1)}M`
+          )
+        }
       }
     }
+    await Promise.all(Array.from({ length: Math.min(conc, list.length) }, worker))
+    return failed
   }
-  await Promise.all(Array.from({ length: Math.min(concurrency, todo.length) }, worker))
 
-  // Errored wallets never advanced their watermark, so re-running resumes
-  // them -- but a backfill that "completed" with errors is NOT done. Surface
-  // it loudly rather than reconciling against a partial dataset.
-  if (errored > 0) {
-    console.log(`\n⚠️  ${errored} wallets FAILED (rate limit / network) and were NOT counted.`)
-    console.log(`    Re-run to resume them: npx tsx scripts/backfill-volume.ts --concurrency ${concurrency}`)
+  // Auto-retry failed wallets in rounds, halving concurrency and pausing each
+  // time to let HL's rate limit recover. A backfill that "completed" with
+  // errored wallets is NOT done -- those wallets are simply missing from the
+  // total (that's how today's number read $814K instead of $991K). We keep
+  // retrying until the failure set is empty or stops shrinking, so the
+  // reconciliation at the end is against a genuinely complete dataset.
+  let failed = await scanOnce(todo, concurrency)
+  let round = 1
+  while (failed.length > 0 && round <= 6) {
+    const conc = Math.max(1, Math.floor(concurrency / 2 ** Math.min(round, 3)))
+    console.log(`\nretry round ${round}: ${failed.length} failed wallets (concurrency ${conc}, pausing 10s)...`)
+    await new Promise(r => setTimeout(r, 10_000))
+    const stillFailed = await scanOnce(failed, conc)
+    if (stillFailed.length >= failed.length) {
+      // No progress -- retrying more won't help this run.
+      failed = stillFailed
+      break
+    }
+    failed = stillFailed
+    round++
+  }
+  if (failed.length > 0) {
+    console.log(`\n⚠️  ${failed.length} wallets STILL failing after retries. Re-run later to finish them.`)
   }
 
   // 3. Reconcile against the collector's fees.
@@ -119,8 +141,8 @@ async function main() {
   console.log(`gap                   : $${recon.gapUsd.toFixed(2)}`)
   if (recon.complete) {
     console.log('COMPLETE (<1% gap) ✓')
-  } else if (errored > 0) {
-    console.log(`INCOMPLETE — ${errored} wallets failed this run; RE-RUN to resume before trusting the total.`)
+  } else if (failed.length > 0) {
+    console.log(`INCOMPLETE — ${failed.length} wallets still failing; RE-RUN to resume before trusting the total.`)
     process.exitCode = 2
   } else {
     console.log('INCOMPLETE — all wallets scanned but fees still short; enumeration is missing wallets.')
@@ -128,4 +150,4 @@ async function main() {
   }
 }
 
-main().then(() => process.exit(0)).catch(e => { console.error(e); process.exit(1) })
+main().then(() => process.exit(process.exitCode ?? 0)).catch(e => { console.error(e); process.exit(1) })

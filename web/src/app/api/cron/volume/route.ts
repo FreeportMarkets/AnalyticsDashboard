@@ -1,101 +1,135 @@
 import { NextResponse } from 'next/server'
 import { sql } from '@/lib/db'
 import { hlFillsFetcher, type HlFill } from '@/lib/hl/volume'
-import { defaultWalletSource } from '@/lib/volume/walletSource'
+import { privyRegistrySource, analyticsWalletSource } from '@/lib/volume/walletSource'
 import {
   upsertTrackedWallets,
-  listTrackedWallets,
+  activeTraderWallets,
+  unscannedWallets,
   readWatermarks,
   writeWalletBuckets,
+  markScanned,
 } from '@/lib/volume/store'
-import { syncWalletsBatch, type SyncDeps } from '@/lib/volume/syncVolume'
+import { syncWalletsBatch, syncWalletVolume, type SyncDeps } from '@/lib/volume/syncVolume'
 import { reconcile } from '@/lib/volume/reconcile'
+import { readWatermark as readSyncState, advanceWatermark as writeSyncState } from '@/lib/sync/watermark'
 
 export const dynamic = 'force-dynamic'
 export const maxDuration = 60
 
+/** Refresh the Privy registry at most this often (it's ~44 pages, not free). */
+const REGISTRY_REFRESH_MS = 60 * 60 * 1000
+const REGISTRY_STATE_KEY = 'volume:registry-refresh'
+/** How many never-scanned wallets to discover per run, time permitting. */
+const DISCOVERY_BATCH = 400
+
 /**
- * Incremental volume sync.
+ * Two-phase, deadline-bounded volume sync. Designed so no single run sweeps
+ * all ~4k wallets against HL's per-IP rate limit (which corrupts data by
+ * dropping wallets):
  *
- * 1. Refresh the tracked-wallet set from the best available source (Privy
- *    registry when creds exist). New signups get scanned automatically.
- * 2. For each wallet, fetch HL fills after its watermark, aggregate, upsert
- *    daily volume, advance the watermark. Bounded by a wall-clock deadline so
- *    we never hit the platform's function timeout -- unreached wallets are
- *    picked up next run (their watermark hasn't moved, so nothing is lost).
- * 3. Reconcile Σ(builder_fee) against the collector's fees and log the ratio.
+ *   Phase 1 — sync the ACTIVE traders (wallets with any volume row, a few
+ *     dozen) incrementally. Cheap, and keeps today's number live every run.
+ *   Phase 2 — with leftover time budget, DISCOVER a batch of never-scanned
+ *     wallets so new signups get picked up. Each is marked scanned (even at
+ *     zero fills) so it isn't rescanned; a discovered trader gets a volume
+ *     row and joins Phase 1 next run.
+ *   Registry — refreshed from Privy at most hourly, not every run.
  *
- * Durability note: HL ages fills out of userFillsByTime, so this must run
- * often enough to capture fills before they expire. That, not dashboard
- * freshness, is why the cron is mandatory.
+ * Everything is resumable: a wallet not reached this run keeps its watermark
+ * (or stays unscanned) and is picked up next run. Nothing is ever lost.
  */
 export async function GET(request: Request) {
   const secret = process.env.CRON_SECRET
-  const auth = request.headers.get('authorization')
-  if (!secret || auth !== `Bearer ${secret}`) {
+  if (!secret || request.headers.get('authorization') !== `Bearer ${secret}`) {
     return NextResponse.json({ error: 'unauthorized' }, { status: 401 })
   }
 
   const startedAt = Date.now()
+  const budgetMs = (maxDuration - 10) * 1000
+  const timeLeft = () => budgetMs - (Date.now() - startedAt)
 
-  // 1. Refresh enumeration.
-  const source = defaultWalletSource(sql)
+  // Registry refresh (hourly). Best-effort: a Privy hiccup must not stop sync.
   let discovered = 0
   try {
-    const wallets = await source.list()
-    discovered = await upsertTrackedWallets(sql, wallets, source.name)
+    const last = await readSyncState(sql, REGISTRY_STATE_KEY, new Date(0))
+    if (Date.now() - last.getTime() > REGISTRY_REFRESH_MS) {
+      const source =
+        process.env.PRIVY_APP_ID && process.env.PRIVY_APP_SECRET
+          ? privyRegistrySource()
+          : analyticsWalletSource(sql)
+      const wallets = await source.list()
+      discovered = await upsertTrackedWallets(sql, wallets, source.name)
+      await writeSyncState(sql, REGISTRY_STATE_KEY, new Date())
+    }
   } catch (err) {
-    // A registry hiccup shouldn't stop us syncing the wallets we already track.
-    // eslint-disable-next-line no-console
-    console.warn('volume cron: wallet source failed, using existing tracked set', err)
+    console.warn('volume cron: registry refresh failed', err)
   }
 
-  const tracked = await listTrackedWallets(sql)
   const watermarks = await readWatermarks(sql)
-
-  // 2. Incremental per-wallet sync. Leave ~8s headroom under maxDuration for
-  //    the reconcile + response.
-  const deadlineMs = (maxDuration - 12) * 1000
   const deps: SyncDeps = {
     readWatermark: async a => watermarks.get(a.toLowerCase()) ?? 0,
     fetchFills: (a, sinceMs) => hlFillsFetcher(a, sinceMs) as Promise<HlFill[]>,
     writeBuckets: (a, buckets, wm, additive) => writeWalletBuckets(sql, a, buckets, wm, additive),
   }
-  const { results, processed, skippedForTime } = await syncWalletsBatch(tracked, deps, {
+
+  // Phase 1 — active traders, always.
+  const active = await activeTraderWallets(sql)
+  const phase1 = await syncWalletsBatch(active, deps, {
     additive: true,
     concurrency: 6,
-    deadlineMs,
+    deadlineMs: Math.max(0, budgetMs - 15_000), // reserve time for discovery + reconcile
   })
 
-  const errors = results.filter(r => r.error).length
-  const newFills = results.reduce((s, r) => s + r.attributedFills, 0)
-  const newNotional = results.reduce((s, r) => s + r.notionalUsd, 0)
+  // Phase 2 — discover never-scanned wallets with whatever time remains.
+  let discoveredScanned = 0
+  let discoveredTraders = 0
+  if (timeLeft() > 8_000) {
+    const candidates = await unscannedWallets(sql, DISCOVERY_BATCH)
+    let next = 0
+    const nowMs = Date.now()
+    async function discover() {
+      while (timeLeft() > 5_000) {
+        const i = next++
+        if (i >= candidates.length) return
+        const addr = candidates[i]!
+        const r = await syncWalletVolume(addr, deps, { additive: false })
+        if (r.error) continue // leave unscanned -> retried next run
+        discoveredScanned++
+        if (r.attributedFills > 0) discoveredTraders++
+        // Empty wallet wrote no rows/watermark -- mark it scanned so it drops
+        // out of the discovery set (seeded to now; later trades still caught).
+        if (r.daysTouched === 0) await markScanned(sql, addr, nowMs)
+      }
+    }
+    await Promise.all([discover(), discover(), discover()])
+  }
 
-  // 3. Reconcile (best-effort — never fail the sync on the fee lookup).
+  // Reconcile (best-effort). The <1% gate; logged for the trend + dashboard.
   let recon = null
   try {
-    recon = await reconcile(sql, { walletsTracked: tracked.length, note: 'cron', log: true })
+    const trackedCount = active.length + discoveredScanned
+    recon = await reconcile(sql, { walletsTracked: trackedCount, note: 'cron', log: true })
   } catch (err) {
-    // eslint-disable-next-line no-console
     console.warn('volume cron: reconcile failed', err)
   }
 
   return NextResponse.json({
     ok: true,
     durationMs: Date.now() - startedAt,
-    discovered,
-    tracked: tracked.length,
-    processed,
-    skippedForTime,
-    errors,
-    newFills,
-    newNotionalUsd: Math.round(newNotional),
+    registryDiscovered: discovered,
+    activeTraders: active.length,
+    activeProcessed: phase1.processed,
+    activeErrors: phase1.results.filter(r => r.error).length,
+    newFills: phase1.results.reduce((s, r) => s + r.attributedFills, 0),
+    discoveryScanned: discoveredScanned,
+    discoveryNewTraders: discoveredTraders,
     reconciliation: recon
       ? {
           ratio: Number(recon.ratio.toFixed(4)),
+          complete: recon.complete,
           bottomUpFeeUsd: Math.round(recon.bottomUpFeeUsd),
           topDownFeeUsd: Math.round(recon.topDownFeeUsd),
-          complete: recon.complete,
         }
       : null,
   })
