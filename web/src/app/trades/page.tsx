@@ -118,6 +118,17 @@ export default async function TradesPage({
   const perpsLabel = volSource === 'hl' ? 'Perps Volume' : 'Perps Volume (est.)'
   const totalLabel = volSource === 'hl' ? 'Trading Volume' : 'Trading Volume (est.)'
 
+  // Web Terminal perps volume. HL fills carry no client tag, so the mobile/web
+  // split comes from our trade log (the x-client header). We take web's SHARE
+  // of perps volume from the log and apply it to the authoritative perps total,
+  // so the terminal number is consistent with the headline rather than a raw
+  // (lower) reconstruction figure.
+  const perpsLogTotal = vol.perpsByClient.reduce((s, c) => s + c.volumeUsd, 0)
+  const webLog = vol.perpsByClient.find(c => c.client === 'web')
+  const webShare = perpsLogTotal > 0 ? (webLog?.volumeUsd ?? 0) / perpsLogTotal : 0
+  const webTerminalVolume = perpsVolume * webShare
+  const webTerminalTrades = webLog?.count ?? 0
+
   return (
     <main className="mx-auto w-full max-w-[1600px] px-8 py-8">
       <PageHeader
@@ -187,15 +198,23 @@ export default async function TradesPage({
           )}
         </p>
 
-        {/* --- Perps vs Swaps --- */}
-        <section aria-label="Perps vs swaps" className="mt-8 grid gap-x-6 divide-y divide-hairline border-t border-hairline pt-8 sm:grid-cols-2 sm:divide-x sm:divide-y-0">
-          <StatTile label="Swap Volume" value={swap.volumeUsd} format={usd} />
+        {/* --- Perps vs Swaps vs Terminal --- */}
+        <section aria-label="Volume split" className="mt-8 grid gap-x-6 divide-y divide-hairline border-t border-hairline pt-8 sm:grid-cols-3 sm:divide-x sm:divide-y-0">
+          <StatTile label={perpsLabel} value={perpsVolume} format={usd} />
           <div className="sm:pl-6">
-            <StatTile label={perpsLabel} value={perpsVolume} format={usd} />
+            <StatTile label="Swap Volume" value={swap.volumeUsd} format={usd} />
+          </div>
+          <div className="sm:pl-6">
+            <StatTile
+              label="Web Terminal Volume"
+              value={webTerminalVolume}
+              format={usd}
+              valueTitle={`${(webShare * 100).toFixed(1)}% of perps volume placed from the web terminal (per the x-client tag), applied to the authoritative perps total.`}
+            />
           </div>
         </section>
         <p className="numeral mt-2 text-xs text-ink-3">
-          {compact(swap.count)} swaps · {compact(perpsDb.count)} perps orders
+          {compact(perpsDb.count)} perps orders · {compact(swap.count)} swaps · {compact(webTerminalTrades)} from web terminal
         </p>
 
         {/* --- Mobile vs Web --- */}

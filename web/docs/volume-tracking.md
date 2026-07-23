@@ -21,10 +21,25 @@ Net effect: the reconstruction shows roughly **half** the real volume.
 
 Every Hyperliquid fill carries `builderFee`. HL charges that fee only on
 orders placed through *our* builder code and credits it to our collector
-wallet `0x9f4e80F17Ddb4A7efC1dc07fAE6B34AbAb77d6Df`. So:
+wallet `0x9f4e80F17Ddb4A7efC1dc07fAE6B34AbAb77d6Df`.
 
-> **Freeport perps volume = Σ(|sz| × px) over every HL fill with
-> `builderFee > 0`, deduped by `tid`, across every Freeport wallet.**
+> **Freeport perps volume = Σ(|sz| × px) over every PERP fill (any direction;
+> spot/settlement excluded), deduped by `tid`, across every Freeport wallet.**
+
+Note this counts ALL perp fills, not only builder-fee-attributed ones.
+Enumeration is Privy-embedded wallets, which only trade through Freeport, so
+every perp fill they make is Freeport volume -- including **liquidations and
+TP/SL auto-closes**, which HL executes itself (no `cloid`, no builder param,
+no fee) but which close genuine Freeport positions. Gating on `builderFee > 0`
+undercounted vs the Streamlit dashboard by exactly the liquidation volume, so
+it does not gate inclusion.
+
+`builderFee` is still summed per fill (`builder_fee_usd`) and is the
+**reconciliation** signal, not the volume filter: it must tie to the fees HL
+actually paid the collector. Volume is the superset (all perp fills); fees are
+the attributed subset. So the reconciliation validates that every *fee-bearing*
+fill was captured -- it no longer implies volume × rate, because liquidations
+add volume with no fee.
 
 Three properties make this the source of truth:
 
@@ -59,8 +74,10 @@ run, so switching sources is verifiable rather than hopeful.
 
 - **`tracked_wallets`** — the enumeration set. `evm_address` (PK, lowercased),
   `source`, timestamps. Fed by the wallet source.
-- **`wallet_volume_daily`** — per wallet per NY day: `notional_usd`,
-  `builder_fee_usd`, `fill_count`. PK `(evm_address, day)`. The grain the
+- **`wallet_volume_daily`** — per wallet per NY day: `notional_usd`
+  (Σ|sz|×px over ALL perp fills that day), `builder_fee_usd`
+  (Σ builderFee — the fee-bearing subset, for reconciliation), `fill_count`.
+  PK `(evm_address, day)`. The grain the
   dashboard aggregates. NY-day bucketing matches every other metric.
 - **`hl_fill_sync_state`** — per-wallet watermark: `last_fill_ms` (the max
   fill `time` we've ingested). Incremental syncs fetch only fills after it.
@@ -70,6 +87,20 @@ run, so switching sources is verifiable rather than hopeful.
 Volume totals come from HL fills. The **client** breakdown (mobile/web) is
 the one thing HL fills cannot provide — it stays sourced from the trade log
 and is therefore approximate; totals are authoritative, client split is not.
+
+## Changing the volume basis needs a forced re-backfill
+
+The incremental sync only ever looks at fills AFTER a wallet's watermark
+(`aggregateWalletFills` drops `time <= sinceMs`), and the watermark advances
+over every in-window fill regardless of whether it was bucketed. So a change
+to what counts as volume (e.g. the switch from builder-fee-gated to all-fills,
+which added historical liquidations) does NOT self-heal on already-synced
+wallets — their watermarks are already past those fills, so no incremental run
+revisits them. Any such change must be followed by a **forced re-backfill**
+(`npm run backfill:volume -- --force`), which rescans each wallet from 0 and
+rewrites its daily buckets absolutely. Deploy the code and run the re-backfill
+together, or the stored numbers stay on the old basis for all history and only
+new fills reflect the change.
 
 ## Flow
 
