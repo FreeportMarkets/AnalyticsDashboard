@@ -22,6 +22,15 @@ export interface HlPostOptions {
   timeoutMs?: number
   fetchImpl?: typeof fetch
   sleepImpl?: (ms: number) => Promise<void>
+  /**
+   * Absolute epoch-ms deadline. Past it, no new attempt or backoff sleep is
+   * started and the call throws immediately. This is what keeps a serverless
+   * cron from blowing its function timeout: without it, a wallet stuck in
+   * rate-limit backoff (up to 8 retries × tens of seconds) runs for minutes,
+   * and a between-wallet deadline check can't stop an in-flight fetch. With
+   * it, every HL call returns or throws by the deadline.
+   */
+  deadlineMs?: number
 }
 
 const defaultSleep = (ms: number) => new Promise<void>(r => setTimeout(r, ms))
@@ -31,21 +40,27 @@ export async function hlInfoPost<T>(body: unknown, opts: HlPostOptions = {}): Pr
   const timeoutMs = opts.timeoutMs ?? 20_000
   const doFetch = opts.fetchImpl ?? fetch
   const sleep = opts.sleepImpl ?? defaultSleep
+  const deadlineMs = opts.deadlineMs ?? Infinity
+  const remaining = () => deadlineMs - Date.now()
 
   for (let attempt = 0; attempt < maxRetries; attempt++) {
+    if (remaining() <= 0) throw new Error('HL info request deadline exceeded')
     let res: Response
     try {
+      // Per-request timeout is the min of the configured timeout and the time
+      // left until the deadline, so a single hung request can't overshoot.
       res = await doFetch(HL_INFO_URL, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
-        signal: AbortSignal.timeout(timeoutMs),
+        signal: AbortSignal.timeout(Math.max(1, Math.min(timeoutMs, remaining()))),
         cache: 'no-store',
       })
     } catch (err) {
-      // Network error / timeout -- transient, retry unless budget exhausted.
-      if (attempt === maxRetries - 1) throw err
-      await sleep(backoffMs(attempt))
+      if (attempt === maxRetries - 1 || remaining() <= 0) throw err
+      const wait = backoffMs(attempt)
+      if (wait >= remaining()) throw err // no point sleeping past the deadline
+      await sleep(wait)
       continue
     }
     if (res.ok) return (await res.json()) as T
@@ -53,7 +68,9 @@ export async function hlInfoPost<T>(body: unknown, opts: HlPostOptions = {}): Pr
       throw new Error(`HL ${res.status} ${res.statusText}`)
     }
     const retryAfter = Number(res.headers.get('retry-after'))
-    await sleep(retryAfter > 0 ? retryAfter * 1000 : backoffMs(attempt))
+    const wait = retryAfter > 0 ? retryAfter * 1000 : backoffMs(attempt)
+    if (wait >= remaining()) throw new Error('HL rate-limited, deadline exceeded')
+    await sleep(wait)
   }
   throw new Error('HL info request failed after retries (rate limited)')
 }

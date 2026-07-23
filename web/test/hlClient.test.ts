@@ -74,4 +74,29 @@ describe('hlInfoPost retry policy', () => {
     ).rejects.toThrow(/after retries/)
     expect(fetchImpl).toHaveBeenCalledTimes(4)
   })
+
+  // The cron-timeout fix: a past deadline must stop the call immediately
+  // instead of retrying/backing off for minutes.
+  it('stops immediately when the deadline is already past', async () => {
+    const fetchImpl = vi.fn(async () => jsonResponse(429))
+    await expect(
+      hlInfoPost({}, { fetchImpl, sleepImpl: noSleep, deadlineMs: Date.now() - 1 })
+    ).rejects.toThrow(/deadline/)
+    expect(fetchImpl).not.toHaveBeenCalled()
+  })
+
+  it('does not sleep past the deadline on a 429 (throws instead of long backoff)', async () => {
+    // First attempt 429s; the backoff would be ~1s but only ~5ms remain, so it
+    // must throw rather than sleep past the deadline.
+    const fetchImpl = vi.fn(async () => jsonResponse(429))
+    const sleeps: number[] = []
+    await expect(
+      hlInfoPost({}, {
+        fetchImpl,
+        sleepImpl: async ms => { sleeps.push(ms) },
+        deadlineMs: Date.now() + 5,
+      })
+    ).rejects.toThrow(/deadline/)
+    expect(sleeps).toEqual([]) // never slept
+  })
 })
