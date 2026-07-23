@@ -1,5 +1,5 @@
 import { NY_TZ } from '@/lib/time'
-import { isPerpFill, type HlFill } from '@/lib/hl/volume'
+import type { HlFill } from '@/lib/hl/volume'
 
 /**
  * Pure aggregation core: turn a wallet's raw HL fills into per-NY-day volume
@@ -35,9 +35,32 @@ export interface AggregateResult {
   attributedFills: number
 }
 
-/** True only for a perp fill that carried our builder fee. */
+/**
+ * Non-perp fill directions to EXCLUDE. This is a denylist, not a perp
+ * allowlist, on purpose: `builderFee > 0` is HL's own stamp that the order
+ * went through our builder code, and Freeport is perps-only, so a positive
+ * builder fee already means a Freeport perp trade. Gating on an allowlist of
+ * {Open,Close}×{Long,Short} would silently DROP advanced-order fills that use
+ * other perp directions -- position flips (`Long > Short`, `Short > Long`),
+ * and any future dir HL introduces -- which is exactly the "handle all order
+ * types" failure mode. We exclude only the known spot / settlement dirs,
+ * which never carry our fee anyway (verified empirically), as belt-and-braces
+ * against HL ever attaching a builder fee to a spot conversion.
+ *
+ * The reconciliation gate is the ultimate backstop: if this filter ever drops
+ * a fee-bearing fill, Σ(builderFee) bottom-up won't match the collector's
+ * total and the run is flagged incomplete.
+ */
+const NON_PERP_DIRS = new Set(['Buy', 'Sell', 'Spot Dust Conversion', 'Settlement'])
+
+/**
+ * True for a Freeport-attributed perp fill: it carried our builder fee and is
+ * not a spot/settlement fill. Captures every perp direction, including
+ * position flips and TWAP/trigger fills (which use the normal perp dirs).
+ */
 export function isFreeportPerpFill(fill: HlFill): boolean {
-  return isPerpFill(fill) && Number(fill.builderFee ?? 0) > 0
+  if (Number(fill.builderFee ?? 0) <= 0) return false
+  return !NON_PERP_DIRS.has(fill.dir ?? '')
 }
 
 /** One fill's notional. |sz| * px, always positive. */

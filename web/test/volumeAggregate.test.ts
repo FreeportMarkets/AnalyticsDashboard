@@ -19,8 +19,31 @@ describe('isFreeportPerpFill', () => {
     expect(isFreeportPerpFill(fill({ dir: 'Open Long', builderFee: '0' }))).toBe(false)
     expect(isFreeportPerpFill(fill({ dir: 'Open Long', builderFee: undefined }))).toBe(false)
   })
-  it('rejects a spot fill even with a builder fee', () => {
-    expect(isFreeportPerpFill(fill({ dir: 'Buy', builderFee: '0.65' }))).toBe(false)
+  it('rejects spot / settlement dirs even with a builder fee', () => {
+    for (const dir of ['Buy', 'Sell', 'Spot Dust Conversion', 'Settlement']) {
+      expect(isFreeportPerpFill(fill({ dir, builderFee: '0.65' }))).toBe(false)
+    }
+  })
+
+  // Advanced order types: these use perp directions beyond the basic four and
+  // MUST be counted when they carry our builder fee. This is the "handle all
+  // order placements" guarantee.
+  it('accepts position-flip fills (Long > Short / Short > Long) with a builder fee', () => {
+    expect(isFreeportPerpFill(fill({ dir: 'Long > Short', builderFee: '1.2' }))).toBe(true)
+    expect(isFreeportPerpFill(fill({ dir: 'Short > Long', builderFee: '1.2' }))).toBe(true)
+  })
+
+  it('accepts a TWAP sub-fill (normal dir + twapId) with a builder fee', () => {
+    expect(isFreeportPerpFill(fill({ dir: 'Open Long', builderFee: '0.4', twapId: 12345 }))).toBe(true)
+  })
+
+  it('accepts an unknown future perp dir as long as it carried our fee', () => {
+    // Forward-compat: a new HL perp dir must not be silently dropped.
+    expect(isFreeportPerpFill(fill({ dir: 'Some New Perp Action', builderFee: '0.9' }))).toBe(true)
+  })
+
+  it('excludes a liquidation fill that carried no builder fee (not our trade)', () => {
+    expect(isFreeportPerpFill(fill({ dir: 'Liquidated Isolated Long', builderFee: '0' }))).toBe(false)
   })
 })
 

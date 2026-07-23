@@ -17,9 +17,9 @@
  * (`tid`).
  */
 
-export const PERP_DIRS = new Set(['Open Long', 'Close Long', 'Open Short', 'Close Short'])
+import { hlInfoPost } from './client'
 
-const HL_INFO_URL = 'https://api.hyperliquid.xyz/info'
+export const PERP_DIRS = new Set(['Open Long', 'Close Long', 'Open Short', 'Close Short'])
 
 /** HL returns at most 2000 fills per `userFillsByTime` call. */
 export const HL_PAGE_CAP = 2000
@@ -42,6 +42,8 @@ export interface HlFill {
    * (see lib/volume/aggregate.ts). Absent/0 = not a Freeport-attributed fill.
    */
   builderFee?: string
+  /** TWAP order id, set on fills that are sub-executions of a TWAP order. */
+  twapId?: number | string | null
 }
 
 /** One fill's notional = |size| * price. Always positive. */
@@ -102,15 +104,7 @@ export async function computePerpVolume(
 // --- real network fetcher (not exercised by the pure unit tests) ---
 
 async function hlPost(body: unknown): Promise<HlFill[]> {
-  const res = await fetch(HL_INFO_URL, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-    signal: AbortSignal.timeout(15_000),
-    cache: 'no-store',
-  })
-  if (!res.ok) throw new Error(`HL ${res.status} ${res.statusText}`)
-  return (await res.json()) as HlFill[]
+  return hlInfoPost<HlFill[]>(body)
 }
 
 /**

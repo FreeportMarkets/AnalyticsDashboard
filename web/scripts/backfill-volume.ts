@@ -75,26 +75,40 @@ async function main() {
 
   let done = 0
   let traded = 0
+  let errored = 0
   let totalNotional = 0
   let next = 0
+  const failedWallets: string[] = []
   async function worker() {
     for (;;) {
       const i = next++
       if (i >= todo.length) return
-      const r = await syncWalletVolume(todo[i]!, deps, { additive: false })
+      const w = todo[i]!
+      const r = await syncWalletVolume(w, deps, { additive: false })
       done++
-      if (r.notionalUsd > 0) {
+      if (r.error) {
+        errored++
+        failedWallets.push(w)
+      } else if (r.notionalUsd > 0) {
         traded++
         totalNotional += r.notionalUsd
       }
       if (done % 200 === 0 || done === todo.length) {
         console.log(
-          `  ${done}/${todo.length}  traded=${traded}  Σnotional=$${(totalNotional / 1e6).toFixed(1)}M`
+          `  ${done}/${todo.length}  traded=${traded}  errored=${errored}  Σnotional=$${(totalNotional / 1e6).toFixed(1)}M`
         )
       }
     }
   }
   await Promise.all(Array.from({ length: Math.min(concurrency, todo.length) }, worker))
+
+  // Errored wallets never advanced their watermark, so re-running resumes
+  // them -- but a backfill that "completed" with errors is NOT done. Surface
+  // it loudly rather than reconciling against a partial dataset.
+  if (errored > 0) {
+    console.log(`\n⚠️  ${errored} wallets FAILED (rate limit / network) and were NOT counted.`)
+    console.log(`    Re-run to resume them: npx tsx scripts/backfill-volume.ts --concurrency ${concurrency}`)
+  }
 
   // 3. Reconcile against the collector's fees.
   const recon = await reconcile(sql, { walletsTracked: tracked.length, note: 'backfill', log: true })
@@ -103,7 +117,15 @@ async function main() {
   console.log(`top-down builder fee  : $${recon.topDownFeeUsd.toFixed(2)}`)
   console.log(`ratio                 : ${(recon.ratio * 100).toFixed(1)}%`)
   console.log(`gap                   : $${recon.gapUsd.toFixed(2)}`)
-  console.log(recon.complete ? 'COMPLETE (<1% gap) ✓' : 'INCOMPLETE — wallets still missing from enumeration')
+  if (recon.complete) {
+    console.log('COMPLETE (<1% gap) ✓')
+  } else if (errored > 0) {
+    console.log(`INCOMPLETE — ${errored} wallets failed this run; RE-RUN to resume before trusting the total.`)
+    process.exitCode = 2
+  } else {
+    console.log('INCOMPLETE — all wallets scanned but fees still short; enumeration is missing wallets.')
+    process.exitCode = 2
+  }
 }
 
 main().then(() => process.exit(0)).catch(e => { console.error(e); process.exit(1) })

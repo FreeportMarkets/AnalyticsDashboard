@@ -16,10 +16,10 @@
  * fields rather than assume.
  */
 
+import { hlInfoPost } from './client'
+
 export const FREEPORT_BUILDER_ADDRESS =
   process.env.HL_BUILDER_ADDRESS ?? '0x9f4e80F17Ddb4A7efC1dc07fAE6B34AbAb77d6Df'
-
-const HL_INFO_URL = 'https://api.hyperliquid.xyz/info'
 
 export interface BuilderFeeTotals {
   /** USDC already claimed into the collector wallet. */
@@ -41,29 +41,6 @@ interface ReferralResponse {
   tokenToState?: Array<[number, TokenState]>
 }
 
-const sleep = (ms: number) => new Promise<void>(r => setTimeout(r, ms))
-
-async function hlPost(body: unknown): Promise<unknown> {
-  // Retry 429/5xx with backoff. This shares HL's per-IP budget with the fill
-  // sweep, so a transient throttle here must not fail the whole reconcile.
-  for (let attempt = 0; attempt < 5; attempt++) {
-    const res = await fetch(HL_INFO_URL, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-      signal: AbortSignal.timeout(15_000),
-      cache: 'no-store',
-    })
-    if (res.ok) return res.json()
-    if (res.status !== 429 && res.status < 500) {
-      throw new Error(`HL ${res.status} ${res.statusText}`)
-    }
-    const retryAfter = Number(res.headers.get('retry-after'))
-    await sleep(retryAfter > 0 ? retryAfter * 1000 : Math.min(30_000, 1_500 * 2 ** attempt))
-  }
-  throw new Error('HL builder-fee lookup failed after retries')
-}
-
 /**
  * Read the collector's builder-fee totals. `postFn` is injected for testing.
  *
@@ -74,7 +51,7 @@ async function hlPost(body: unknown): Promise<unknown> {
  */
 export async function builderFeeTotals(
   builderAddress: string = FREEPORT_BUILDER_ADDRESS,
-  postFn: (body: unknown) => Promise<unknown> = hlPost
+  postFn: (body: unknown) => Promise<unknown> = body => hlInfoPost(body)
 ): Promise<BuilderFeeTotals> {
   const ref = (await postFn({ type: 'referral', user: builderAddress })) as ReferralResponse
   const usdc = ref.tokenToState?.find(([token]) => token === 0)?.[1]
