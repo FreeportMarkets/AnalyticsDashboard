@@ -15,6 +15,7 @@ import { StatTile } from '@/components/StatTile'
 import { BarList } from '@/components/BarList'
 import { DataTable } from '@/components/DataTable'
 import { StalenessBadge } from '@/components/StalenessBadge'
+import { AutoRefresh } from '@/components/AutoRefresh'
 
 export const dynamic = 'force-dynamic'
 
@@ -91,7 +92,12 @@ export default async function NotificationsPage({
             </nav>
           </div>
         }
-        right={<StalenessBadge ages={ages} />}
+        right={
+          <div className="flex items-center gap-4">
+            <AutoRefresh intervalMs={60_000} />
+            <StalenessBadge ages={ages} />
+          </div>
+        }
       />
 
       <div key={range} className="animate-content-fade">
@@ -154,7 +160,7 @@ export default async function NotificationsPage({
               {byDay.map(d => (
                 <div key={d.day} className="group relative h-full flex-1">
                   <div
-                    className="absolute inset-x-0 bottom-0 rounded-t-[1px] bg-accent-bar transition-colors group-hover:bg-accent"
+                    className="absolute inset-x-0 bottom-0 mx-auto max-w-[72px] rounded-t-sm bg-accent-bar transition-colors group-hover:bg-accent"
                     style={{ height: `${Math.max((d.tapRatePct / maxTapRate) * 100, d.tapRatePct > 0 ? 3 : 1)}%` }}
                   />
                   <span className="pointer-events-none absolute -top-6 left-1/2 hidden -translate-x-1/2 whitespace-nowrap rounded-sm border border-hairline bg-raised px-1.5 py-0.5 text-[10px] text-ink-1 group-hover:block">

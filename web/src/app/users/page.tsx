@@ -19,6 +19,7 @@ import { SectionHeading } from '@/components/SectionHeading'
 import { StatTile } from '@/components/StatTile'
 import { DataTable } from '@/components/DataTable'
 import { StalenessBadge } from '@/components/StalenessBadge'
+import { AutoRefresh } from '@/components/AutoRefresh'
 import { TraderCell } from '@/components/TraderCell'
 import { TimeSeriesBars } from '@/components/TimeSeriesBars'
 
@@ -107,6 +108,7 @@ export default async function UsersPage({
         }
         right={
           <div className="flex items-center gap-4">
+            <AutoRefresh intervalMs={60_000} />
             <StalenessBadge ages={ages} />
             <form action={async () => { 'use server'; await signOut({ redirectTo: '/login' }) }}>
               <button className="text-xs text-ink-2 outline-none transition-colors hover:text-ink-1 focus-visible:ring-2 focus-visible:ring-accent">
@@ -165,9 +167,11 @@ export default async function UsersPage({
               const newPct = total > 0 ? (d.newUsers / maxNvr) * 100 : 0
               const retPct = total > 0 ? (d.returningUsers / maxNvr) * 100 : 0
               return (
-                <div key={d.day} className="group relative flex h-full flex-1 flex-col justify-end">
-                  <div className="rounded-t-[1px] bg-accent transition-opacity group-hover:opacity-80" style={{ height: `${newPct}%` }} />
-                  <div className="bg-accent-bar transition-opacity group-hover:opacity-80" style={{ height: `${retPct}%` }} />
+                <div key={d.day} className="group relative h-full flex-1">
+                  <div className="mx-auto flex h-full w-full max-w-[72px] flex-col justify-end">
+                    <div className="rounded-t-sm bg-accent transition-opacity group-hover:opacity-80" style={{ height: `${newPct}%` }} />
+                    <div className="bg-accent-bar transition-opacity group-hover:opacity-80" style={{ height: `${retPct}%` }} />
+                  </div>
                   <span className="pointer-events-none absolute -top-6 left-1/2 z-10 hidden -translate-x-1/2 whitespace-nowrap rounded-sm border border-hairline bg-raised px-1.5 py-0.5 text-[10px] text-ink-1 group-hover:block">
                     {shortDay(d.day)} · {d.newUsers}n/{d.returningUsers}r
                   </span>
@@ -260,7 +264,7 @@ export default async function UsersPage({
                     the page's primary chart). */}
                 <div className="flex h-16 w-full max-w-8 items-end">
                   <div
-                    className="w-full rounded-t-[1px] bg-accent-bar transition-colors group-hover:bg-accent"
+                    className="w-full rounded-t-sm bg-accent-bar transition-colors group-hover:bg-accent"
                     style={{ height: `${Math.max(pt.avgPct, pt.avgPct > 0 ? 3 : 1)}%` }}
                   />
                 </div>

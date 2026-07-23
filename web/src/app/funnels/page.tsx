@@ -13,6 +13,7 @@ import { SectionHeading } from '@/components/SectionHeading'
 import { BarList } from '@/components/BarList'
 import { DataTable } from '@/components/DataTable'
 import { StalenessBadge } from '@/components/StalenessBadge'
+import { AutoRefresh } from '@/components/AutoRefresh'
 
 export const dynamic = 'force-dynamic'
 
@@ -137,6 +138,7 @@ export default async function FunnelsPage({
         }
         right={
           <div className="flex items-center gap-4">
+            <AutoRefresh intervalMs={60_000} />
             <StalenessBadge ages={ages} />
             <form action={async () => { 'use server'; await signOut({ redirectTo: '/login' }) }}>
               <button className="text-xs text-ink-2 outline-none transition-colors hover:text-ink-1 focus-visible:ring-2 focus-visible:ring-accent">

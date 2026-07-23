@@ -287,7 +287,7 @@ export default async function OverviewPage({
             {hourly.map(h => (
               <div key={h.hour} className="group relative h-full flex-1">
                 <div
-                  className="absolute inset-x-0 bottom-0 rounded-t-[1px] bg-accent-bar transition-colors group-hover:bg-accent"
+                  className="absolute inset-x-0 bottom-0 rounded-t-sm bg-accent-bar transition-colors group-hover:bg-accent"
                   /* A zero hour renders NOTHING, not a 1% stub. The old
                      floor drew a sliver for count === 0 that was visually
                      identical to the 3% floor for a real trace value, so
