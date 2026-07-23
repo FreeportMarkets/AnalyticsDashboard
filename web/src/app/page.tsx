@@ -9,6 +9,7 @@ import {
 } from '@/lib/metrics/overview'
 import { watermarkAge } from '@/lib/metrics/staleness'
 import { NY_TZ } from '@/lib/time'
+import { RANGES, isRangeKey, rangeSpanDays, rangeStart, todayNy, type RangeKey } from '@/lib/ranges'
 import { PageHeader } from '@/components/PageHeader'
 import { SectionHeading } from '@/components/SectionHeading'
 import { StatTile } from '@/components/StatTile'
@@ -18,30 +19,6 @@ import { StalenessBadge } from '@/components/StalenessBadge'
 import { TimeSeriesBars } from '@/components/TimeSeriesBars'
 
 export const dynamic = 'force-dynamic'
-
-const RANGES = {
-  '7d': { label: '7D', days: 7 },
-  '30d': { label: '30D', days: 30 },
-  '90d': { label: '90D', days: 90 },
-} as const
-
-type RangeKey = keyof typeof RANGES
-
-function isRangeKey(v: string | undefined): v is RangeKey {
-  return v === '7d' || v === '30d' || v === '90d'
-}
-
-function today(): string {
-  return new Intl.DateTimeFormat('en-CA', {
-    timeZone: NY_TZ, year: 'numeric', month: '2-digit', day: '2-digit',
-  }).format(new Date())
-}
-
-function addDays(date: string, days: number): string {
-  const d = new Date(`${date}T00:00:00Z`)
-  d.setUTCDate(d.getUTCDate() + days)
-  return d.toISOString().slice(0, 10)
-}
 
 function formatDateRange(start: string, end: string): string {
   const fmt = new Intl.DateTimeFormat('en-US', { month: 'short', day: 'numeric' })
@@ -115,8 +92,8 @@ export default async function OverviewPage({
   const rawRange = typeof params.range === 'string' ? params.range : undefined
   const range: RangeKey = isRangeKey(rawRange) ? rawRange : '7d'
 
-  const [session, end] = [await auth(), today()]
-  const start = addDays(end, -(RANGES[range].days - 1))
+  const [session, end] = [await auth(), todayNy()]
+  const start = rangeStart(end, range)
 
   const [kpis, platforms, events, series, hourly, trades, ages] = await Promise.all([
     kpiSummary(start, end),
@@ -213,7 +190,7 @@ export default async function OverviewPage({
             period" under its own delta -- five identical captions competing
             with the five figures they annotate. */}
         <p className="mt-3 text-xs text-ink-3">
-          Deltas compare against the prior {RANGES[range].days} days.{' '}
+          Deltas compare against the prior {rangeSpanDays(range)} days.{' '}
           <span className="text-ink-2" title={EST_TAG_TITLE}>
             est.
           </span>{' '}

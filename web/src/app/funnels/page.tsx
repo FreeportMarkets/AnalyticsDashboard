@@ -7,6 +7,7 @@ import {
 } from '@/lib/metrics/funnels'
 import { watermarkAge } from '@/lib/metrics/staleness'
 import { NY_TZ } from '@/lib/time'
+import { RANGES, isRangeKey, rangeStart, todayNy, type RangeKey } from '@/lib/ranges'
 import { PageHeader } from '@/components/PageHeader'
 import { SectionHeading } from '@/components/SectionHeading'
 import { BarList } from '@/components/BarList'
@@ -14,18 +15,6 @@ import { DataTable } from '@/components/DataTable'
 import { StalenessBadge } from '@/components/StalenessBadge'
 
 export const dynamic = 'force-dynamic'
-
-const RANGES = {
-  '7d': { label: '7D', days: 7 },
-  '30d': { label: '30D', days: 30 },
-  '90d': { label: '90D', days: 90 },
-} as const
-
-type RangeKey = keyof typeof RANGES
-
-function isRangeKey(v: string | undefined): v is RangeKey {
-  return v === '7d' || v === '30d' || v === '90d'
-}
 
 const WINDOWS = { '1h': 3600, '24h': 86400, '7d': 604800 } as const
 type WindowKey = keyof typeof WINDOWS
@@ -49,18 +38,6 @@ const PRESETS: Array<{ label: string; steps: string[] }> = [
 ]
 
 const STEP_SLOTS = 5
-
-function today(): string {
-  return new Intl.DateTimeFormat('en-CA', {
-    timeZone: NY_TZ, year: 'numeric', month: '2-digit', day: '2-digit',
-  }).format(new Date())
-}
-
-function addDays(date: string, days: number): string {
-  const d = new Date(`${date}T00:00:00Z`)
-  d.setUTCDate(d.getUTCDate() + days)
-  return d.toISOString().slice(0, 10)
-}
 
 function formatDateRange(start: string, end: string): string {
   const fmt = new Intl.DateTimeFormat('en-US', { month: 'short', day: 'numeric' })
@@ -102,8 +79,8 @@ export default async function FunnelsPage({
   const windowKey: WindowKey = isWindowKey(first(params.window)) ? (first(params.window) as WindowKey) : '24h'
   const by: BreakdownDim | undefined = isBreakdownKey(first(params.by)) ? (first(params.by) as BreakdownDim) : undefined
 
-  const [session, end] = [await auth(), today()]
-  const start = addDays(end, -(RANGES[range].days - 1))
+  const [session, end] = [await auth(), todayNy()]
+  const start = rangeStart(end, range)
 
   // Requested steps: either a `steps=a,b,c` query param (preset links, and
   // the shareable/bookmarkable form) or s1..s5 from the builder form below,
