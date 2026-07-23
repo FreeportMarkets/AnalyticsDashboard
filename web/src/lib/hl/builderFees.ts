@@ -7,13 +7,23 @@
  * bottom-up sum of every fill's `builderFee` must equal this to within <1%;
  * that equality is the proof that we enumerated every Freeport wallet.
  *
- * Source: HL `info { type: "referral", user: <builder> }`. Builder fees and
- * referral rewards share one pool (see the backend CLAUDE.md gotcha), so this
- * separates them: `builderRewards` is the pure builder accrual (pending), and
- * the ledger's `rewardsClaim` entries are what was claimed. For the Freeport
- * collector, referral volume is negligible (`cumVlm` ~ $90), so `claimed`
- * here is effectively all builder fees; we still read it from the dedicated
- * fields rather than assume.
+ * Source: HL `info { type: "referral", user: <builder> }`.
+ *
+ * CRITICAL FIELD SEMANTICS (verified against the live collector, do not
+ * "simplify"): in `tokenToState[0]` (USDC),
+ *
+ *     builderRewards === claimedRewards + unclaimedRewards
+ *     20945.20        === 18818.22      + 2126.98
+ *
+ * `builderRewards` is the CUMULATIVE total builder fees ever earned; claimed
+ * and unclaimed are its two halves, NOT separate pools to add on top. An
+ * earlier version summed claimed + builderRewards and double-counted the
+ * claimed half, producing a bogus $39,763 target that made a complete
+ * backfill look like it reconciled at 53%. The total is `builderRewards`.
+ *
+ * Referral rewards share the same HL pool, but for this collector referral
+ * volume is negligible (`cumVlm` ~ $90), so `builderRewards` is effectively
+ * pure builder fees.
  */
 
 import { hlInfoPost } from './client'
@@ -24,9 +34,13 @@ export const FREEPORT_BUILDER_ADDRESS =
 export interface BuilderFeeTotals {
   /** USDC already claimed into the collector wallet. */
   claimedUsdc: number
-  /** USDC accrued but not yet claimed (HL rewards pool). */
+  /** USDC accrued but not yet claimed. */
   pendingUsdc: number
-  /** claimed + pending: total builder fees earned, ever. */
+  /**
+   * Cumulative builder fees earned, ever (= claimed + pending). Read straight
+   * from HL's `builderRewards`, NOT computed as claimed + builderRewards --
+   * see the field-semantics note above. This is the reconciliation target.
+   */
   totalUsdc: number
 }
 
@@ -34,6 +48,7 @@ interface TokenState {
   cumVlm?: string
   unclaimedRewards?: string
   claimedRewards?: string
+  /** Cumulative builder fees ever (= claimedRewards + unclaimedRewards). */
   builderRewards?: string
 }
 interface ReferralResponse {
@@ -56,12 +71,11 @@ export async function builderFeeTotals(
   const ref = (await postFn({ type: 'referral', user: builderAddress })) as ReferralResponse
   const usdc = ref.tokenToState?.find(([token]) => token === 0)?.[1]
 
-  const pendingUsdc = Number(usdc?.builderRewards ?? ref.builderRewards ?? 0)
+  // `builderRewards` is the cumulative total; claimed + unclaimed are its
+  // halves. total = builderRewards (never claimed + builderRewards).
+  const totalUsdc = Number(usdc?.builderRewards ?? ref.builderRewards ?? 0)
   const claimedUsdc = Number(usdc?.claimedRewards ?? 0)
+  const pendingUsdc = Number(usdc?.unclaimedRewards ?? Math.max(0, totalUsdc - claimedUsdc))
 
-  return {
-    claimedUsdc,
-    pendingUsdc,
-    totalUsdc: claimedUsdc + pendingUsdc,
-  }
+  return { claimedUsdc, pendingUsdc, totalUsdc }
 }
