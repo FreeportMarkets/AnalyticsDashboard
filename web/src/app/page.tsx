@@ -9,7 +9,9 @@ import {
 } from '@/lib/metrics/overview'
 import { watermarkAge } from '@/lib/metrics/staleness'
 import { NY_TZ } from '@/lib/time'
-import { RANGES, isRangeKey, rangeSpanDays, rangeStart, todayNy, type RangeKey } from '@/lib/ranges'
+import { RANGES, addDays, isRangeKey, rangeSpanDays, rangeStart, todayNy, type RangeKey } from '@/lib/ranges'
+import { hlVolumeKpi } from '@/lib/metrics/hlVolumeRead'
+import { AutoRefresh } from '@/components/AutoRefresh'
 import { PageHeader } from '@/components/PageHeader'
 import { SectionHeading } from '@/components/SectionHeading'
 import { StatTile } from '@/components/StatTile'
@@ -94,8 +96,10 @@ export default async function OverviewPage({
 
   const [session, end] = [await auth(), todayNy()]
   const start = rangeStart(end, range)
+  const prevEnd = addDays(start, -1)
+  const prevStart = rangeStart(prevEnd, range)
 
-  const [kpis, platforms, events, series, hourly, trades, ages] = await Promise.all([
+  const [kpis, platforms, events, series, hourly, trades, ages, hlVol] = await Promise.all([
     kpiSummary(start, end),
     platformSplit(start, end),
     topEvents(start, end, 8),
@@ -103,9 +107,17 @@ export default async function OverviewPage({
     hourlyActivity(start, end),
     tradeSummary(start, end),
     watermarkAge(),
+    hlVolumeKpi(start, end, prevStart, prevEnd),
   ])
 
   const maxHour = Math.max(...hourly.map(h => h.count), 1)
+
+  // Prefer the HL builder-fee-authoritative volume (exact, per-fill) once the
+  // backfill has populated wallet_volume_daily; fall back to the DB
+  // reconstruction (labeled "est.") until then. See docs/volume-tracking.md.
+  const volume = hlVol.hasData
+    ? { current: hlVol.current, previous: hlVol.previous, source: 'hl' as const }
+    : { current: kpis.volumeUsd.current, previous: kpis.volumeUsd.previous, source: 'est' as const }
 
   return (
     <main className="mx-auto w-full max-w-[1600px] px-8 py-8">
@@ -134,6 +146,7 @@ export default async function OverviewPage({
         }
         right={
           <div className="flex items-center gap-4">
+            <AutoRefresh intervalMs={60_000} />
             <StalenessBadge ages={ages} />
             <form action={async () => { 'use server'; await signOut({ redirectTo: '/login' }) }}>
               <button className="text-xs text-ink-2 outline-none transition-colors hover:text-ink-1 focus-visible:ring-2 focus-visible:ring-accent">
@@ -178,11 +191,13 @@ export default async function OverviewPage({
           </div>
           <div className="sm:pl-6">
             <StatTile
-              label="Volume (est.)"
-              value={kpis.volumeUsd.current}
-              previousValue={kpis.volumeUsd.previous}
+              /* Authoritative (HL per-fill) drops the "est."; the DB-
+                 reconstruction fallback keeps it. */
+              label={volume.source === 'hl' ? 'Volume' : 'Volume (est.)'}
+              value={volume.current}
+              previousValue={volume.previous}
               format={usdAbbrev}
-              valueTitle={usd(kpis.volumeUsd.current)}
+              valueTitle={usd(volume.current)}
             />
           </div>
         </section>
@@ -191,10 +206,14 @@ export default async function OverviewPage({
             with the five figures they annotate. */}
         <p className="mt-3 text-xs text-ink-3">
           Deltas compare against the prior {rangeSpanDays(range)} days.{' '}
-          <span className="text-ink-2" title={EST_TAG_TITLE}>
-            est.
-          </span>{' '}
-          volume includes reconstructed perps volume.
+          {volume.source === 'hl' ? (
+            <>Volume is Hyperliquid per-fill data attributed by builder fee — every fill through Freeport, exact.</>
+          ) : (
+            <>
+              <span className="text-ink-2" title={EST_TAG_TITLE}>est.</span>{' '}
+              volume is reconstructed from the trade log (authoritative HL volume not yet backfilled).
+            </>
+          )}
         </p>
 
         <section aria-label="Daily events" className="mt-8 border-t border-hairline pt-8">

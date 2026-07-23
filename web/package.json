@@ -8,6 +8,7 @@
     "test:watch": "vitest",
     "migrate": "tsx db/migrate.ts",
     "backfill": "tsx scripts/backfill.ts",
+    "backfill:volume": "tsx scripts/backfill-volume.ts",
     "verify": "tsx scripts/verify.ts",
     "lint:dates": "tsx scripts/lint-no-date-grouping.ts"
   },

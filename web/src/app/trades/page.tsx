@@ -17,8 +17,10 @@ import { SectionHeading } from '@/components/SectionHeading'
 import { StatTile } from '@/components/StatTile'
 import { BarList } from '@/components/BarList'
 import { DataTable } from '@/components/DataTable'
+import { TimeSeriesLine } from '@/components/TimeSeriesLine'
 import { StalenessBadge } from '@/components/StalenessBadge'
 import { TraderCell } from '@/components/TraderCell'
+import { AutoRefresh } from '@/components/AutoRefresh'
 
 export const dynamic = 'force-dynamic'
 
@@ -97,7 +99,6 @@ export default async function TradesPage({
 
   const swap = vol.byType.find(t => t.type === 'swap') ?? { type: 'swap', count: 0, volumeUsd: 0 }
   const perps = vol.byType.find(t => t.type === 'perps') ?? { type: 'perps', count: 0, volumeUsd: 0 }
-  const maxDailyTotal = Math.max(...daily.map(d => d.swapVolumeUsd + d.perpsVolumeUsd), 1)
 
   return (
     <main className="mx-auto w-full max-w-[1600px] px-8 py-8">
@@ -124,6 +125,7 @@ export default async function TradesPage({
         }
         right={
           <div className="flex items-center gap-4">
+            <AutoRefresh intervalMs={60_000} />
             <StalenessBadge ages={ages} />
             <form action={async () => { 'use server'; await signOut({ redirectTo: '/login' }) }}>
               <button className="text-xs text-ink-2 outline-none transition-colors hover:text-ink-1 focus-visible:ring-2 focus-visible:ring-accent">
@@ -192,33 +194,22 @@ export default async function TradesPage({
           <SectionHeading>
             Daily trades & volume <EstTag />
           </SectionHeading>
-          <div className="mt-4 flex h-32 items-end gap-[3px] overflow-x-auto">
-            {daily.map(d => {
-              const total = d.swapVolumeUsd + d.perpsVolumeUsd
-              const heightPct = Math.max((total / maxDailyTotal) * 100, total > 0 ? 3 : 1)
-              const swapShare = total > 0 ? (d.swapVolumeUsd / total) * 100 : 0
-              return (
-                <div key={d.day} className="group relative h-full min-w-[6px] flex-1">
-                  <div
-                    className="flex w-full flex-col justify-end overflow-hidden rounded-t-[1px]"
-                    style={{ height: `${heightPct}%` }}
-                  >
-                    <div className="w-full bg-accent" style={{ height: `${100 - swapShare}%` }} />
-                    <div className="w-full bg-accent-bar" style={{ height: `${swapShare}%` }} />
-                  </div>
-                  <span className="pointer-events-none absolute -top-14 left-1/2 z-10 hidden w-max -translate-x-1/2 flex-col rounded-sm border border-hairline bg-raised px-2 py-1 text-[10px] text-ink-1 group-hover:flex">
-                    <span className="text-ink-2">{d.day}</span>
-                    <span>{compact(d.tradeCount)} trades</span>
-                    <span>swap {usd(d.swapVolumeUsd)}</span>
-                    <span>perps {usd(d.perpsVolumeUsd)} est.</span>
-                  </span>
-                </div>
-              )
-            })}
-          </div>
-          <div className="mt-2 flex items-center gap-4 text-xs text-ink-3">
-            <span className="flex items-center gap-1.5"><span className="h-2 w-2 rounded-full bg-accent-bar" aria-hidden="true" />Swap</span>
-            <span className="flex items-center gap-1.5"><span className="h-2 w-2 rounded-full bg-accent" aria-hidden="true" />Perps (est.)</span>
+          <div className="mt-4">
+            <TimeSeriesLine
+              data={daily.map(d => ({
+                day: d.day,
+                value: d.swapVolumeUsd + d.perpsVolumeUsd,
+                tooltip: (
+                  <>
+                    <span className="numeral">{usd(d.swapVolumeUsd + d.perpsVolumeUsd)} total</span>
+                    <span className="text-ink-3">{compact(d.tradeCount)} trades</span>
+                    <span className="text-ink-3">perps {usd(d.perpsVolumeUsd)} · swap {usd(d.swapVolumeUsd)}</span>
+                  </>
+                ),
+              }))}
+              formatValue={usd}
+              formatDay={d => new Intl.DateTimeFormat('en-US', { month: 'short', day: 'numeric' }).format(new Date(`${d}T12:00:00Z`))}
+            />
           </div>
           <div className="mt-5">
             <DataTable
