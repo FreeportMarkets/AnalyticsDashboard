@@ -9,6 +9,7 @@ import {
 import { watermarkAge } from '@/lib/metrics/staleness'
 import { NY_TZ } from '@/lib/time'
 import { PageHeader } from '@/components/PageHeader'
+import { SectionHeading } from '@/components/SectionHeading'
 import { StatTile } from '@/components/StatTile'
 import { BarList } from '@/components/BarList'
 import { DataTable } from '@/components/DataTable'
@@ -89,7 +90,7 @@ export default async function NotificationsPage({
     : 0
 
   return (
-    <main className="mx-auto max-w-6xl px-6 py-8">
+    <main className="mx-auto w-full max-w-[1600px] px-8 py-8">
       <PageHeader
         title="Notifications"
         subtitle={
@@ -103,7 +104,7 @@ export default async function NotificationsPage({
                   aria-current={key === range ? 'true' : undefined}
                   className={`numeral rounded-sm px-2 py-0.5 text-xs outline-none transition-colors focus-visible:ring-2 focus-visible:ring-accent ${
                     key === range
-                      ? 'bg-surface text-ink-1'
+                      ? 'bg-raised font-medium text-ink-1'
                       : 'text-ink-3 hover:text-ink-1'
                   }`}
                 >
@@ -117,7 +118,7 @@ export default async function NotificationsPage({
       />
 
       <div key={range} className="animate-content-fade">
-        <section aria-label="Key metrics" className="mt-8 grid gap-x-6 divide-y divide-hairline/60 sm:grid-cols-5 sm:divide-x sm:divide-y-0">
+        <section aria-label="Key metrics" className="mt-8 grid gap-x-6 divide-y divide-hairline sm:grid-cols-5 sm:divide-x sm:divide-y-0">
           <StatTile
             label="Sent"
             value={summary.sent}
@@ -155,10 +156,10 @@ export default async function NotificationsPage({
 
         <section
           aria-label="Sends and tap rate"
-          className="mt-10 grid items-start gap-x-10 gap-y-8 divide-y divide-hairline/60 border-t border-hairline/60 pt-8 md:grid-cols-2 md:divide-x md:divide-y-0"
+          className="mt-10 grid items-start gap-x-10 gap-y-8 divide-y divide-hairline border-t border-hairline pt-8 md:grid-cols-2 md:divide-x md:divide-y-0"
         >
           <div>
-            <h2 className="text-xs font-semibold uppercase tracking-wide text-ink-2">Sends by type</h2>
+            <SectionHeading>Sends by type</SectionHeading>
             <div className="mt-3">
               <BarList
                 items={byType.map(t => ({
@@ -171,17 +172,15 @@ export default async function NotificationsPage({
             </div>
           </div>
           <div className="pt-8 md:pl-10 md:pt-0">
-            <h2 className="text-xs font-semibold uppercase tracking-wide text-ink-2">
-              Tap rate by day · {NY_TZ}
-            </h2>
+            <SectionHeading meta={NY_TZ}>Tap rate by day</SectionHeading>
             <div className="mt-4 flex h-20 items-end gap-[3px]">
               {byDay.map(d => (
                 <div key={d.day} className="group relative h-full flex-1">
                   <div
-                    className="absolute inset-x-0 bottom-0 rounded-t-[1px] bg-accent-dim transition-colors group-hover:bg-accent"
+                    className="absolute inset-x-0 bottom-0 rounded-t-[1px] bg-accent-bar transition-colors group-hover:bg-accent"
                     style={{ height: `${Math.max((d.tapRatePct / maxTapRate) * 100, d.tapRatePct > 0 ? 3 : 1)}%` }}
                   />
-                  <span className="pointer-events-none absolute -top-6 left-1/2 hidden -translate-x-1/2 whitespace-nowrap rounded-sm bg-surface px-1.5 py-0.5 text-[10px] text-ink-1 group-hover:block">
+                  <span className="pointer-events-none absolute -top-6 left-1/2 hidden -translate-x-1/2 whitespace-nowrap rounded-sm border border-hairline bg-raised px-1.5 py-0.5 text-[10px] text-ink-1 group-hover:block">
                     {d.day} · {pct(d.tapRatePct)}
                   </span>
                 </div>
@@ -196,10 +195,10 @@ export default async function NotificationsPage({
 
         <section
           aria-label="Tapped tickers and engaged users"
-          className="mt-8 grid items-start gap-x-10 gap-y-8 divide-y divide-hairline/60 border-t border-hairline/60 pt-8 md:grid-cols-2 md:divide-x md:divide-y-0"
+          className="mt-8 grid items-start gap-x-10 gap-y-8 divide-y divide-hairline border-t border-hairline pt-8 md:grid-cols-2 md:divide-x md:divide-y-0"
         >
           <div>
-            <h2 className="text-xs font-semibold uppercase tracking-wide text-ink-2">Most tapped tickers</h2>
+            <SectionHeading>Most tapped tickers</SectionHeading>
             <div className="mt-3">
               <BarList
                 items={tickers.map(t => ({ label: t.ticker, value: t.taps }))}
@@ -208,7 +207,7 @@ export default async function NotificationsPage({
             </div>
           </div>
           <div className="pt-8 md:pl-10 md:pt-0">
-            <h2 className="text-xs font-semibold uppercase tracking-wide text-ink-2">Most engaged users</h2>
+            <SectionHeading>Most engaged users</SectionHeading>
             <div className="mt-3">
               <BarList
                 items={users.map(u => ({
@@ -222,11 +221,11 @@ export default async function NotificationsPage({
           </div>
         </section>
 
-        <section aria-label="Time to trade after tap" className="mt-8 border-t border-hairline/60 pt-8">
-          <h2 className="text-xs font-semibold uppercase tracking-wide text-ink-2">
+        <section aria-label="Time to trade after tap" className="mt-8 border-t border-hairline pt-8">
+          <SectionHeading>
             Time to trade after notification tap
-          </h2>
-          <div className="mt-4 grid gap-x-6 divide-y divide-hairline/60 sm:grid-cols-4 sm:divide-x sm:divide-y-0">
+          </SectionHeading>
+          <div className="mt-4 grid gap-x-6 divide-y divide-hairline sm:grid-cols-4 sm:divide-x sm:divide-y-0">
             <StatTile label="Taps" value={timeToTrade.totalTaps} format={compact} />
             <div className="sm:pl-6">
               <StatTile label="Traded within 1h" value={timeToTrade.tradedWithin1h} format={compact} />
@@ -252,8 +251,8 @@ export default async function NotificationsPage({
           </div>
         </section>
 
-        <section aria-label="Engaged users detail" className="mt-8 border-t border-hairline/60 pt-8">
-          <h2 className="text-xs font-semibold uppercase tracking-wide text-ink-2">Engaged users detail</h2>
+        <section aria-label="Engaged users detail" className="mt-8 border-t border-hairline pt-8">
+          <SectionHeading>Engaged users detail</SectionHeading>
           <div className="mt-3">
             <DataTable
               rowKey={row => row.walletAddress}

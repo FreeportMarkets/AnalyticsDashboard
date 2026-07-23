@@ -3,38 +3,61 @@
 /*
  * Operator-console design tokens.
  *
- * Thesis: near-black surfaces, hairline rules instead of card chrome,
- * tabular monospace numerals so columns align and scan cleanly. ONE cyan
- * accent for the active/primary series. ONE amber, reserved exclusively for
- * staleness / alert states -- never decorative.
+ * Thesis: a mid-dark console with a REAL elevation ramp, tabular monospace
+ * numerals so columns align and scan cleanly. ONE cyan accent for the
+ * active/primary series. ONE amber, reserved exclusively for staleness /
+ * alert states -- never decorative.
+ *
+ * Written in OKLCH so the ramp is legible as a ramp: every neutral below
+ * shares chroma 0.007-0.011 at hue 255 (a whisper of the accent's own blue,
+ * not a default-warm tint) and differs only in L. That makes elevation a
+ * single number you can reason about.
+ *
+ * WHY THIS REPLACED THE NEAR-BLACK RAMP: the previous canvas/surface pair
+ * (#09090b / #0e0f12) measured 1.04:1 -- not an elevation step, just noise.
+ * Every hover fill, active nav item, tooltip and bar track in the app is
+ * drawn with that pair, so none of them were visible. Hairline at #27272a/60
+ * came to ~1.14:1 against canvas, so the rules that were supposed to replace
+ * card chrome weren't visible either, and the whole app read as one flat
+ * void. Bars were #164e63 on that surface: 2.10:1, a dark smudge.
+ *
+ * Do not judge the surface steps by WCAG ratio -- WCAG is a text-legibility
+ * metric and understates large-area separation at low luminance. Judge them
+ * by the OKLCH L delta, which is perceptually uniform: 0.05 between canvas
+ * and surface, 0.05 again to raised, is one clear step each.
  *
  * @theme registers these as Tailwind v4 utilities (CSS-first, no config
  * file): each --color-x below yields bg-x, text-x, and border-x utilities;
  * --font-tab yields the font-tab utility.
  */
 @theme {
-  --color-canvas: #09090b;      /* page background, near-black */
-  --color-surface: #0e0f12;     /* slightly elevated: sticky header, hover fill */
-  --color-hairline: #27272a;    /* divider rule -- pair with /60 opacity, e.g. border-hairline/60 */
+  /* Elevation ramp. L is the only variable. */
+  --color-rail: oklch(0.215 0.007 255);     /* left nav -- recedes BELOW canvas */
+  --color-canvas: oklch(0.255 0.008 255);   /* page background */
+  --color-surface: oklch(0.315 0.010 255);  /* panels, bar tracks, hover fill */
+  --color-raised: oklch(0.370 0.011 255);   /* table headers, tooltips, chips */
+  --color-hairline: oklch(0.420 0.012 255); /* divider rule -- use at FULL opacity */
 
-  --color-ink-1: #f4f4f5;       /* primary text -- values, headings */
-  --color-ink-2: #a1a1aa;       /* secondary text -- labels, captions */
-  /* tertiary text -- disabled, placeholder, truncated wallet addresses.
-   * #52525b measured 2.57:1 vs --color-canvas and 2.48:1 vs --color-surface
-   * -- both fail WCAG AA (4.5:1) for normal-size text. #828282 clears both
-   * (5.18:1 canvas, 4.99:1 surface; WCAG relative-luminance formula) while
-   * staying visibly dimmer than ink-2 (7.76:1 / 7.48:1) so the hierarchy
-   * survives. */
-  --color-ink-3: #828282;
+  --color-ink-1: oklch(0.970 0.002 255);    /* primary -- values, headings */
+  --color-ink-2: oklch(0.790 0.010 255);    /* secondary -- labels, captions */
+  /* Tertiary -- axis ticks, wallet addresses, disabled. 5.2:1 on canvas, so
+   * it clears WCAG AA for normal text while staying visibly below ink-2
+   * (9.1:1). Anything dimmer than this fails at the 10px sizes it gets used
+   * at, whatever the ratio says. */
+  --color-ink-3: oklch(0.640 0.012 255);
 
-  --color-accent: #22d3ee;      /* the one cyan: active/primary series */
-  --color-accent-dim: #164e63;  /* cyan at low emphasis: bars, fills */
+  --color-accent: oklch(0.800 0.130 215);   /* the one cyan: hover, active, focus */
+  /* Resting bar/series fill. This is the accent at lower L -- NOT a separate
+   * desaturated token. 5.1:1 against its own surface track, so a bar is
+   * readable standing still; `accent` is then the hover step on top of it.
+   * The old accent-dim was 2.10:1, which made hover the ONLY visible state. */
+  --color-accent-bar: oklch(0.660 0.115 218);
 
-  --color-alert: #f59e0b;       /* the one amber: staleness / alert ONLY */
-  --color-alert-dim: #451a03;
+  --color-alert: oklch(0.800 0.150 78);     /* the one amber: staleness / alert ONLY */
+  --color-alert-dim: oklch(0.320 0.070 78);
 
-  --color-positive: #4ade80;    /* delta up */
-  --color-negative: #f87171;    /* delta down */
+  --color-positive: oklch(0.790 0.155 152); /* delta up */
+  --color-negative: oklch(0.720 0.160 25);  /* delta down */
 
   --font-tab:
     ui-monospace, "SF Mono", "SFMono-Regular", "Cascadia Code", "Roboto Mono",

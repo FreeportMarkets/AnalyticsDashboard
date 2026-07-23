@@ -50,15 +50,27 @@ export function TimeSeriesBars({
           {formatValue(max)}
         </div>
         <div className="relative min-w-0 flex-1" style={{ height }}>
-          <div className="absolute inset-x-0 top-0 border-t border-hairline/60" aria-hidden="true" />
-          <div className="flex h-full items-end gap-px">
+          <div className="absolute inset-x-0 top-0 border-t border-hairline" aria-hidden="true" />
+          {/* Baseline. Without it the bars float against the page and you
+              can't tell a short bar from a cropped one. */}
+          <div className="absolute inset-x-0 bottom-0 border-b border-hairline" aria-hidden="true" />
+          <div className="flex h-full items-end gap-[3px]">
             {data.map(d => (
               <div key={d.day} className="group relative h-full min-w-0 flex-1">
+                {/*
+                 * Capped at 88px and centred in its slot. Uncapped, a 7-day
+                 * range on a 1600px page draws seven ~200px-wide blocks --
+                 * at that width the chart stops reading as a chart and
+                 * becomes a wall of colour. The cap only ever engages on
+                 * short ranges; at 30d/90d the bars are naturally thinner
+                 * and the slot width wins. Centring keeps each bar aligned
+                 * with its own flex-1 x-axis tick below.
+                 */}
                 <div
-                  className="absolute inset-x-0 bottom-0 rounded-t-[1px] bg-accent-dim transition-colors group-hover:bg-accent"
+                  className="absolute inset-x-0 bottom-0 mx-auto max-w-[88px] rounded-t-sm bg-accent-bar transition-colors group-hover:bg-accent"
                   style={{ height: `${Math.max((d.value / max) * 100, d.value > 0 ? 1.5 : 0)}%` }}
                 />
-                <span className="pointer-events-none absolute -top-6 left-1/2 z-10 hidden -translate-x-1/2 whitespace-nowrap rounded-sm bg-surface px-1.5 py-0.5 text-[10px] text-ink-1 group-hover:block">
+                <span className="pointer-events-none absolute -top-6 left-1/2 z-10 hidden -translate-x-1/2 whitespace-nowrap rounded-sm border border-hairline bg-raised px-1.5 py-0.5 text-[10px] text-ink-1 group-hover:block">
                   {formatDay(d.day)} · {formatValue(d.value)}
                 </span>
               </div>

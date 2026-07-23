@@ -8,6 +8,7 @@ import {
 import { watermarkAge } from '@/lib/metrics/staleness'
 import { NY_TZ } from '@/lib/time'
 import { PageHeader } from '@/components/PageHeader'
+import { SectionHeading } from '@/components/SectionHeading'
 import { BarList } from '@/components/BarList'
 import { DataTable } from '@/components/DataTable'
 import { StalenessBadge } from '@/components/StalenessBadge'
@@ -135,7 +136,7 @@ export default async function FunnelsPage({
   const maxUsers = Math.max(funnel?.steps[0]?.users ?? 1, 1)
 
   return (
-    <main className="mx-auto max-w-6xl px-6 py-8">
+    <main className="mx-auto w-full max-w-[1600px] px-8 py-8">
       <PageHeader
         title="Funnels"
         subtitle={
@@ -148,7 +149,7 @@ export default async function FunnelsPage({
                   href={hrefWith(current, { range: key })}
                   aria-current={key === range ? 'true' : undefined}
                   className={`numeral rounded-sm px-2 py-0.5 text-xs outline-none transition-colors focus-visible:ring-2 focus-visible:ring-accent ${
-                    key === range ? 'bg-surface text-ink-1' : 'text-ink-3 hover:text-ink-1'
+                    key === range ? 'bg-raised font-medium text-ink-1' : 'text-ink-3 hover:text-ink-1'
                   }`}
                 >
                   {RANGES[key].label}
@@ -171,7 +172,7 @@ export default async function FunnelsPage({
 
       <div key={`${range}-${requestedSteps.join(',')}-${windowKey}-${by ?? ''}`} className="animate-content-fade">
         <section aria-label="Presets" className="mt-8">
-          <h2 className="text-xs font-semibold uppercase tracking-wide text-ink-2">Presets</h2>
+          <SectionHeading>Presets</SectionHeading>
           <div className="mt-3 flex flex-wrap gap-2">
             {PRESETS.map(preset => {
               const active = preset.steps.join(',') === validSteps.join(',') && requestedSteps.length === preset.steps.length
@@ -183,7 +184,7 @@ export default async function FunnelsPage({
                   className={`rounded-sm border px-3 py-1.5 text-sm outline-none transition-colors focus-visible:ring-2 focus-visible:ring-accent ${
                     active
                       ? 'border-accent bg-surface text-ink-1'
-                      : 'border-hairline/60 text-ink-2 hover:bg-surface hover:text-ink-1'
+                      : 'border-hairline text-ink-2 hover:bg-surface hover:text-ink-1'
                   }`}
                 >
                   {preset.label}
@@ -193,8 +194,8 @@ export default async function FunnelsPage({
           </div>
         </section>
 
-        <section aria-label="Build a funnel" className="mt-8 border-t border-hairline/60 pt-8">
-          <h2 className="text-xs font-semibold uppercase tracking-wide text-ink-2">Build a funnel</h2>
+        <section aria-label="Build a funnel" className="mt-8 border-t border-hairline pt-8">
+          <SectionHeading>Build a funnel</SectionHeading>
           <form method="GET" action="/funnels" className="mt-3 flex flex-wrap items-end gap-4">
             <input type="hidden" name="range" value={range} />
             {Array.from({ length: STEP_SLOTS }, (_, i) => {
@@ -205,7 +206,7 @@ export default async function FunnelsPage({
                   <select
                     name={`s${i + 1}`}
                     defaultValue={slotValue}
-                    className="numeral rounded-sm border border-hairline/60 bg-canvas px-2 py-1.5 text-sm text-ink-1 outline-none focus-visible:ring-2 focus-visible:ring-accent"
+                    className="numeral rounded-sm border border-hairline bg-canvas px-2 py-1.5 text-sm text-ink-1 outline-none focus-visible:ring-2 focus-visible:ring-accent"
                   >
                     <option value="">{'—'}</option>
                     {eventNames.map(name => (
@@ -220,7 +221,7 @@ export default async function FunnelsPage({
               <select
                 name="window"
                 defaultValue={windowKey}
-                className="numeral rounded-sm border border-hairline/60 bg-canvas px-2 py-1.5 text-sm text-ink-1 outline-none focus-visible:ring-2 focus-visible:ring-accent"
+                className="numeral rounded-sm border border-hairline bg-canvas px-2 py-1.5 text-sm text-ink-1 outline-none focus-visible:ring-2 focus-visible:ring-accent"
               >
                 {(Object.keys(WINDOWS) as WindowKey[]).map(key => (
                   <option key={key} value={key}>{key}</option>
@@ -232,7 +233,7 @@ export default async function FunnelsPage({
               <select
                 name="by"
                 defaultValue={by ?? ''}
-                className="numeral rounded-sm border border-hairline/60 bg-canvas px-2 py-1.5 text-sm text-ink-1 outline-none focus-visible:ring-2 focus-visible:ring-accent"
+                className="numeral rounded-sm border border-hairline bg-canvas px-2 py-1.5 text-sm text-ink-1 outline-none focus-visible:ring-2 focus-visible:ring-accent"
               >
                 <option value="">None</option>
                 <option value="platform">Platform</option>
@@ -241,17 +242,17 @@ export default async function FunnelsPage({
             </label>
             <button
               type="submit"
-              className="rounded-sm border border-hairline/60 bg-surface px-3 py-1.5 text-sm text-ink-1 outline-none transition-colors hover:border-accent focus-visible:ring-2 focus-visible:ring-accent"
+              className="rounded-sm border border-hairline bg-surface px-3 py-1.5 text-sm text-ink-1 outline-none transition-colors hover:border-accent focus-visible:ring-2 focus-visible:ring-accent"
             >
               Run funnel
             </button>
           </form>
         </section>
 
-        <section aria-label="Funnel result" className="mt-8 border-t border-hairline/60 pt-8">
-          <h2 className="text-xs font-semibold uppercase tracking-wide text-ink-2">
+        <section aria-label="Funnel result" className="mt-8 border-t border-hairline pt-8">
+          <SectionHeading>
             {requestedSteps.length > 0 ? requestedSteps.join(' → ') : 'Funnel'}
-          </h2>
+          </SectionHeading>
 
           {invalidSteps.length > 0 && (
             <p className="mt-3 text-sm text-alert">
@@ -275,7 +276,7 @@ export default async function FunnelsPage({
                       {i + 1}. {step.event}
                     </div>
                     <div className="relative h-6 min-w-0 flex-1 overflow-hidden rounded-sm bg-surface">
-                      <div className="h-full rounded-sm bg-accent-dim" style={{ width: `${width}%` }} />
+                      <div className="h-full rounded-sm bg-accent-bar" style={{ width: `${width}%` }} />
                     </div>
                     <div className="numeral w-16 shrink-0 text-right text-sm text-ink-1">
                       {compact(step.users)}
@@ -294,9 +295,9 @@ export default async function FunnelsPage({
 
           {funnel?.breakdown && funnel.breakdown.length > 0 && (
             <div className="mt-6">
-              <h3 className="text-xs font-semibold uppercase tracking-wide text-ink-2">
+              <SectionHeading as="h3">
                 Breakdown by {by === 'app_version' ? 'app version' : by}
-              </h3>
+              </SectionHeading>
               <div className="mt-3">
                 <DataTable
                   rowKey={row => `${row.event}-${row.dimValue}`}
@@ -312,8 +313,8 @@ export default async function FunnelsPage({
           )}
         </section>
 
-        <section aria-label="Feature engagement" className="mt-8 border-t border-hairline/60 pt-8">
-          <h2 className="text-xs font-semibold uppercase tracking-wide text-ink-2">Feature engagement</h2>
+        <section aria-label="Feature engagement" className="mt-8 border-t border-hairline pt-8">
+          <SectionHeading>Feature engagement</SectionHeading>
           <p className="mt-1 text-xs text-ink-3">Total events and distinct users per event type in this range.</p>
           <div className="mt-3">
             <BarList

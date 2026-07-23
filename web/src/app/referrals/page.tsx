@@ -10,6 +10,7 @@ import { fetchPrivyUserByDid, type DidIdentity } from '@/lib/privy'
 import { sql } from '@/lib/db'
 import { fetchIdentitiesByDid } from '@/lib/privyIdentities'
 import { PageHeader } from '@/components/PageHeader'
+import { SectionHeading } from '@/components/SectionHeading'
 import { StatTile } from '@/components/StatTile'
 import { DataTable } from '@/components/DataTable'
 import { createPromoCodeAction, disablePromoCodeAction, attachBeneficiaryAction } from './actions'
@@ -104,7 +105,7 @@ async function resolveDidLabels(dids: Iterable<string>, didMap: Map<string, DidI
 }
 
 const inputCls =
-  'w-full rounded-sm border border-hairline/60 bg-surface px-2 py-1.5 text-sm text-ink-1 outline-none transition-colors focus:border-accent'
+  'w-full rounded-sm border border-hairline bg-surface px-2 py-1.5 text-sm text-ink-1 outline-none transition-colors focus:border-accent'
 const labelCls = 'block text-xs uppercase tracking-wide text-ink-2'
 const fieldCls = 'space-y-1'
 
@@ -155,7 +156,7 @@ export default async function ReferralsPage({
     .sort((a, b) => (b.current_redemptions ?? 0) - (a.current_redemptions ?? 0))
 
   return (
-    <main className="mx-auto max-w-6xl px-6 py-8">
+    <main className="mx-auto w-full max-w-[1600px] px-8 py-8">
       <PageHeader
         title="Referrals — Promo Codes"
         subtitle={
@@ -189,7 +190,7 @@ export default async function ReferralsPage({
         )}
 
         {/* --- KPIs --- */}
-        <section aria-label="Promo code KPIs" className="mt-8 grid gap-x-6 divide-y divide-hairline/60 sm:grid-cols-4 sm:divide-x sm:divide-y-0">
+        <section aria-label="Promo code KPIs" className="mt-8 grid gap-x-6 divide-y divide-hairline sm:grid-cols-4 sm:divide-x sm:divide-y-0">
           <StatTile label="Total codes" value={totalCodes} format={compact} />
           <div className="sm:pl-6">
             <StatTile label="Active" value={activeCount} format={compact} />
@@ -203,8 +204,8 @@ export default async function ReferralsPage({
         </section>
 
         {/* --- Codes table --- */}
-        <section aria-label="Promo codes" className="mt-8 border-t border-hairline/60 pt-8">
-          <h2 className="text-xs font-semibold uppercase tracking-wide text-ink-2">Promo codes</h2>
+        <section aria-label="Promo codes" className="mt-8 border-t border-hairline pt-8">
+          <SectionHeading>Promo codes</SectionHeading>
           <div className="mt-3">
             <DataTable
               rowKey={row => row.code}
@@ -239,8 +240,8 @@ export default async function ReferralsPage({
         </section>
 
         {/* --- Inspect redemptions --- */}
-        <section aria-label="Inspect redemptions" className="mt-8 border-t border-hairline/60 pt-8">
-          <h2 className="text-xs font-semibold uppercase tracking-wide text-ink-2">Inspect redemptions</h2>
+        <section aria-label="Inspect redemptions" className="mt-8 border-t border-hairline pt-8">
+          <SectionHeading>Inspect redemptions</SectionHeading>
           {inspectable.length === 0 ? (
             <p className="mt-2 text-xs text-ink-3">No redemptions to inspect yet.</p>
           ) : (
@@ -259,7 +260,7 @@ export default async function ReferralsPage({
                     ))}
                   </select>
                 </div>
-                <button type="submit" className="rounded-sm border border-hairline/60 px-3 py-1.5 text-xs text-ink-1 hover:bg-surface">
+                <button type="submit" className="rounded-sm border border-hairline px-3 py-1.5 text-xs text-ink-1 hover:bg-surface">
                   Inspect
                 </button>
               </form>
@@ -301,8 +302,8 @@ export default async function ReferralsPage({
         </section>
 
         {/* --- Create code --- */}
-        <section aria-label="Create a promo code" className="mt-8 border-t border-hairline/60 pt-8">
-          <h2 className="text-xs font-semibold uppercase tracking-wide text-ink-2">Create a new promo code</h2>
+        <section aria-label="Create a promo code" className="mt-8 border-t border-hairline pt-8">
+          <SectionHeading>Create a new promo code</SectionHeading>
           <form action={createPromoCodeAction} className="mt-3 max-w-xl space-y-4">
             <div className={fieldCls}>
               <label className={labelCls} htmlFor="c-code">Code (alphanumeric + _-, 2-64 chars)</label>
@@ -319,7 +320,7 @@ export default async function ReferralsPage({
               </select>
             </div>
 
-            <fieldset className="rounded-sm border border-hairline/60 p-3">
+            <fieldset className="rounded-sm border border-hairline p-3">
               <legend className="px-1 text-xs uppercase tracking-wide text-ink-2">Reward value — fill only the fields for the selected kind</legend>
               <div className="grid grid-cols-2 gap-3">
                 <div className={fieldCls}>
@@ -357,7 +358,7 @@ export default async function ReferralsPage({
               </div>
             </div>
 
-            <fieldset className="rounded-sm border border-hairline/60 p-3">
+            <fieldset className="rounded-sm border border-hairline p-3">
               <legend className="px-1 text-xs uppercase tracking-wide text-ink-2">Champion kickback (optional, points-only)</legend>
               <div className="grid grid-cols-3 gap-3">
                 <div className={fieldCls}>
@@ -382,8 +383,8 @@ export default async function ReferralsPage({
         </section>
 
         {/* --- Disable code --- */}
-        <section aria-label="Disable a promo code" className="mt-8 border-t border-hairline/60 pt-8">
-          <h2 className="text-xs font-semibold uppercase tracking-wide text-ink-2">Disable / revoke an active code</h2>
+        <section aria-label="Disable a promo code" className="mt-8 border-t border-hairline pt-8">
+          <SectionHeading>Disable / revoke an active code</SectionHeading>
           {activeCodes.length === 0 ? (
             <p className="mt-2 text-xs text-ink-3">No active codes to disable.</p>
           ) : (
@@ -417,8 +418,8 @@ export default async function ReferralsPage({
         </section>
 
         {/* --- Attach beneficiary --- */}
-        <section aria-label="Attach champion beneficiary" className="mt-8 border-t border-hairline/60 pt-8">
-          <h2 className="text-xs font-semibold uppercase tracking-wide text-ink-2">Attach champion beneficiary to a code</h2>
+        <section aria-label="Attach champion beneficiary" className="mt-8 border-t border-hairline pt-8">
+          <SectionHeading>Attach champion beneficiary to a code</SectionHeading>
           {codes.length === 0 ? (
             <p className="mt-2 text-xs text-ink-3">No codes available.</p>
           ) : (
@@ -446,7 +447,7 @@ export default async function ReferralsPage({
                 <input type="checkbox" name="force" className="rounded-sm" />
                 Force-overwrite an existing beneficiary
               </label>
-              <button type="submit" className="rounded-sm border border-hairline/60 px-3 py-1.5 text-xs text-ink-1 hover:bg-surface">
+              <button type="submit" className="rounded-sm border border-hairline px-3 py-1.5 text-xs text-ink-1 hover:bg-surface">
                 Attach beneficiary
               </button>
             </form>
@@ -454,8 +455,8 @@ export default async function ReferralsPage({
         </section>
 
         {/* --- Top personal referrers --- */}
-        <section aria-label="Top personal referrers" className="mt-8 border-t border-hairline/60 pt-8">
-          <h2 className="text-xs font-semibold uppercase tracking-wide text-ink-2">Top personal referrers</h2>
+        <section aria-label="Top personal referrers" className="mt-8 border-t border-hairline pt-8">
+          <SectionHeading>Top personal referrers</SectionHeading>
           <p className="mt-1 text-xs text-ink-3">
             Users who have referred the most other accounts via their personal FREE-XXXXXX code.
           </p>

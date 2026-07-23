@@ -14,6 +14,7 @@ import { NY_TZ } from '@/lib/time'
 import { sql } from '@/lib/db'
 import { fetchWalletIdentities } from '@/lib/privyIdentities'
 import { PageHeader } from '@/components/PageHeader'
+import { SectionHeading } from '@/components/SectionHeading'
 import { StatTile } from '@/components/StatTile'
 import { DataTable } from '@/components/DataTable'
 import { StalenessBadge } from '@/components/StalenessBadge'
@@ -103,7 +104,7 @@ export default async function UsersPage({
   const heatByKey = new Map(heatmap.map(c => [`${c.dayOfWeek}-${c.hour}`, c.count]))
 
   return (
-    <main className="mx-auto max-w-6xl px-6 py-8">
+    <main className="mx-auto w-full max-w-[1600px] px-8 py-8">
       <PageHeader
         title="Users & Retention"
         subtitle={
@@ -117,7 +118,7 @@ export default async function UsersPage({
                   aria-current={key === range ? 'true' : undefined}
                   className={`numeral rounded-sm px-2 py-0.5 text-xs outline-none transition-colors focus-visible:ring-2 focus-visible:ring-accent ${
                     key === range
-                      ? 'bg-surface text-ink-1'
+                      ? 'bg-raised font-medium text-ink-1'
                       : 'text-ink-3 hover:text-ink-1'
                   }`}
                 >
@@ -140,7 +141,7 @@ export default async function UsersPage({
       />
 
       <div key={range} className="animate-content-fade">
-        <section aria-label="Key metrics" className="mt-8 grid gap-x-6 divide-y divide-hairline/60 sm:grid-cols-5 sm:divide-x sm:divide-y-0">
+        <section aria-label="Key metrics" className="mt-8 grid gap-x-6 divide-y divide-hairline sm:grid-cols-5 sm:divide-x sm:divide-y-0">
           <StatTile label="DAU" value={au.dau} format={compact} />
           <div className="sm:pl-6">
             <StatTile label="WAU" value={au.wau} format={compact} />
@@ -156,16 +157,14 @@ export default async function UsersPage({
           </div>
         </section>
 
-        <section aria-label="Session detail" className="mt-6 border-t border-hairline/60 pt-4 text-xs text-ink-2">
+        <section aria-label="Session detail" className="mt-6 border-t border-hairline pt-4 text-xs text-ink-2">
           <span className="numeral">{compact(ss.distinctUsers)}</span> users with sessions ·{' '}
           <span className="numeral">{ss.avgSessionsPerUser.toFixed(1)}</span> sessions/user avg ·{' '}
           p90 <span className="numeral">{minutes(ss.p90DurationMin)}</span>
         </section>
 
-        <section aria-label="Daily active users" className="mt-8 border-t border-hairline/60 pt-8">
-          <h2 className="text-xs font-semibold uppercase tracking-wide text-ink-2">
-            Daily active users · {NY_TZ}
-          </h2>
+        <section aria-label="Daily active users" className="mt-8 border-t border-hairline pt-8">
+          <SectionHeading meta={NY_TZ}>Daily active users</SectionHeading>
           <div className="mt-4">
             <TimeSeriesBars
               data={au.daily.map(d => ({ day: d.day, value: d.users }))}
@@ -175,12 +174,12 @@ export default async function UsersPage({
           </div>
         </section>
 
-        <section aria-label="New vs returning users" className="mt-8 border-t border-hairline/60 pt-8">
+        <section aria-label="New vs returning users" className="mt-8 border-t border-hairline pt-8">
           <div className="flex items-center justify-between">
-            <h2 className="text-xs font-semibold uppercase tracking-wide text-ink-2">New vs returning</h2>
+            <SectionHeading>New vs returning</SectionHeading>
             <div className="flex items-center gap-3 text-[10px] text-ink-3">
               <span className="flex items-center gap-1"><span className="h-1.5 w-1.5 rounded-full bg-accent" aria-hidden="true" />new</span>
-              <span className="flex items-center gap-1"><span className="h-1.5 w-1.5 rounded-full bg-accent-dim" aria-hidden="true" />returning</span>
+              <span className="flex items-center gap-1"><span className="h-1.5 w-1.5 rounded-full bg-accent-bar" aria-hidden="true" />returning</span>
             </div>
           </div>
           <div className="mt-4 flex h-20 items-end gap-[2px]">
@@ -191,8 +190,8 @@ export default async function UsersPage({
               return (
                 <div key={d.day} className="group relative flex h-full flex-1 flex-col justify-end">
                   <div className="rounded-t-[1px] bg-accent transition-opacity group-hover:opacity-80" style={{ height: `${newPct}%` }} />
-                  <div className="bg-accent-dim transition-opacity group-hover:opacity-80" style={{ height: `${retPct}%` }} />
-                  <span className="pointer-events-none absolute -top-6 left-1/2 z-10 hidden -translate-x-1/2 whitespace-nowrap rounded-sm bg-surface px-1.5 py-0.5 text-[10px] text-ink-1 group-hover:block">
+                  <div className="bg-accent-bar transition-opacity group-hover:opacity-80" style={{ height: `${retPct}%` }} />
+                  <span className="pointer-events-none absolute -top-6 left-1/2 z-10 hidden -translate-x-1/2 whitespace-nowrap rounded-sm border border-hairline bg-raised px-1.5 py-0.5 text-[10px] text-ink-1 group-hover:block">
                     {shortDay(d.day)} · {d.newUsers}n/{d.returningUsers}r
                   </span>
                 </div>
@@ -205,10 +204,8 @@ export default async function UsersPage({
           </div>
         </section>
 
-        <section aria-label="Activity heatmap" className="mt-8 border-t border-hairline/60 pt-8">
-          <h2 className="text-xs font-semibold uppercase tracking-wide text-ink-2">
-            Activity heatmap · {NY_TZ}
-          </h2>
+        <section aria-label="Activity heatmap" className="mt-8 border-t border-hairline pt-8">
+          <SectionHeading meta={NY_TZ}>Activity heatmap</SectionHeading>
           <div className="mt-4 overflow-x-auto">
             <div className="grid min-w-[640px] grid-cols-[2.5rem_repeat(24,1fr)] gap-[2px]">
               <div />
@@ -240,10 +237,10 @@ export default async function UsersPage({
 
         <section
           aria-label="Top users and traders"
-          className="mt-8 grid items-start gap-x-10 gap-y-8 divide-y divide-hairline/60 border-t border-hairline/60 pt-8 md:grid-cols-2 md:divide-x md:divide-y-0"
+          className="mt-8 grid items-start gap-x-10 gap-y-8 divide-y divide-hairline border-t border-hairline pt-8 md:grid-cols-2 md:divide-x md:divide-y-0"
         >
           <div>
-            <h2 className="text-xs font-semibold uppercase tracking-wide text-ink-2">Top users by activity</h2>
+            <SectionHeading>Top users by activity</SectionHeading>
             <div className="mt-3">
               <DataTable
                 rowKey={row => row.wallet}
@@ -258,7 +255,7 @@ export default async function UsersPage({
             </div>
           </div>
           <div className="pt-8 md:pl-10 md:pt-0">
-            <h2 className="text-xs font-semibold uppercase tracking-wide text-ink-2">Top traders</h2>
+            <SectionHeading>Top traders</SectionHeading>
             <div className="mt-3">
               <DataTable
                 rowKey={row => row.wallet}
@@ -273,8 +270,8 @@ export default async function UsersPage({
           </div>
         </section>
 
-        <section aria-label="Retention curve" className="mt-8 border-t border-hairline/60 pt-8">
-          <h2 className="text-xs font-semibold uppercase tracking-wide text-ink-2">Average retention curve</h2>
+        <section aria-label="Retention curve" className="mt-8 border-t border-hairline pt-8">
+          <SectionHeading>Average retention curve</SectionHeading>
           <div className="mt-4 flex items-start gap-4">
             {curve.map(pt => (
               <div key={pt.offsetDay} className="group relative flex flex-1 flex-col items-center">
@@ -286,7 +283,7 @@ export default async function UsersPage({
                     the page's primary chart). */}
                 <div className="flex h-16 w-full max-w-8 items-end">
                   <div
-                    className="w-full rounded-t-[1px] bg-accent-dim transition-colors group-hover:bg-accent"
+                    className="w-full rounded-t-[1px] bg-accent-bar transition-colors group-hover:bg-accent"
                     style={{ height: `${Math.max(pt.avgPct, pt.avgPct > 0 ? 3 : 1)}%` }}
                   />
                 </div>
@@ -296,8 +293,8 @@ export default async function UsersPage({
           </div>
         </section>
 
-        <section aria-label="Cohort retention" className="mt-8 border-t border-hairline/60 pt-8">
-          <h2 className="text-xs font-semibold uppercase tracking-wide text-ink-2">Cohort retention</h2>
+        <section aria-label="Cohort retention" className="mt-8 border-t border-hairline pt-8">
+          <SectionHeading>Cohort retention</SectionHeading>
           <div className="mt-4 overflow-x-auto">
             <div className="min-w-[560px]">
               <div className="grid grid-cols-[5.5rem_5rem_repeat(6,1fr)] gap-1 text-[10px] uppercase tracking-wide text-ink-3">

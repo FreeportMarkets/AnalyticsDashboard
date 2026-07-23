@@ -8,18 +8,28 @@ export interface DataTableColumn<T> {
 /**
  * Dense operator table: right-aligned numerals, sticky header, hover row
  * reveal. Density over padding -- this is for scanning, not marketing.
+ *
+ * `maxHeight` is opt-in and defaults to none. It used to be an unconditional
+ * `max-h-[28rem]`, which put a second scroll region inside the page scroll
+ * on every table in the app -- a trackpad scroll that reaches the table's
+ * bottom stops dead instead of continuing down the page. A table short
+ * enough not to need it paid the cost anyway. Pass it only where a table is
+ * genuinely unbounded (top-N-of-thousands), never for a 7-row daily detail.
  */
 export function DataTable<T>({
   columns,
   rows,
   rowKey,
+  maxHeight,
 }: {
   columns: Array<DataTableColumn<T>>
   rows: T[]
   rowKey: (row: T) => string
+  /** e.g. '28rem'. Omit for a table that scrolls with the page. */
+  maxHeight?: string
 }) {
   return (
-    <div className="max-h-[28rem] overflow-auto">
+    <div className={maxHeight ? 'overflow-auto' : undefined} style={maxHeight ? { maxHeight } : undefined}>
       <table className="w-full border-collapse text-sm">
         <thead>
           <tr>
@@ -27,7 +37,7 @@ export function DataTable<T>({
               <th
                 key={col.key}
                 scope="col"
-                className={`sticky top-0 z-10 border-b border-hairline/60 bg-canvas px-3 py-2 text-xs font-medium uppercase tracking-wide text-ink-2 ${
+                className={`sticky top-0 z-10 border-b border-hairline bg-raised px-3 py-2 text-xs font-medium text-ink-2 ${
                   col.align === 'right' ? 'text-right' : 'text-left'
                 }`}
               >
@@ -45,11 +55,11 @@ export function DataTable<T>({
             </tr>
           ) : (
             rows.map(row => (
-              <tr key={rowKey(row)} className="row-hover border-b border-hairline/60 last:border-0">
+              <tr key={rowKey(row)} className="row-hover border-b border-hairline last:border-0">
                 {columns.map(col => (
                   <td
                     key={col.key}
-                    className={`px-3 py-1.5 text-ink-1 ${
+                    className={`px-3 py-2 text-ink-1 ${
                       col.align === 'right' ? 'numeral text-right' : ''
                     }`}
                   >

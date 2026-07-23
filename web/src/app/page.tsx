@@ -10,6 +10,7 @@ import {
 import { watermarkAge } from '@/lib/metrics/staleness'
 import { NY_TZ } from '@/lib/time'
 import { PageHeader } from '@/components/PageHeader'
+import { SectionHeading } from '@/components/SectionHeading'
 import { StatTile } from '@/components/StatTile'
 import { BarList } from '@/components/BarList'
 import { DataTable } from '@/components/DataTable'
@@ -57,6 +58,27 @@ function shortDay(day: string): string {
 const usd = (n: number) =>
   `$${Math.round(n).toLocaleString('en-US')}`
 const compact = (n: number) => Math.round(n).toLocaleString('en-US')
+
+/**
+ * Abbreviated USD for width-constrained slots: the KPI tile, and the value
+ * column of the three-up volume bar lists.
+ *
+ * A full `$89,794,594` at the KPI tile's type size does not fit one fifth
+ * of the content width and ellipsised, so the headline volume figure was
+ * the one number on the page you could not read. In the three-up row the
+ * same string ate ~110px of a ~430px column and squeezed the bar to a stub.
+ *
+ * The `Daily detail` table still renders `usd()` in full -- it has the
+ * width, and it is the surface you go to for exact figures -- and every
+ * abbreviated slot carries the exact value in a hover title.
+ */
+const usdAbbrev = (n: number) => {
+  const abs = Math.abs(n)
+  if (abs >= 1_000_000_000) return `$${(n / 1_000_000_000).toFixed(2)}B`
+  if (abs >= 1_000_000) return `$${(n / 1_000_000).toFixed(1)}M`
+  if (abs >= 10_000) return `$${Math.round(n / 1_000).toLocaleString('en-US')}K`
+  return usd(n)
+}
 
 /**
  * Every volume figure on this page is the DB reconstruction of perps
@@ -109,7 +131,7 @@ export default async function OverviewPage({
   const maxHour = Math.max(...hourly.map(h => h.count), 1)
 
   return (
-    <main className="mx-auto max-w-6xl px-6 py-8">
+    <main className="mx-auto w-full max-w-[1600px] px-8 py-8">
       <PageHeader
         title="Overview"
         subtitle={
@@ -123,7 +145,7 @@ export default async function OverviewPage({
                   aria-current={key === range ? 'true' : undefined}
                   className={`numeral rounded-sm px-2 py-0.5 text-xs outline-none transition-colors focus-visible:ring-2 focus-visible:ring-accent ${
                     key === range
-                      ? 'bg-surface text-ink-1'
+                      ? 'bg-raised font-medium text-ink-1'
                       : 'text-ink-3 hover:text-ink-1'
                   }`}
                 >
@@ -146,7 +168,7 @@ export default async function OverviewPage({
       />
 
       <div key={range} className="animate-content-fade">
-        <section aria-label="Key metrics" className="mt-8 grid gap-x-6 divide-y divide-hairline/60 sm:grid-cols-5 sm:divide-x sm:divide-y-0">
+        <section aria-label="Key metrics" className="mt-8 grid gap-x-6 divide-y divide-hairline sm:grid-cols-5 sm:divide-x sm:divide-y-0">
           <StatTile
             label="Events"
             value={kpis.events.current}
@@ -182,18 +204,24 @@ export default async function OverviewPage({
               label="Volume (est.)"
               value={kpis.volumeUsd.current}
               previousValue={kpis.volumeUsd.previous}
-              format={usd}
+              format={usdAbbrev}
+              valueTitle={usd(kpis.volumeUsd.current)}
             />
           </div>
         </section>
-        <p className="mt-2 text-xs text-ink-3" title={EST_TAG_TITLE}>
-          <span className="text-ink-2">est.</span> volume includes reconstructed perps volume — see tooltip.
+        {/* Stated once for the whole row. Each tile used to repeat "vs prior
+            period" under its own delta -- five identical captions competing
+            with the five figures they annotate. */}
+        <p className="mt-3 text-xs text-ink-3">
+          Deltas compare against the prior {RANGES[range].days} days.{' '}
+          <span className="text-ink-2" title={EST_TAG_TITLE}>
+            est.
+          </span>{' '}
+          volume includes reconstructed perps volume.
         </p>
 
-        <section aria-label="Daily events" className="mt-8 border-t border-hairline/60 pt-8">
-          <h2 className="text-xs font-semibold uppercase tracking-wide text-ink-2">
-            Daily events · {NY_TZ}
-          </h2>
+        <section aria-label="Daily events" className="mt-8 border-t border-hairline pt-8">
+          <SectionHeading meta={NY_TZ}>Daily events</SectionHeading>
           <div className="mt-4">
             <TimeSeriesBars
               data={series.map(d => ({ day: d.day, value: d.events }))}
@@ -203,12 +231,21 @@ export default async function OverviewPage({
           </div>
         </section>
 
+        {/*
+          Grouped by ROW HEIGHT, not by topic. These three breakdowns each
+          return ~3 rows, so they balance in a three-up row. Previously
+          Platform split (3 rows) was paired against Top events (8 rows) in
+          a two-column grid, which left a ~200px hole under the left column
+          on every render, and Top events -- the densest list on the page --
+          was squeezed into half width. Top events now runs full width
+          below, where 8 rows and a long event name both fit.
+        */}
         <section
           aria-label="Breakdowns"
-          className="mt-10 grid items-start gap-x-10 gap-y-8 divide-y divide-hairline/60 border-t border-hairline/60 pt-8 md:grid-cols-2 md:divide-x md:divide-y-0"
+          className="mt-10 grid items-start gap-x-10 gap-y-8 divide-y divide-hairline border-t border-hairline pt-8 xl:grid-cols-3 xl:divide-x xl:divide-y-0"
         >
           <div>
-            <h2 className="text-xs font-semibold uppercase tracking-wide text-ink-2">Platform split</h2>
+            <SectionHeading>Platform split</SectionHeading>
             <div className="mt-3">
               <BarList
                 items={platforms.map(p => ({ label: p.platform, value: p.events, sublabel: `${compact(p.users)}u` }))}
@@ -216,57 +253,53 @@ export default async function OverviewPage({
               />
             </div>
           </div>
-          <div className="pt-8 md:pl-10 md:pt-0">
-            <h2 className="text-xs font-semibold uppercase tracking-wide text-ink-2">Top events</h2>
-            <div className="mt-3">
-              <BarList
-                items={events.map(e => ({ label: e.event, value: e.count }))}
-                formatValue={compact}
-              />
-            </div>
-          </div>
-        </section>
-
-        <section
-          aria-label="Trade breakdowns"
-          className="mt-8 grid items-start gap-x-10 gap-y-8 divide-y divide-hairline/60 border-t border-hairline/60 pt-8 md:grid-cols-2 md:divide-x md:divide-y-0"
-        >
-          <div>
-            <h2 className="text-xs font-semibold uppercase tracking-wide text-ink-2">
-              Volume by type <EstTag />
-            </h2>
+          <div className="pt-8 xl:pl-10 xl:pt-0">
+            <SectionHeading meta={<EstTag />}>Volume by type</SectionHeading>
             <div className="mt-3">
               <BarList
                 items={trades.byType.map(t => ({ label: t.type, value: t.volumeUsd, sublabel: `${compact(t.count)}x` }))}
-                formatValue={usd}
+                formatValue={usdAbbrev}
+                formatValueTitle={usd}
               />
             </div>
           </div>
-          <div className="pt-8 md:pl-10 md:pt-0">
-            <h2 className="text-xs font-semibold uppercase tracking-wide text-ink-2">
-              Volume by client <EstTag />
-            </h2>
+          <div className="pt-8 xl:pl-10 xl:pt-0">
+            <SectionHeading meta={<EstTag />}>Volume by client</SectionHeading>
             <div className="mt-3">
               <BarList
                 items={trades.byClient.map(t => ({ label: t.client, value: t.volumeUsd, sublabel: `${compact(t.count)}x` }))}
-                formatValue={usd}
+                formatValue={usdAbbrev}
+                formatValueTitle={usd}
               />
             </div>
           </div>
         </section>
 
-        <section aria-label="Hourly activity" className="mt-8 border-t border-hairline/60 pt-8">
-          <h2 className="text-xs font-semibold uppercase tracking-wide text-ink-2">
-            Hourly activity · {NY_TZ}
-          </h2>
+        <section aria-label="Top events" className="mt-8 border-t border-hairline pt-8">
+          <SectionHeading>Top events</SectionHeading>
+          <div className="mt-3">
+            <BarList
+              items={events.map(e => ({ label: e.event, value: e.count }))}
+              formatValue={compact}
+            />
+          </div>
+        </section>
+
+        <section aria-label="Hourly activity" className="mt-8 border-t border-hairline pt-8">
+          <SectionHeading meta={NY_TZ}>Hourly activity</SectionHeading>
           <div className="mt-4 flex h-20 items-end gap-[3px]">
             {hourly.map(h => (
               <div key={h.hour} className="group relative h-full flex-1">
                 <div
-                  className="absolute inset-x-0 bottom-0 rounded-t-[1px] bg-accent-dim transition-colors group-hover:bg-accent"
-                  style={{ height: `${Math.max((h.count / maxHour) * 100, h.count > 0 ? 3 : 1)}%` }}
+                  className="absolute inset-x-0 bottom-0 rounded-t-[1px] bg-accent-bar transition-colors group-hover:bg-accent"
+                  /* A zero hour renders NOTHING, not a 1% stub. The old
+                     floor drew a sliver for count === 0 that was visually
+                     identical to the 3% floor for a real trace value, so
+                     "nobody used the app at 4am" and "a handful of people
+                     did" looked the same. */
+                  style={{ height: h.count > 0 ? `${Math.max((h.count / maxHour) * 100, 3)}%` : '0%' }}
                 />
-                <span className="pointer-events-none absolute -top-6 left-1/2 hidden -translate-x-1/2 whitespace-nowrap rounded-sm bg-surface px-1.5 py-0.5 text-[10px] text-ink-1 group-hover:block">
+                <span className="pointer-events-none absolute -top-6 left-1/2 hidden -translate-x-1/2 whitespace-nowrap rounded-sm border border-hairline bg-raised px-1.5 py-0.5 text-[10px] text-ink-1 group-hover:block">
                   {h.hour}:00 · {compact(h.count)}
                 </span>
               </div>
@@ -281,8 +314,8 @@ export default async function OverviewPage({
           </div>
         </section>
 
-        <section aria-label="Daily detail" className="mt-8 border-t border-hairline/60 pt-8">
-          <h2 className="text-xs font-semibold uppercase tracking-wide text-ink-2">Daily detail</h2>
+        <section aria-label="Daily detail" className="mt-8 border-t border-hairline pt-8">
+          <SectionHeading>Daily detail</SectionHeading>
           <div className="mt-3">
             <DataTable
               rowKey={row => row.day}
