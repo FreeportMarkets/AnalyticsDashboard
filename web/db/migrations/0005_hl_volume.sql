@@ -21,7 +21,10 @@ CREATE TABLE IF NOT EXISTS tracked_wallets (
 CREATE UNIQUE INDEX IF NOT EXISTS uq_tracked_wallets_lower ON tracked_wallets (lower(evm_address));
 
 -- Per wallet, per NY calendar day: the authoritative volume grain.
--- notional_usd = Σ(|sz|*px) over builder-fee fills; builder_fee_usd = Σ(builderFee).
+-- notional_usd    = Σ(|sz|*px) over ALL perp fills (any dir; spot/settlement
+--                   excluded) -- includes liquidations / TP-SL auto-closes,
+--                   which carry no builder fee. See docs/volume-tracking.md.
+-- builder_fee_usd = Σ(builderFee) -- the fee-bearing subset, for reconciliation.
 CREATE TABLE IF NOT EXISTS wallet_volume_daily (
   evm_address     text        NOT NULL,
   day             date        NOT NULL,
