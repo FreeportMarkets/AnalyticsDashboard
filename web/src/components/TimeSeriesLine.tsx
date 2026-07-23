@@ -93,16 +93,31 @@ export function TimeSeriesLine({
               vectorEffect="non-scaling-stroke"
             />
           </svg>
-          {/* Invisible hover columns: a dot at the point + a tooltip. */}
-          <div className="absolute inset-0 flex">
+          {/*
+            Hover targets are absolutely positioned at each point's TRUE x
+            (x(i)) and its dot at that point's y -- NOT flex columns. Flex
+            columns center the hit-zone at (i+0.5)/n while the line vertex sits
+            at i/(n-1), so the dot floated off the line both horizontally and
+            (because the line is interpolated between vertices) vertically.
+            Anchoring the dot at exactly (x(i), y(value)) puts it on the vertex.
+          */}
+          <div className="absolute inset-0">
             {data.map((d, i) => (
-              <div key={d.day} className="group relative h-full flex-1">
+              <div
+                key={d.day}
+                className="group absolute inset-y-0 -translate-x-1/2"
+                style={{ left: `${x(i)}%`, width: `${100 / Math.max(n - 1, 1)}%` }}
+              >
                 <span
-                  className="pointer-events-none absolute left-1/2 h-1.5 w-1.5 -translate-x-1/2 -translate-y-1/2 rounded-full bg-accent opacity-0 transition-opacity group-hover:opacity-100"
+                  className="pointer-events-none absolute left-1/2 h-2 w-2 -translate-x-1/2 -translate-y-1/2 rounded-full border border-canvas bg-accent opacity-0 transition-opacity group-hover:opacity-100"
                   style={{ top: `${y(d.value)}%` }}
                   aria-hidden="true"
                 />
-                <span className="pointer-events-none absolute -top-7 left-1/2 z-10 hidden -translate-x-1/2 flex-col whitespace-nowrap rounded-sm border border-hairline bg-raised px-1.5 py-1 text-[10px] text-ink-1 group-hover:flex">
+                {/* Tooltip sits just above the dot, clamped to the point's x. */}
+                <span
+                  className="pointer-events-none absolute left-1/2 z-10 hidden -translate-x-1/2 -translate-y-full flex-col whitespace-nowrap rounded-sm border border-hairline bg-raised px-1.5 py-1 text-[10px] text-ink-1 group-hover:flex"
+                  style={{ top: `calc(${y(d.value)}% - 10px)` }}
+                >
                   <span className="text-ink-2">{formatDay(d.day)}</span>
                   {d.tooltip ?? formatValue(d.value)}
                 </span>
