@@ -103,8 +103,8 @@ export async function computePerpVolume(
 
 // --- real network fetcher (not exercised by the pure unit tests) ---
 
-async function hlPost(body: unknown): Promise<HlFill[]> {
-  return hlInfoPost<HlFill[]>(body)
+function hlPost(deadlineMs?: number) {
+  return (body: unknown) => hlInfoPost<HlFill[]>(body, { deadlineMs })
 }
 
 /**
@@ -120,14 +120,16 @@ async function hlPost(body: unknown): Promise<HlFill[]> {
 export async function hlFillsFetcher(
   wallet: string,
   startMs: number,
-  postFn: (body: unknown) => Promise<HlFill[]> = hlPost
+  postFn?: (body: unknown) => Promise<HlFill[]>,
+  deadlineMs?: number
 ): Promise<HlFill[]> {
+  const post = postFn ?? hlPost(deadlineMs)
   const out: HlFill[] = []
   const seen = new Set<string>()
   let cur = startMs
 
   for (;;) {
-    const batch = await postFn({ type: 'userFillsByTime', user: wallet, startTime: cur })
+    const batch = await post({ type: 'userFillsByTime', user: wallet, startTime: cur })
     if (!batch || batch.length === 0) break
 
     const fresh = batch.filter(f => !seen.has(String(f.tid)))

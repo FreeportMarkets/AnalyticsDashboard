@@ -17,27 +17,32 @@ import { readWatermark as readSyncState, advanceWatermark as writeSyncState } fr
 export const dynamic = 'force-dynamic'
 export const maxDuration = 60
 
-/** Refresh the Privy registry at most this often (it's ~44 pages, not free). */
+/**
+ * Hard wall-clock deadline for ALL work in this function, well under the 60s
+ * platform timeout. Every HL fetch is passed this deadline so it aborts
+ * rather than hanging in rate-limit backoff -- the fix for the
+ * FUNCTION_INVOCATION_TIMEOUT that froze the data. Nothing here may run past
+ * it; partial progress is safe because watermarks only advance on committed
+ * writes, so the next run resumes cleanly.
+ */
+const HARD_BUDGET_MS = 45_000
+
 const REGISTRY_REFRESH_MS = 60 * 60 * 1000
 const REGISTRY_STATE_KEY = 'volume:registry-refresh'
-/** How many never-scanned wallets to discover per run, time permitting. */
-const DISCOVERY_BATCH = 400
+/** Small so discovery can never dominate the budget; the rotation still covers everyone over time. */
+const DISCOVERY_BATCH = 120
 
 /**
- * Two-phase, deadline-bounded volume sync. Designed so no single run sweeps
- * all ~4k wallets against HL's per-IP rate limit (which corrupts data by
- * dropping wallets):
+ * Every-run volume sync, ordered by priority so the critical path always
+ * finishes within budget:
  *
- *   Phase 1 — sync the ACTIVE traders (wallets with any volume row, a few
- *     dozen) incrementally. Cheap, and keeps today's number live every run.
- *   Phase 2 — with leftover time budget, DISCOVER a batch of never-scanned
- *     wallets so new signups get picked up. Each is marked scanned (even at
- *     zero fills) so it isn't rescanned; a discovered trader gets a volume
- *     row and joins Phase 1 next run.
- *   Registry — refreshed from Privy at most hourly, not every run.
+ *   1. Active traders (Phase 1) -- keeps today's number live. Runs first.
+ *   2. Reconcile -- the health/completeness signal.
+ *   3. Registry refresh (hourly) + discovery rotation -- best-effort, only
+ *      with leftover time. New signups are picked up here.
  *
- * Everything is resumable: a wallet not reached this run keeps its watermark
- * (or stays unscanned) and is picked up next run. Nothing is ever lost.
+ * Every HL call carries the hard deadline, so no single stuck fetch can blow
+ * the function timeout.
  */
 export async function GET(request: Request) {
   const secret = process.env.CRON_SECRET
@@ -46,87 +51,85 @@ export async function GET(request: Request) {
   }
 
   const startedAt = Date.now()
-  const budgetMs = (maxDuration - 10) * 1000
-  const timeLeft = () => budgetMs - (Date.now() - startedAt)
-
-  // Registry refresh (hourly). Best-effort: a Privy hiccup must not stop sync.
-  let discovered = 0
-  try {
-    const last = await readSyncState(sql, REGISTRY_STATE_KEY, new Date(0))
-    if (Date.now() - last.getTime() > REGISTRY_REFRESH_MS) {
-      const source =
-        process.env.PRIVY_APP_ID && process.env.PRIVY_APP_SECRET
-          ? privyRegistrySource()
-          : analyticsWalletSource(sql)
-      const wallets = await source.list()
-      discovered = await upsertTrackedWallets(sql, wallets, source.name)
-      await writeSyncState(sql, REGISTRY_STATE_KEY, new Date())
-    }
-  } catch (err) {
-    console.warn('volume cron: registry refresh failed', err)
-  }
+  const deadlineMs = startedAt + HARD_BUDGET_MS
+  const timeLeft = () => deadlineMs - Date.now()
 
   const watermarks = await readWatermarks(sql)
   const deps: SyncDeps = {
     readWatermark: async a => watermarks.get(a.toLowerCase()) ?? 0,
-    fetchFills: (a, sinceMs) => hlFillsFetcher(a, sinceMs) as Promise<HlFill[]>,
+    fetchFills: (a, sinceMs) => hlFillsFetcher(a, sinceMs, undefined, deadlineMs) as Promise<HlFill[]>,
     writeBuckets: (a, buckets, wm, additive) => writeWalletBuckets(sql, a, buckets, wm, additive),
   }
 
-  // Phase 1 — active traders, always.
+  // 1. Active traders first -- the live number. Reserve ~12s for reconcile.
   const active = await activeTraderWallets(sql)
   const phase1 = await syncWalletsBatch(active, deps, {
     additive: true,
     concurrency: 6,
-    deadlineMs: Math.max(0, budgetMs - 15_000), // reserve time for discovery + reconcile
+    deadlineMs: HARD_BUDGET_MS - 12_000,
   })
 
-  // Phase 2 — re-check a rotating batch of non-active wallets with the
-  // remaining time budget. Incremental (additive) so a re-checked wallet that
-  // has traded since its last check gets those fills added, and a
-  // never-checked wallet (watermark 0) gets its full history. This is what
-  // catches a wallet that signs up, sits idle, then starts trading -- it stays
-  // in the rotation and graduates to Phase 1 once it has a volume row.
-  let rechecked = 0
-  let discoveredTraders = 0
-  if (timeLeft() > 8_000) {
-    const candidates = await staleNonActiveWallets(sql, DISCOVERY_BATCH)
-    let next = 0
-    const nowMs = Date.now()
-    async function recheck() {
-      while (timeLeft() > 5_000) {
-        const i = next++
-        if (i >= candidates.length) return
-        const addr = candidates[i]!
-        const r = await syncWalletVolume(addr, deps, { additive: true })
-        if (r.error) continue // leave as-is -> retried next rotation
-        rechecked++
-        if (r.attributedFills > 0) discoveredTraders++
-        // No new fills -> bump the check time so the rotation advances but the
-        // wallet is NOT dropped; it'll be re-checked again next cycle.
-        if (r.daysTouched === 0) await markScanned(sql, addr, nowMs)
-      }
-    }
-    await Promise.all([recheck(), recheck(), recheck()])
-  }
-
-  // Reconcile (best-effort). The <1% gate; logged for the trend + dashboard.
+  // 2. Reconcile (best-effort, deadline-bounded HL call).
   let recon = null
   try {
-    const trackedCount = active.length + rechecked
-    recon = await reconcile(sql, { walletsTracked: trackedCount, note: 'cron', log: true })
+    recon = await reconcile(sql, {
+      walletsTracked: active.length,
+      note: 'cron',
+      log: true,
+      deadlineMs: startedAt + HARD_BUDGET_MS - 3_000,
+    })
   } catch (err) {
     console.warn('volume cron: reconcile failed', err)
+  }
+
+  // 3. Registry refresh (hourly) + discovery -- only with real time left.
+  let registryDiscovered = 0
+  let rechecked = 0
+  let discoveredTraders = 0
+  if (timeLeft() > 10_000) {
+    try {
+      const last = await readSyncState(sql, REGISTRY_STATE_KEY, new Date(0))
+      if (Date.now() - last.getTime() > REGISTRY_REFRESH_MS) {
+        const source =
+          process.env.PRIVY_APP_ID && process.env.PRIVY_APP_SECRET
+            ? privyRegistrySource()
+            : analyticsWalletSource(sql)
+        const wallets = await source.list()
+        registryDiscovered = await upsertTrackedWallets(sql, wallets, source.name)
+        await writeSyncState(sql, REGISTRY_STATE_KEY, new Date())
+      }
+    } catch (err) {
+      console.warn('volume cron: registry refresh failed', err)
+    }
+
+    if (timeLeft() > 6_000) {
+      const candidates = await staleNonActiveWallets(sql, DISCOVERY_BATCH)
+      const nowMs = Date.now()
+      let next = 0
+      const recheck = async () => {
+        while (timeLeft() > 4_000) {
+          const i = next++
+          if (i >= candidates.length) return
+          const addr = candidates[i]!
+          const r = await syncWalletVolume(addr, deps, { additive: true })
+          if (r.error) continue
+          rechecked++
+          if (r.attributedFills > 0) discoveredTraders++
+          if (r.daysTouched === 0) await markScanned(sql, addr, nowMs)
+        }
+      }
+      await Promise.all([recheck(), recheck(), recheck()])
+    }
   }
 
   return NextResponse.json({
     ok: true,
     durationMs: Date.now() - startedAt,
-    registryDiscovered: discovered,
     activeTraders: active.length,
     activeProcessed: phase1.processed,
     activeErrors: phase1.results.filter(r => r.error).length,
     newFills: phase1.results.reduce((s, r) => s + r.attributedFills, 0),
+    registryDiscovered,
     rechecked,
     discoveryNewTraders: discoveredTraders,
     reconciliation: recon
