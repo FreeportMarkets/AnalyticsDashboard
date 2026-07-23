@@ -36,30 +36,32 @@ export interface AggregateResult {
 }
 
 /**
- * Non-perp fill directions to EXCLUDE. This is a denylist, not a perp
- * allowlist, on purpose: `builderFee > 0` is HL's own stamp that the order
- * went through our builder code, and Freeport is perps-only, so a positive
- * builder fee already means a Freeport perp trade. Gating on an allowlist of
- * {Open,Close}×{Long,Short} would silently DROP advanced-order fills that use
- * other perp directions -- position flips (`Long > Short`, `Short > Long`),
- * and any future dir HL introduces -- which is exactly the "handle all order
- * types" failure mode. We exclude only the known spot / settlement dirs,
- * which never carry our fee anyway (verified empirically), as belt-and-braces
- * against HL ever attaching a builder fee to a spot conversion.
- *
- * The reconciliation gate is the ultimate backstop: if this filter ever drops
- * a fee-bearing fill, Σ(builderFee) bottom-up won't match the collector's
- * total and the run is flagged incomplete.
+ * Non-perp fill directions to EXCLUDE. Denylist, not an allowlist: Freeport is
+ * perps-only, so any fill on an embedded wallet that ISN'T a spot conversion
+ * or settlement is a Freeport perp trade. This captures every perp direction
+ * -- opens, closes, position flips (`Long > Short`), and any future dir HL
+ * adds -- without an allowlist that would silently drop advanced orders.
  */
 const NON_PERP_DIRS = new Set(['Buy', 'Sell', 'Spot Dust Conversion', 'Settlement'])
 
 /**
- * True for a Freeport-attributed perp fill: it carried our builder fee and is
- * not a spot/settlement fill. Captures every perp direction, including
- * position flips and TWAP/trigger fills (which use the normal perp dirs).
+ * True for a Freeport perp fill (any perp direction; excludes spot/settlement).
+ *
+ * IMPORTANT: this is NOT gated on `builderFee > 0`. It counts ALL perp fills
+ * of the wallet, including LIQUIDATIONS and TP/SL auto-closes -- which HL
+ * executes itself, so they carry no builder fee (no `cloid`, no builder
+ * param) even though they close a genuine Freeport position. Excluding them
+ * undercounted vs the Streamlit dashboard by exactly the liquidation volume
+ * (measured: 69 forced-close fills / ~$145k, almost all one SNDK liquidation).
+ * Enumeration is Privy-embedded wallets, which only trade through Freeport, so
+ * all their perp fills are Freeport volume.
+ *
+ * `builderFee` is still summed per fill (see aggregate) and reconciled against
+ * the collector's fees -- that remains the check that every FEE-bearing fill
+ * was captured. Volume is the superset (fills + liquidations); fees are the
+ * attributed subset.
  */
 export function isFreeportPerpFill(fill: HlFill): boolean {
-  if (Number(fill.builderFee ?? 0) <= 0) return false
   return !NON_PERP_DIRS.has(fill.dir ?? '')
 }
 

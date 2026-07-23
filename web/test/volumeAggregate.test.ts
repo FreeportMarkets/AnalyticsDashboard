@@ -15,9 +15,11 @@ describe('isFreeportPerpFill', () => {
   it('accepts a perp fill with a builder fee', () => {
     expect(isFreeportPerpFill(fill({ dir: 'Open Long', builderFee: '0.65' }))).toBe(true)
   })
-  it('rejects a perp fill with no builder fee (not ours)', () => {
-    expect(isFreeportPerpFill(fill({ dir: 'Open Long', builderFee: '0' }))).toBe(false)
-    expect(isFreeportPerpFill(fill({ dir: 'Open Long', builderFee: undefined }))).toBe(false)
+  it('INCLUDES a perp fill with no builder fee (liquidation / TP-SL close)', () => {
+    // These are HL-executed closes of genuine Freeport positions -- no builder
+    // param, so no fee, but still Freeport volume (matches Streamlit).
+    expect(isFreeportPerpFill(fill({ dir: 'Close Long', builderFee: '0' }))).toBe(true)
+    expect(isFreeportPerpFill(fill({ dir: 'Close Long', builderFee: undefined }))).toBe(true)
   })
   it('rejects spot / settlement dirs even with a builder fee', () => {
     for (const dir of ['Buy', 'Sell', 'Spot Dust Conversion', 'Settlement']) {
@@ -25,25 +27,19 @@ describe('isFreeportPerpFill', () => {
     }
   })
 
-  // Advanced order types: these use perp directions beyond the basic four and
-  // MUST be counted when they carry our builder fee. This is the "handle all
-  // order placements" guarantee.
-  it('accepts position-flip fills (Long > Short / Short > Long) with a builder fee', () => {
+  // Advanced order types use perp directions beyond the basic four and must be
+  // counted. Fee or no fee -- attribution no longer gates inclusion.
+  it('accepts position-flip fills (Long > Short / Short > Long)', () => {
     expect(isFreeportPerpFill(fill({ dir: 'Long > Short', builderFee: '1.2' }))).toBe(true)
-    expect(isFreeportPerpFill(fill({ dir: 'Short > Long', builderFee: '1.2' }))).toBe(true)
+    expect(isFreeportPerpFill(fill({ dir: 'Short > Long', builderFee: '0' }))).toBe(true)
   })
 
-  it('accepts a TWAP sub-fill (normal dir + twapId) with a builder fee', () => {
+  it('accepts a TWAP sub-fill (normal dir + twapId)', () => {
     expect(isFreeportPerpFill(fill({ dir: 'Open Long', builderFee: '0.4', twapId: 12345 }))).toBe(true)
   })
 
-  it('accepts an unknown future perp dir as long as it carried our fee', () => {
-    // Forward-compat: a new HL perp dir must not be silently dropped.
-    expect(isFreeportPerpFill(fill({ dir: 'Some New Perp Action', builderFee: '0.9' }))).toBe(true)
-  })
-
-  it('excludes a liquidation fill that carried no builder fee (not our trade)', () => {
-    expect(isFreeportPerpFill(fill({ dir: 'Liquidated Isolated Long', builderFee: '0' }))).toBe(false)
+  it('accepts an unknown future perp dir', () => {
+    expect(isFreeportPerpFill(fill({ dir: 'Some New Perp Action', builderFee: '0' }))).toBe(true)
   })
 })
 
@@ -69,16 +65,27 @@ describe('aggregateWalletFills', () => {
     expect(r.attributedFills).toBe(2)
   })
 
-  it('excludes non-builder-fee fills from volume but still advances the watermark', () => {
+  it('counts a no-fee perp fill (liquidation) in volume, with 0 added to fees', () => {
     const t2 = BASE + 60_000
     const r = aggregateWalletFills([
       fill({ tid: 1, sz: '1', px: '1000', builderFee: '0.65', time: BASE }),
-      fill({ tid: 2, sz: '9', px: '1000', builderFee: '0', time: t2 }), // not ours
+      fill({ tid: 2, sz: '9', px: '1000', builderFee: '0', dir: 'Close Long', time: t2 }), // liquidation
     ])
     expect(r.buckets).toHaveLength(1)
-    expect(r.buckets[0]!.notionalUsd).toBe(1000) // the $9k non-builder fill excluded
-    expect(r.maxFillMs).toBe(t2) // ...but the watermark still moved past it
-    expect(r.attributedFills).toBe(1)
+    expect(r.buckets[0]!.notionalUsd).toBe(10_000) // both fills counted (1000 + 9000)
+    expect(r.buckets[0]!.builderFeeUsd).toBeCloseTo(0.65, 6) // only the fee-bearing fill adds fee
+    expect(r.maxFillMs).toBe(t2)
+  })
+
+  it('excludes a spot fill from volume but still advances the watermark', () => {
+    const t2 = BASE + 60_000
+    const r = aggregateWalletFills([
+      fill({ tid: 1, sz: '1', px: '1000', builderFee: '0.65', time: BASE }),
+      fill({ tid: 2, sz: '9', px: '1000', dir: 'Buy', time: t2 }), // spot -- excluded
+    ])
+    expect(r.buckets).toHaveLength(1)
+    expect(r.buckets[0]!.notionalUsd).toBe(1000)
+    expect(r.maxFillMs).toBe(t2)
   })
 
   it('splits across NY days', () => {

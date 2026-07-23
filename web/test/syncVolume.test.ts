@@ -56,9 +56,9 @@ describe('syncWalletVolume', () => {
     expect(r.watermarkMs).toBe(BASE)
   })
 
-  it('advances the watermark past non-builder fills without writing volume', async () => {
+  it('advances the watermark past spot-only fills without writing volume', async () => {
     const { deps, writes } = fakeDeps({
-      w: [fill({ tid: 3, sz: '9', px: '1000', builderFee: '0', time: BASE + 9_000 })],
+      w: [fill({ tid: 3, sz: '9', px: '1000', dir: 'Buy', time: BASE + 9_000 })], // spot, excluded
     })
     const r = await syncWalletVolume('w', deps, { additive: false })
     // A write happens (watermark must advance) but with zero buckets.
