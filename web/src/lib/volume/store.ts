@@ -55,18 +55,27 @@ export async function activeTraderWallets(sql: SqlTag): Promise<string[]> {
 }
 
 /**
- * Tracked wallets that have NEVER been scanned (no sync-state row). The
- * discovery phase works through these in batches so new signups get picked up
- * without rescanning the whole registry every run. Once scanned (even with
- * zero fills) a wallet gets a sync-state row via markScanned and drops out of
- * this set.
+ * A rotating batch of NON-ACTIVE wallets (no volume rows yet) to re-check,
+ * least-recently-checked first (never-checked wallets first of all).
+ *
+ * This is the fix for the "dormant wallet goes dark" bug: marking a
+ * zero-fill wallet scanned must NOT exclude it forever, or a user who signs
+ * up, sits idle a day, then trades would never be recorded. Instead every
+ * non-active wallet stays in this rotation and is re-checked on a cycle
+ * (batch size × run interval), so a wallet that starts trading is picked up
+ * within one cycle and then graduates to the active set (Phase 1) once it has
+ * a volume row. Active traders are excluded here because Phase 1 already
+ * syncs them every run.
  */
-export async function unscannedWallets(sql: SqlTag, limit: number): Promise<string[]> {
+export async function staleNonActiveWallets(sql: SqlTag, limit: number): Promise<string[]> {
   const rows = (await sql(
     `SELECT t.evm_address
        FROM tracked_wallets t
        LEFT JOIN hl_fill_sync_state s ON s.evm_address = t.evm_address
-      WHERE s.evm_address IS NULL
+      WHERE NOT EXISTS (
+        SELECT 1 FROM wallet_volume_daily v WHERE v.evm_address = t.evm_address
+      )
+      ORDER BY s.updated_at ASC NULLS FIRST
       LIMIT $1`,
     [limit]
   )) as Array<{ evm_address: string }>
@@ -108,13 +117,21 @@ export async function readWatermarks(sql: SqlTag): Promise<Map<string, number>> 
 }
 
 /**
- * Persist one wallet's aggregation: add each day's delta into
- * wallet_volume_daily and advance the watermark -- in that order, so a crash
- * between them re-adds the same fills next run and double-counts. To stay
- * safe under retries, the daily upsert is written as an ABSOLUTE set for a
- * full-backfill (sinceMs=0) and an ADDITIVE delta for incremental runs; the
- * caller signals which via `additive`. The watermark's GREATEST guard makes
- * the advance itself idempotent.
+ * Persist one wallet's aggregation ATOMICALLY: all day buckets AND the
+ * watermark advance in a single Postgres transaction.
+ *
+ * The atomicity is the whole point. An earlier version wrote the buckets, then
+ * the watermark, in separate statements. A crash between them left the fills
+ * counted but the watermark unmoved, so the next run re-fetched the same fills
+ * and (in additive mode) ADDED them again -- a permanent overstatement that
+ * reconciliation could only detect, not repair. Bundling them means either
+ * both land or neither does; a retry then re-fetches from the OLD watermark
+ * and re-applies the SAME delta onto a table that never received the first
+ * one. No double count.
+ *
+ * `additive` (incremental: only fills after the watermark were fetched, so
+ * they're deltas) vs absolute (backfill: the full day was recomputed, so
+ * overwrite). The watermark's GREATEST guard keeps the advance monotonic.
  */
 export async function writeWalletBuckets(
   sql: SqlTag,
@@ -124,39 +141,38 @@ export async function writeWalletBuckets(
   additive: boolean
 ): Promise<void> {
   const addr = lc(address)
-  for (const b of buckets) {
-    if (additive) {
-      await sql(
-        `INSERT INTO wallet_volume_daily (evm_address, day, notional_usd, builder_fee_usd, fill_count)
-         VALUES ($1, $2, $3, $4, $5)
-         ON CONFLICT (evm_address, day) DO UPDATE SET
-           notional_usd    = wallet_volume_daily.notional_usd + EXCLUDED.notional_usd,
-           builder_fee_usd = wallet_volume_daily.builder_fee_usd + EXCLUDED.builder_fee_usd,
-           fill_count      = wallet_volume_daily.fill_count + EXCLUDED.fill_count,
-           updated_at      = now()`,
-        [addr, b.day, b.notionalUsd, b.builderFeeUsd, b.fillCount]
-      )
-    } else {
-      await sql(
-        `INSERT INTO wallet_volume_daily (evm_address, day, notional_usd, builder_fee_usd, fill_count)
-         VALUES ($1, $2, $3, $4, $5)
-         ON CONFLICT (evm_address, day) DO UPDATE SET
-           notional_usd    = EXCLUDED.notional_usd,
-           builder_fee_usd = EXCLUDED.builder_fee_usd,
-           fill_count      = EXCLUDED.fill_count,
-           updated_at      = now()`,
-        [addr, b.day, b.notionalUsd, b.builderFeeUsd, b.fillCount]
-      )
-    }
-  }
-  await sql(
-    `INSERT INTO hl_fill_sync_state (evm_address, last_fill_ms, updated_at)
-     VALUES ($1, $2, now())
-     ON CONFLICT (evm_address) DO UPDATE
-       SET last_fill_ms = GREATEST(hl_fill_sync_state.last_fill_ms, EXCLUDED.last_fill_ms),
-           updated_at   = now()`,
-    [addr, newWatermarkMs]
+  const bucketSet = additive
+    ? `notional_usd    = wallet_volume_daily.notional_usd + EXCLUDED.notional_usd,
+       builder_fee_usd = wallet_volume_daily.builder_fee_usd + EXCLUDED.builder_fee_usd,
+       fill_count      = wallet_volume_daily.fill_count + EXCLUDED.fill_count,
+       updated_at      = now()`
+    : `notional_usd    = EXCLUDED.notional_usd,
+       builder_fee_usd = EXCLUDED.builder_fee_usd,
+       fill_count      = EXCLUDED.fill_count,
+       updated_at      = now()`
+
+  const queries = buckets.map(b =>
+    sql(
+      `INSERT INTO wallet_volume_daily (evm_address, day, notional_usd, builder_fee_usd, fill_count)
+       VALUES ($1, $2, $3, $4, $5)
+       ON CONFLICT (evm_address, day) DO UPDATE SET ${bucketSet}`,
+      [addr, b.day, b.notionalUsd, b.builderFeeUsd, b.fillCount]
+    )
   )
+  queries.push(
+    sql(
+      `INSERT INTO hl_fill_sync_state (evm_address, last_fill_ms, updated_at)
+       VALUES ($1, $2, now())
+       ON CONFLICT (evm_address) DO UPDATE
+         SET last_fill_ms = GREATEST(hl_fill_sync_state.last_fill_ms, EXCLUDED.last_fill_ms),
+             updated_at   = now()`,
+      [addr, newWatermarkMs]
+    )
+  )
+
+  // One HTTP round-trip, one transaction: all buckets + the watermark commit
+  // together or not at all.
+  await sql.transaction(queries)
 }
 
 /** Σ(builder_fee_usd) across all stored daily rows -- the bottom-up total. */

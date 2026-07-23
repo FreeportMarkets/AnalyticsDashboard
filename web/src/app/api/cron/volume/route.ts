@@ -5,7 +5,7 @@ import { privyRegistrySource, analyticsWalletSource } from '@/lib/volume/walletS
 import {
   upsertTrackedWallets,
   activeTraderWallets,
-  unscannedWallets,
+  staleNonActiveWallets,
   readWatermarks,
   writeWalletBuckets,
   markScanned,
@@ -81,34 +81,39 @@ export async function GET(request: Request) {
     deadlineMs: Math.max(0, budgetMs - 15_000), // reserve time for discovery + reconcile
   })
 
-  // Phase 2 — discover never-scanned wallets with whatever time remains.
-  let discoveredScanned = 0
+  // Phase 2 — re-check a rotating batch of non-active wallets with the
+  // remaining time budget. Incremental (additive) so a re-checked wallet that
+  // has traded since its last check gets those fills added, and a
+  // never-checked wallet (watermark 0) gets its full history. This is what
+  // catches a wallet that signs up, sits idle, then starts trading -- it stays
+  // in the rotation and graduates to Phase 1 once it has a volume row.
+  let rechecked = 0
   let discoveredTraders = 0
   if (timeLeft() > 8_000) {
-    const candidates = await unscannedWallets(sql, DISCOVERY_BATCH)
+    const candidates = await staleNonActiveWallets(sql, DISCOVERY_BATCH)
     let next = 0
     const nowMs = Date.now()
-    async function discover() {
+    async function recheck() {
       while (timeLeft() > 5_000) {
         const i = next++
         if (i >= candidates.length) return
         const addr = candidates[i]!
-        const r = await syncWalletVolume(addr, deps, { additive: false })
-        if (r.error) continue // leave unscanned -> retried next run
-        discoveredScanned++
+        const r = await syncWalletVolume(addr, deps, { additive: true })
+        if (r.error) continue // leave as-is -> retried next rotation
+        rechecked++
         if (r.attributedFills > 0) discoveredTraders++
-        // Empty wallet wrote no rows/watermark -- mark it scanned so it drops
-        // out of the discovery set (seeded to now; later trades still caught).
+        // No new fills -> bump the check time so the rotation advances but the
+        // wallet is NOT dropped; it'll be re-checked again next cycle.
         if (r.daysTouched === 0) await markScanned(sql, addr, nowMs)
       }
     }
-    await Promise.all([discover(), discover(), discover()])
+    await Promise.all([recheck(), recheck(), recheck()])
   }
 
   // Reconcile (best-effort). The <1% gate; logged for the trend + dashboard.
   let recon = null
   try {
-    const trackedCount = active.length + discoveredScanned
+    const trackedCount = active.length + rechecked
     recon = await reconcile(sql, { walletsTracked: trackedCount, note: 'cron', log: true })
   } catch (err) {
     console.warn('volume cron: reconcile failed', err)
@@ -122,7 +127,7 @@ export async function GET(request: Request) {
     activeProcessed: phase1.processed,
     activeErrors: phase1.results.filter(r => r.error).length,
     newFills: phase1.results.reduce((s, r) => s + r.attributedFills, 0),
-    discoveryScanned: discoveredScanned,
+    rechecked,
     discoveryNewTraders: discoveredTraders,
     reconciliation: recon
       ? {
