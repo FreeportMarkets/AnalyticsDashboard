@@ -11,7 +11,7 @@ const env = Object.fromEntries(
 
 const url = env.TEST_DATABASE_URL
 const MARK = 'tzproof_'
-// Year 2077 is unused by other test files (2026, 2027, 2031, 2088 are taken).
+// Year 2077 is unused by other test files (2026, 2027, 2031, 2078, 2088 are taken).
 const sql = url ? neon<boolean, boolean>(url) : null
 
 // `src/lib/metrics/queries.ts` imports `sql` from `@/lib/db`, which reads

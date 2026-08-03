@@ -250,6 +250,21 @@ export interface RecentTradeRow {
  * `walletAddress` is selected (it's already used in the WHERE clause) so
  * callers can enrich the row with a Privy identity label -- see
  * `@/lib/privy`.
+ *
+ * `leverage` on a perps row falls back to the position's OPEN when the row
+ * itself has none. The perps writer stopped logging `leverage` on close
+ * fills around 2026-04-10..13 (verified against the raw DynamoDB dump in
+ * AnalyticsDashboard/analytics_output/_raw_trades.json: every close through
+ * 2026-04-09 carries leverage; from 2026-04-14 none do -- opens are
+ * unaffected). A close has no leverage of its own anyway -- the position's
+ * leverage is fixed at open -- so inheriting from the most recent prior
+ * open of the same (wallet, symbol, side) is the true value, not an
+ * estimate. In the April sample this resolves 213 of 224 leverage-less
+ * closes; the misses are positions opened before the sample window. The
+ * correlated subquery only runs for perps rows whose own leverage is NULL
+ * (COALESCE short-circuits) and seeks the (wallet_address, timestamp) PK,
+ * bounded by the outer LIMIT -- fine for a 50-row widget. Volume math is
+ * untouched: closes never used leverage (`VOLUME_USD_EXPR` uses size*price).
  */
 export async function recentTrades(startDate: string, endDate: string, limit = 50): Promise<RecentTradeRow[]> {
   const { fromUtc, toUtc } = nyRangeToUtc(startDate, endDate)
@@ -260,13 +275,28 @@ export async function recentTrades(startDate: string, endDate: string, limit = 5
             side,
             size::float8 AS size,
             price::float8 AS price,
-            leverage::float8 AS leverage,
+            coalesce(
+              t.leverage,
+              CASE WHEN t.type = 'perps' THEN (
+                SELECT o.leverage
+                  FROM trades o
+                 WHERE o.wallet_address = t.wallet_address
+                   AND o.type = 'perps'
+                   AND NOT coalesce(o.is_close, false)
+                   AND o.leverage IS NOT NULL
+                   AND coalesce(o.display_symbol, o.asset) = coalesce(t.display_symbol, t.asset)
+                   AND coalesce(o.side, '') = coalesce(t.side, '')
+                   AND o.ts <= t.ts
+                 ORDER BY o.ts DESC
+                 LIMIT 1
+              ) END
+            )::float8 AS leverage,
             coalesce(nullif(lower(client), ''), 'untagged') AS client,
             status,
             category AS venue,
             ${VOLUME_USD_EXPR} AS volume_usd,
             wallet_address
-       FROM trades
+       FROM trades t
       WHERE ts >= $1 AND ts < $2
         AND type IN ('swap', 'perps')
         AND wallet_address <> ALL($3::text[])
