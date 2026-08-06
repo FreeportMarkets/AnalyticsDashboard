@@ -221,11 +221,16 @@ export interface AttachBeneficiaryInput {
 
 /** POST /admin/promo/:code/beneficiary. Either did or wallet must be set. */
 export async function attachPromoBeneficiary(code: string, input: AttachBeneficiaryInput): Promise<void> {
+  // Field names must match AttachBeneficiaryBody in the backend
+  // (apps/points/src/routes/admin.ts): `did` / `wallet_address`, NOT
+  // `beneficiary_did` / `beneficiary_wallet`. The zod .refine() requires one of
+  // the two to be present, so the old names failed every request with a 400
+  // before the handler ever ran — this endpoint had never succeeded from here.
   const payload: Record<string, unknown> = { force: input.force }
   if (input.did) {
-    payload.beneficiary_did = input.did
+    payload.did = input.did
   } else if (input.wallet) {
-    payload.beneficiary_wallet = input.wallet
+    payload.wallet_address = input.wallet
   } else {
     throw new PointsApiError('Provide either a DID or a wallet address.')
   }

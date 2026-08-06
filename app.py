@@ -1287,11 +1287,15 @@ def attach_promo_beneficiary(code: str, *, did: str | None, wallet: str | None, 
     """POST /admin/promo/:code/beneficiary. Either did or wallet must be set."""
     if not _admin_key():
         return False, "Admin API key not configured."
+    # Field names must match AttachBeneficiaryBody on the backend
+    # (apps/points/src/routes/admin.ts): "did" / "wallet_address", NOT
+    # "beneficiary_did" / "beneficiary_wallet". The zod .refine() requires one
+    # of the two, so the old names 400'd every request before the handler ran.
     payload: dict = {"force": force}
     if did:
-        payload["beneficiary_did"] = did
+        payload["did"] = did
     elif wallet:
-        payload["beneficiary_wallet"] = wallet
+        payload["wallet_address"] = wallet
     else:
         return False, "Provide either a DID or a wallet address."
     try:
