@@ -46,7 +46,9 @@ export default async function JourneyPage({
   const result = await fetchFunnel({ window: windowKey, days })
 
   return (
-    <div className="space-y-8">
+    // Same shell as every other page: without it the heading sits flush against
+    // the viewport edge and gets clipped at the top.
+    <main className="mx-auto w-full max-w-[1600px] space-y-8 px-8 py-8">
       <PageHeader
         title="Journey"
         subtitle={
@@ -176,6 +178,6 @@ export default async function JourneyPage({
           </p>
         </section>
       )}
-    </div>
+    </main>
   )
 }
