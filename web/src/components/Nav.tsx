@@ -5,6 +5,7 @@ import { usePathname } from 'next/navigation'
 
 const LIVE_LINKS: Array<{ href: string; label: string }> = [
   { href: '/', label: 'Overview' },
+  { href: '/journey', label: 'Journey' },
   { href: '/funnels', label: 'Funnels' },
   { href: '/notifications', label: 'Notifications' },
   { href: '/trades', label: 'Trades' },
