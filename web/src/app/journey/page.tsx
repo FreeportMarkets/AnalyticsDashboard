@@ -6,13 +6,20 @@ import { fetchFunnel, formatDuration, STEP_LABELS, type FunnelStep } from '@/lib
 export const dynamic = 'force-dynamic'
 
 /**
- * The install-to-trade timeline.
+ * The new-user → first-trade timeline.
  *
- * Starts at 100% of a day's installs and shows how far they got, with the time
- * each leg took. Distinct from /funnels, which composes arbitrary event
- * sequences from the synced `events` table: that table is keyed on
- * `wallet_address` and so cannot see anything before an account exists. This
- * page is keyed on device identity and therefore starts at the first open.
+ * Starts at 100% of a day's NEW USERS — devices whose first non-replay
+ * `intro_started` landed that day — and shows how far they got, with the time
+ * each leg took. The cohort is deliberately NOT `app_first_open`: that fires on
+ * every build (including ones predating the funnel instrumentation) and on
+ * existing users reinstalling, which polluted the top of the funnel. Only
+ * instrumented builds emit `intro_started`, and only a genuinely-new user emits
+ * it non-replay, so this cohort excludes both by construction. See
+ * docs/analytics-funnel.md in freeport-trading-backend.
+ *
+ * Distinct from /funnels, which composes arbitrary sequences from the synced
+ * `events` table (keyed on `wallet_address`, so it cannot see anything before an
+ * account exists). This page is keyed on device identity.
  */
 
 function first(v: string | string[] | undefined): string | undefined {
@@ -53,8 +60,9 @@ export default async function JourneyPage({
         title="Journey"
         subtitle={
           <>
-            Install to first trade, by device. Cohorts from the last {days} days that have had a
-            full {windowKey} to convert.
+            New user &rarr; first trade. Cohort = devices whose first (non-replay) intro start landed
+            in the last {days} days and have had a full {windowKey} to convert. Existing users and
+            builds without the funnel instrumentation are excluded by construction.
           </>
         }
         right={
@@ -106,14 +114,15 @@ export default async function JourneyPage({
           <code className="text-ink-1">24h</code> window two days after its date, and in{' '}
           <code className="text-ink-1">7d</code> eight days after — so this stays empty for the first
           days after the rollup is switched on. If it is still empty later, check that{' '}
-          <code className="text-ink-1">app_first_open</code> is arriving at ingest.
+          <code className="text-ink-1">intro_started</code> is arriving at ingest (only builds with
+          the funnel instrumentation emit it).
         </div>
       )}
 
       {result.ok && result.data.steps.length > 0 && (
         <section className="space-y-4">
-          <SectionHeading meta={`${result.data.steps[0]?.cohort_size.toLocaleString('en-US')} devices`}>
-            Install to first trade
+          <SectionHeading meta={`${result.data.steps[0]?.cohort_size.toLocaleString('en-US')} new users`}>
+            New user &rarr; first trade
           </SectionHeading>
 
           <div className="overflow-x-auto">
@@ -170,11 +179,13 @@ export default async function JourneyPage({
           </div>
 
           <p className="text-xs leading-relaxed text-ink-2">
-            Each row counts devices that reached that step within {windowKey} of their first open,
-            whether or not they passed through the step above — people do skip deposit and trade on
-            referral points. A step can therefore read higher than the one above it, and that gain is
-            the skip rate, not a bug. Leg times are medians with p90 beside them: a wide gap means a
-            subset is stuck rather than the whole step being slow.
+            Cohort = new users who started the intro (non-replay), so existing users and
+            un-instrumented builds never enter here. Each row counts devices that reached that step
+            within {windowKey} of starting the intro, whether or not they passed through the step
+            above — people do skip deposit and trade on referral points. A step can therefore read
+            higher than the one above it, and that gain is the skip rate, not a bug. Leg times are
+            medians with p90 beside them: a wide gap means a subset is stuck rather than the whole
+            step being slow.
           </p>
         </section>
       )}
