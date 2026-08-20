@@ -82,11 +82,12 @@ export default async function JourneyPage({
         title="Journey"
         subtitle={
           <>
-            How far new users get after they start the intro. Each person is followed for{' '}
-            <strong className="text-ink-1">{windowKey} from their own first open</strong> &mdash; this
+            How far new users get after they start the intro. Each one is followed for{' '}
+            <strong className="text-ink-1">{windowKey} from their own intro start</strong> &mdash; this
             is <strong className="text-ink-1">not</strong> the last {windowKey} of activity, and the
-            total below is every new user across all the days listed, added together. Existing users
-            and un-instrumented builds never enter.
+            total below is every new user across all the days listed, added together. Counting is per
+            device, so one person on two phones counts twice. Existing users and un-instrumented
+            builds never enter.
           </>
         }
         right={
@@ -151,7 +152,7 @@ export default async function JourneyPage({
               "today". That single omission is what made this page unusable. */}
           <p className="-mt-2 text-xs leading-relaxed text-ink-2">
             <strong className="text-ink-1">
-              {cohortSize.toLocaleString('en-US')} people started the intro
+              {cohortSize.toLocaleString('en-US')} devices started the intro
             </strong>{' '}
             {rangeLabel ? (
               <>
@@ -175,11 +176,13 @@ export default async function JourneyPage({
           {thinData && (
             <div className="rounded-lg border border-hairline bg-white/[0.02] p-4 text-xs leading-relaxed text-ink-2">
               <span className="text-ink-1">Not enough data to read yet.</span> This window only has{' '}
-              {coverage?.cohort_days} day{coverage?.cohort_days === 1 ? '' : 's'} of users in it,
+              {coverage?.cohort_days} day{coverage?.cohort_days === 1 ? '' : 's'} of cohorts in it,
               because a day has to wait a full {windowKey} before it can be included. The{' '}
               <code className="text-ink-1">7d</code> view fills in more slowly than{' '}
-              <code className="text-ink-1">24h</code> for exactly this reason — it is not showing you
-              fewer people, it is showing you fewer <em>days</em>.
+              <code className="text-ink-1">24h</code> for exactly this reason: it contains fewer
+              matured days, and therefore a smaller total. The difference between the two headline
+              numbers is <em>days included</em>, not a different population &mdash; percentages off
+              this few devices are noise either way.
             </div>
           )}
 
