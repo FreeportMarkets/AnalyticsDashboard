@@ -1,7 +1,14 @@
 import { auth } from '@/auth'
 import { PageHeader } from '@/components/PageHeader'
 import { SectionHeading } from '@/components/SectionHeading'
-import { fetchFunnel, formatDuration, STEP_LABELS, type FunnelStep } from '@/lib/funnelApi'
+import {
+  fetchFunnel,
+  formatDuration,
+  formatCohortRange,
+  daysBehind,
+  STEP_LABELS,
+  type FunnelStep,
+} from '@/lib/funnelApi'
 
 export const dynamic = 'force-dynamic'
 
@@ -52,6 +59,21 @@ export default async function JourneyPage({
 
   const result = await fetchFunnel({ window: windowKey, days })
 
+  const coverage = result.ok ? result.data.coverage : undefined
+  const rangeLabel = formatCohortRange(coverage)
+  const behind = daysBehind(coverage)
+  const cohortSize = result.ok ? (result.data.steps[0]?.cohort_size ?? 0) : 0
+  // Percentages off a handful of people are noise, and the 7d window sits here
+  // for its first week of life. Say so rather than letting someone quote 33%.
+  const thinData = Boolean(coverage && coverage.cohort_days > 0 && coverage.cohort_days < 5)
+  const headingMeta = [
+    `${cohortSize.toLocaleString('en-US')} new users`,
+    rangeLabel,
+    `followed ${windowKey} each`,
+  ]
+    .filter(Boolean)
+    .join(' · ')
+
   return (
     // Same shell as every other page: without it the heading sits flush against
     // the viewport edge and gets clipped at the top.
@@ -60,9 +82,12 @@ export default async function JourneyPage({
         title="Journey"
         subtitle={
           <>
-            New user &rarr; first trade. Cohort = devices whose first (non-replay) intro start landed
-            in the last {days} days and have had a full {windowKey} to convert. Existing users and
-            builds without the funnel instrumentation are excluded by construction.
+            How far new users get after they start the intro. Each one is followed for{' '}
+            <strong className="text-ink-1">{windowKey} from their own intro start</strong> &mdash; this
+            is <strong className="text-ink-1">not</strong> the last {windowKey} of activity, and the
+            total below is every new user across all the days listed, added together. Counting is per
+            device, so one person on two phones counts twice. Existing users and un-instrumented
+            builds never enter.
           </>
         }
         right={
@@ -121,9 +146,45 @@ export default async function JourneyPage({
 
       {result.ok && result.data.steps.length > 0 && (
         <section className="space-y-4">
-          <SectionHeading meta={`${result.data.steps[0]?.cohort_size.toLocaleString('en-US')} new users`}>
-            New user &rarr; first trade
-          </SectionHeading>
+          <SectionHeading meta={headingMeta}>New user &rarr; first trade</SectionHeading>
+
+          {/* A total summed over N days, printed without saying so, reads as
+              "today". That single omission is what made this page unusable. */}
+          <p className="-mt-2 text-xs leading-relaxed text-ink-2">
+            <strong className="text-ink-1">
+              {cohortSize.toLocaleString('en-US')} devices started the intro
+            </strong>{' '}
+            {rangeLabel ? (
+              <>
+                between <strong className="text-ink-1">{rangeLabel}</strong>
+                {coverage?.cohort_days ? ` (${coverage.cohort_days} days, added together)` : null}
+              </>
+            ) : (
+              'in the published range'
+            )}
+            {behind !== null && (
+              <>
+                {'. '}Newest day here is{' '}
+                <strong className="text-ink-1">
+                  {behind === 0 ? 'today' : `${behind} day${behind === 1 ? '' : 's'} old`}
+                </strong>
+                {behind > 0 && ` — a day only appears once everyone in it has had their full ${windowKey}.`}
+              </>
+            )}
+          </p>
+
+          {thinData && (
+            <div className="rounded-lg border border-hairline bg-white/[0.02] p-4 text-xs leading-relaxed text-ink-2">
+              <span className="text-ink-1">Not enough data to read yet.</span> This window only has{' '}
+              {coverage?.cohort_days} day{coverage?.cohort_days === 1 ? '' : 's'} of cohorts in it,
+              because a day has to wait a full {windowKey} before it can be included. The{' '}
+              <code className="text-ink-1">7d</code> view fills in more slowly than{' '}
+              <code className="text-ink-1">24h</code> for exactly this reason: it contains fewer
+              matured days, and therefore a smaller total. The difference between the two headline
+              numbers is <em>days included</em>, not a different population &mdash; percentages off
+              this few devices are noise either way.
+            </div>
+          )}
 
           <div className="overflow-x-auto">
             <table className="w-full min-w-[720px] border-collapse text-sm">
@@ -179,10 +240,14 @@ export default async function JourneyPage({
           </div>
 
           <p className="text-xs leading-relaxed text-ink-2">
-            Cohort = new users who started the intro (non-replay), so existing users and
-            un-instrumented builds never enter here. Each row counts devices that reached that step
-            within {windowKey} of starting the intro, whether or not they passed through the step
-            above — people do skip deposit and trade on referral points. A step can therefore read
+            The headline number is a <strong className="text-ink-1">running total across every day
+            listed above</strong>, not a count for today. Switching between {' '}
+            <code className="text-ink-1">24h</code> and <code className="text-ink-1">7d</code> changes
+            how long each person is followed, which changes how old a day must be to qualify — so the
+            two views legitimately contain different numbers of days and different totals. Cohort =
+            new users who started the intro (non-replay), so existing users and un-instrumented builds
+            never enter here. Each row counts devices that reached that step within {windowKey} of
+            starting the intro, whether or not they passed through the step above — people do skip deposit and trade on referral points. A step can therefore read
             higher than the one above it, and that gain is the skip rate, not a bug. Leg times are
             medians with p90 beside them: a wide gap means a subset is stuck rather than the whole
             step being slow.
