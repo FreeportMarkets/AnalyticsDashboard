@@ -8,6 +8,7 @@ import {
   daysBehind,
   STEP_LABELS,
   type FunnelStep,
+  type FunnelCoverage,
 } from '@/lib/funnelApi'
 
 export const dynamic = 'force-dynamic'
@@ -35,13 +36,91 @@ function first(v: string | string[] | undefined): string | undefined {
 
 const pct = (f: number) => `${(f * 100).toFixed(1)}%`
 
-function Bar({ fraction }: { fraction: number }) {
+const ISO = /^\d{4}-\d{2}-\d{2}$/
+/** Only forward a well-formed date; the API 400s on anything else. */
+function isoOrUndefined(v: string | undefined): string | undefined {
+  return v && ISO.test(v) ? v : undefined
+}
+
+const today = () => new Date().toISOString().slice(0, 10)
+const daysAgo = (n: number) =>
+  new Date(Date.now() - n * 86_400_000).toISOString().slice(0, 10)
+
+function Bar({ fraction, muted = false }: { fraction: number; muted?: boolean }) {
   return (
     <div className="relative h-2.5 w-full overflow-hidden rounded-full bg-surface">
       <div
-        className="h-full rounded-full bg-accent-bar"
+        className={`h-full rounded-full ${muted ? 'bg-accent-bar/40' : 'bg-accent-bar'}`}
         style={{ width: `${Math.max(fraction * 100, fraction > 0 ? 1.5 : 0)}%` }}
       />
+    </div>
+  )
+}
+
+/**
+ * One funnel. Shared by the matured block and the provisional one so the two
+ * can never drift into showing the same numbers differently — the only visual
+ * difference is `muted`, which is what marks a block as still filling.
+ */
+function FunnelTable({
+  steps,
+  muted = false,
+}: {
+  steps: FunnelStep[]
+  muted?: boolean
+}) {
+  return (
+    <div className="overflow-x-auto">
+      <table className="w-full min-w-[720px] border-collapse text-sm">
+        <thead>
+          <tr className="border-b border-hairline text-left text-xs uppercase tracking-wide text-ink-2">
+            <th className="pb-2 pr-4 font-medium">Step</th>
+            <th className="pb-2 pr-4 font-medium">Reached</th>
+            <th className="w-[28%] pb-2 pr-4 font-medium">Share</th>
+            <th className="pb-2 pr-4 text-right font-medium tabular-nums">Drop</th>
+            <th className="pb-2 pr-4 text-right font-medium tabular-nums">Median leg</th>
+            <th className="pb-2 text-right font-medium tabular-nums">p90 leg</th>
+          </tr>
+        </thead>
+        <tbody>
+          {steps.map((step: FunnelStep, i: number) => {
+            const prev = i > 0 ? steps[i - 1] : null
+            // Drop measured against the previous step, which is what the
+            // eye compares. It can be NEGATIVE: a device that skipped the
+            // step above still counts here, and that gain is the skip
+            // rate rather than an error.
+            const drop = prev ? prev.conversion - step.conversion : 0
+            return (
+              <tr key={step.step_key} className="border-b border-hairline/50">
+                <td className="py-3 pr-4 text-ink-1">
+                  {STEP_LABELS[step.step_key] ?? step.step_key}
+                  <div className="text-xs text-ink-2">{step.step_key}</div>
+                </td>
+                <td className="py-3 pr-4 tabular-nums text-ink-1">
+                  {step.users_reached.toLocaleString('en-US')}
+                </td>
+                <td className="py-3 pr-4">
+                  <div className="flex items-center gap-3">
+                    <Bar fraction={step.conversion} muted={muted} />
+                    <span className="w-14 shrink-0 text-right tabular-nums text-ink-1">
+                      {pct(step.conversion)}
+                    </span>
+                  </div>
+                </td>
+                <td className="py-3 pr-4 text-right tabular-nums text-ink-2">
+                  {i === 0 ? '—' : drop > 0 ? `−${pct(drop)}` : drop < 0 ? `+${pct(-drop)}` : '0%'}
+                </td>
+                <td className="py-3 pr-4 text-right tabular-nums text-ink-1">
+                  {formatDuration(step.p50_ms)}
+                </td>
+                <td className="py-3 text-right tabular-nums text-ink-2">
+                  {formatDuration(step.p90_ms)}
+                </td>
+              </tr>
+            )
+          })}
+        </tbody>
+      </table>
     </div>
   )
 }
@@ -56,13 +135,21 @@ export default async function JourneyPage({
 
   const windowKey = first(params.window) === '24h' ? '24h' : '7d'
   const days = Number(first(params.days)) || 30
+  const from = isoOrUndefined(first(params.from))
+  const to = isoOrUndefined(first(params.to))
 
-  const result = await fetchFunnel({ window: windowKey, days })
+  const result = await fetchFunnel({ window: windowKey, days, from, to })
 
   const coverage = result.ok ? result.data.coverage : undefined
   const rangeLabel = formatCohortRange(coverage)
   const behind = daysBehind(coverage)
   const cohortSize = result.ok ? (result.data.steps[0]?.cohort_size ?? 0) : 0
+  // The unmatured tail. Rendered as its own block and NEVER added to the
+  // headline: those users have not had their window yet, so their later steps
+  // are undercounted and a blended total would belong to no real population.
+  const provisional = result.ok ? result.data.provisional : null
+  const provisionalCoverage: FunnelCoverage | undefined = provisional?.coverage
+  const provisionalSize = provisional?.steps[0]?.cohort_size ?? 0
   // Percentages off a handful of people are noise, and the 7d window sits here
   // for its first week of life. Say so rather than letting someone quote 33%.
   const thinData = Boolean(coverage && coverage.cohort_days > 0 && coverage.cohort_days < 5)
@@ -73,6 +160,29 @@ export default async function JourneyPage({
   ]
     .filter(Boolean)
     .join(' · ')
+
+  // Presets write an explicit cohort-date range. "All" drops it and falls back
+  // to the trailing-`days` behaviour the page has always had.
+  const ranges: { label: string; href: string; active: boolean }[] = [
+    { label: 'All', from: undefined, to: undefined },
+    { label: '14d', from: daysAgo(14), to: today() },
+    { label: '30d', from: daysAgo(30), to: today() },
+    { label: '90d', from: daysAgo(90), to: today() },
+  ].map((r) => {
+    const qs = new URLSearchParams({ window: windowKey, days: String(days) })
+    if (r.from) qs.set('from', r.from)
+    if (r.to) qs.set('to', r.to)
+    return {
+      label: r.label,
+      href: `/journey?${qs.toString()}`,
+      active: (from ?? undefined) === r.from && (to ?? undefined) === r.to,
+    }
+  })
+
+  const pill = (active: boolean) =>
+    active
+      ? 'rounded-md bg-white/10 px-3 py-1.5 text-ink-1'
+      : 'rounded-md px-3 py-1.5 text-ink-2 hover:text-accent'
 
   return (
     // Same shell as every other page: without it the heading sits flush against
@@ -91,20 +201,27 @@ export default async function JourneyPage({
           </>
         }
         right={
-          <div className="flex gap-1 text-sm">
-            {(['24h', '7d'] as const).map((w) => (
-              <a
-                key={w}
-                href={`/journey?window=${w}&days=${days}`}
-                className={
-                  w === windowKey
-                    ? 'rounded-md bg-white/10 px-3 py-1.5 text-ink-1'
-                    : 'rounded-md px-3 py-1.5 text-ink-2 hover:text-accent'
-                }
-              >
-                {w}
-              </a>
-            ))}
+          <div className="flex flex-col items-end gap-1.5">
+            <div className="flex gap-1 text-sm">
+              {(['24h', '7d'] as const).map((w) => {
+                const qs = new URLSearchParams({ window: w, days: String(days) })
+                if (from) qs.set('from', from)
+                if (to) qs.set('to', to)
+                return (
+                  <a key={w} href={`/journey?${qs.toString()}`} className={pill(w === windowKey)}>
+                    {w}
+                  </a>
+                )
+              })}
+            </div>
+            <div className="flex items-center gap-1 text-xs">
+              <span className="pr-1 text-ink-2">Cohort dates</span>
+              {ranges.map((r) => (
+                <a key={r.label} href={r.href} className={pill(r.active)}>
+                  {r.label}
+                </a>
+              ))}
+            </div>
           </div>
         }
       />
@@ -122,6 +239,14 @@ export default async function JourneyPage({
             <>
               <span className="text-ink-1">Rejected by the API.</span> The configured secret does not
               match the one on the trading backend.
+            </>
+          )}
+          {result.reason === 'bad_range' && (
+            <>
+              <span className="text-ink-1">That date range cannot be read.</span> Dates must be{' '}
+              <code className="text-ink-1">YYYY-MM-DD</code>, must exist on the calendar, and{' '}
+              <code className="text-ink-1">from</code> must not come after{' '}
+              <code className="text-ink-1">to</code>. Pick a preset above to reset it.
             </>
           )}
           {result.reason === 'unreachable' && (
@@ -186,58 +311,7 @@ export default async function JourneyPage({
             </div>
           )}
 
-          <div className="overflow-x-auto">
-            <table className="w-full min-w-[720px] border-collapse text-sm">
-              <thead>
-                <tr className="border-b border-hairline text-left text-xs uppercase tracking-wide text-ink-2">
-                  <th className="pb-2 pr-4 font-medium">Step</th>
-                  <th className="pb-2 pr-4 font-medium">Reached</th>
-                  <th className="w-[28%] pb-2 pr-4 font-medium">Share</th>
-                  <th className="pb-2 pr-4 text-right font-medium tabular-nums">Drop</th>
-                  <th className="pb-2 pr-4 text-right font-medium tabular-nums">Median leg</th>
-                  <th className="pb-2 text-right font-medium tabular-nums">p90 leg</th>
-                </tr>
-              </thead>
-              <tbody>
-                {result.data.steps.map((step: FunnelStep, i: number) => {
-                  const prev = i > 0 ? result.data.steps[i - 1] : null
-                  // Drop measured against the previous step, which is what the
-                  // eye compares. It can be NEGATIVE: a device that skipped the
-                  // step above still counts here, and that gain is the skip
-                  // rate rather than an error.
-                  const drop = prev ? prev.conversion - step.conversion : 0
-                  return (
-                    <tr key={step.step_key} className="border-b border-hairline/50">
-                      <td className="py-3 pr-4 text-ink-1">
-                        {STEP_LABELS[step.step_key] ?? step.step_key}
-                        <div className="text-xs text-ink-2">{step.step_key}</div>
-                      </td>
-                      <td className="py-3 pr-4 tabular-nums text-ink-1">
-                        {step.users_reached.toLocaleString('en-US')}
-                      </td>
-                      <td className="py-3 pr-4">
-                        <div className="flex items-center gap-3">
-                          <Bar fraction={step.conversion} />
-                          <span className="w-14 shrink-0 text-right tabular-nums text-ink-1">
-                            {pct(step.conversion)}
-                          </span>
-                        </div>
-                      </td>
-                      <td className="py-3 pr-4 text-right tabular-nums text-ink-2">
-                        {i === 0 ? '—' : drop > 0 ? `−${pct(drop)}` : drop < 0 ? `+${pct(-drop)}` : '0%'}
-                      </td>
-                      <td className="py-3 pr-4 text-right tabular-nums text-ink-1">
-                        {formatDuration(step.p50_ms)}
-                      </td>
-                      <td className="py-3 text-right tabular-nums text-ink-2">
-                        {formatDuration(step.p90_ms)}
-                      </td>
-                    </tr>
-                  )
-                })}
-              </tbody>
-            </table>
-          </div>
+          <FunnelTable steps={result.data.steps} />
 
           <p className="text-xs leading-relaxed text-ink-2">
             The headline number is a <strong className="text-ink-1">running total across every day
@@ -252,6 +326,37 @@ export default async function JourneyPage({
             medians with p90 beside them: a wide gap means a subset is stuck rather than the whole
             step being slow.
           </p>
+        </section>
+      )}
+
+      {/* The newest days, still filling. Deliberately its own block with its own
+          total: these cohorts have not had their full window, so their later
+          steps are undercounted and the two totals must never be added. */}
+      {result.ok && provisional && provisional.steps.length > 0 && (
+        <section className="space-y-4 rounded-lg border border-dashed border-hairline p-5">
+          <SectionHeading
+            meta={[
+              `${provisionalSize.toLocaleString('en-US')} new users`,
+              formatCohortRange(provisionalCoverage),
+              'still filling',
+            ]
+              .filter(Boolean)
+              .join(' · ')}
+          >
+            Too recent to be final
+          </SectionHeading>
+
+          <p className="-mt-2 text-xs leading-relaxed text-ink-2">
+            These days have <strong className="text-ink-1">not had their full {windowKey}</strong>{' '}
+            yet, so everyone in them still has time left. Counts here can only rise, and the later
+            steps are undercounted for that reason alone.{' '}
+            <strong className="text-ink-1">Do not add this total to the one above</strong>, and do not
+            compare these percentages with the matured ones — the two are measured over different
+            amounts of elapsed time. This is here so a campaign switched on this week is visible at
+            all, not so it can be scored yet.
+          </p>
+
+          <FunnelTable steps={provisional.steps} muted />
         </section>
       )}
     </main>
