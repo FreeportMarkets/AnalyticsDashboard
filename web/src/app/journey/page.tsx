@@ -36,15 +36,27 @@ function first(v: string | string[] | undefined): string | undefined {
 
 const pct = (f: number) => `${(f * 100).toFixed(1)}%`
 
-const ISO = /^\d{4}-\d{2}-\d{2}$/
-/** Only forward a well-formed date; the API 400s on anything else. */
-function isoOrUndefined(v: string | undefined): string | undefined {
-  return v && ISO.test(v) ? v : undefined
-}
-
+/**
+ * Cohort dates are UTC days.
+ *
+ * `cohort_date` is derived from `server_ts` in UTC by the rollup, and the rest
+ * of this page already reads them that way (`formatCohortRange` parses at UTC
+ * noon on purpose). Deriving presets in local time instead would shift the
+ * bounds by a day for anyone west of Greenwich and, between 00:00 UTC and local
+ * midnight, would ask for a `to` that excludes the newest cohort — the exact
+ * blind spot the provisional block exists to close.
+ */
 const today = () => new Date().toISOString().slice(0, 10)
 const daysAgo = (n: number) =>
   new Date(Date.now() - n * 86_400_000).toISOString().slice(0, 10)
+
+/**
+ * A preset labelled "14d" must select 14 cohort dates, not 15.
+ *
+ * The API's range is inclusive at BOTH ends, so `from = today - 14` through
+ * `to = today` is 15 calendar days. Offsetting by n-1 makes the label true.
+ */
+const presetFrom = (n: number) => daysAgo(n - 1)
 
 function Bar({ fraction, muted = false }: { fraction: number; muted?: boolean }) {
   return (
@@ -135,8 +147,12 @@ export default async function JourneyPage({
 
   const windowKey = first(params.window) === '24h' ? '24h' : '7d'
   const days = Number(first(params.days)) || 30
-  const from = isoOrUndefined(first(params.from))
-  const to = isoOrUndefined(first(params.to))
+  // Forwarded RAW, deliberately. Silently dropping a malformed date here would
+  // render a confident-looking funnel for the default range instead of the
+  // dedicated bad_range state — the same "plausible number for the wrong dates"
+  // failure the API rejects 400 to avoid. The API is the single validator.
+  const from = first(params.from)
+  const to = first(params.to)
 
   const result = await fetchFunnel({ window: windowKey, days, from, to })
 
@@ -164,12 +180,14 @@ export default async function JourneyPage({
   // Presets write an explicit cohort-date range. "All" drops it and falls back
   // to the trailing-`days` behaviour the page has always had.
   const ranges: { label: string; href: string; active: boolean }[] = [
-    { label: 'All', from: undefined, to: undefined },
-    { label: '14d', from: daysAgo(14), to: today() },
-    { label: '30d', from: daysAgo(30), to: today() },
-    { label: '90d', from: daysAgo(90), to: today() },
+    // "All" drops the range entirely and asks for the widest horizon the API
+    // serves (MAX_DAYS = 90), so the label is not a promise it cannot keep.
+    { label: 'All', from: undefined, to: undefined, days: 90 },
+    { label: '14d', from: presetFrom(14), to: today(), days },
+    { label: '30d', from: presetFrom(30), to: today(), days },
+    { label: '90d', from: presetFrom(90), to: today(), days },
   ].map((r) => {
-    const qs = new URLSearchParams({ window: windowKey, days: String(days) })
+    const qs = new URLSearchParams({ window: windowKey, days: String(r.days) })
     if (r.from) qs.set('from', r.from)
     if (r.to) qs.set('to', r.to)
     return {
