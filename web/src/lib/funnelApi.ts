@@ -39,18 +39,39 @@ export interface FunnelCoverage {
   cohort_days: number
 }
 
+/**
+ * The unmatured tail: the newest cohort days, which have NOT had their full
+ * window yet and whose counts can therefore only rise.
+ *
+ * Kept apart from `steps` on purpose. A partial day's later steps are
+ * undercounted by construction — those users have not had their chance — so
+ * adding the two together yields a confident-looking number belonging to no
+ * real population. Render it as its own block, never folded into the headline.
+ *
+ * Undefined/null when the backend has the feature off or the range ends in the
+ * past; the page then omits the section entirely.
+ */
+export interface FunnelProvisional {
+  coverage: FunnelCoverage
+  steps: FunnelStep[]
+}
+
 export interface FunnelResponse {
   window: '24h' | '7d'
   segment: { key: string; value: string }
   days: number
+  /** The explicit cohort-date range, when one was asked for. */
+  range?: { from: string; to: string } | null
   /** Older backends may not send this; callers must tolerate undefined. */
   coverage?: FunnelCoverage
   steps: FunnelStep[]
+  /** Older backends may not send this; callers must tolerate undefined. */
+  provisional?: FunnelProvisional | null
 }
 
 export type FunnelResult =
   | { ok: true; data: FunnelResponse }
-  | { ok: false; reason: 'not_configured' | 'unauthorized' | 'unreachable' }
+  | { ok: false; reason: 'not_configured' | 'unauthorized' | 'unreachable' | 'bad_range' }
 
 const BASE = process.env.TRADING_API_BASE_URL ?? 'https://trading-api.freeportmarkets.com'
 
@@ -63,6 +84,9 @@ export async function fetchFunnel(opts: {
   days?: number
   segmentKey?: 'overall' | 'platform'
   segmentValue?: string
+  /** ISO `YYYY-MM-DD`. Sent only when set; the API rejects malformed dates. */
+  from?: string
+  to?: string
 }): Promise<FunnelResult> {
   const secret = process.env.ANALYTICS_FUNNEL_READ_SECRET
   if (!secret) return { ok: false, reason: 'not_configured' }
@@ -75,6 +99,8 @@ export async function fetchFunnel(opts: {
   if (opts.segmentKey === 'platform' && opts.segmentValue) {
     params.set('segment_value', opts.segmentValue)
   }
+  if (opts.from) params.set('from', opts.from)
+  if (opts.to) params.set('to', opts.to)
 
   try {
     const res = await fetch(`${BASE}/v1/analytics/funnel?${params.toString()}`, {
@@ -84,6 +110,10 @@ export async function fetchFunnel(opts: {
       next: { revalidate: 60 },
     })
     if (res.status === 401) return { ok: false, reason: 'unauthorized' }
+    // The API rejects a malformed or impossible range rather than quietly
+    // widening it, so this is a bad URL, not a backend problem — say so, or the
+    // page blames the backend for a typo in the address bar.
+    if (res.status === 400) return { ok: false, reason: 'bad_range' }
     if (!res.ok) return { ok: false, reason: 'unreachable' }
     return { ok: true, data: (await res.json()) as FunnelResponse }
   } catch {
