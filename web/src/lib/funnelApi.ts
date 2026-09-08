@@ -105,6 +105,7 @@ export async function fetchFunnel(opts: {
   try {
     const res = await fetch(`${BASE}/v1/analytics/funnel?${params.toString()}`, {
       headers: { 'x-funnel-secret': secret },
+      signal: AbortSignal.timeout(10_000),
       // The rollup only moves every 15 minutes, so a short cache spares the
       // API on refreshes without ever showing a stale-by-hours number.
       next: { revalidate: 60 },
@@ -128,12 +129,12 @@ export const STEP_LABELS: Record<string, string> = {
   app_first_open: 'Opened the app',
   intro_started: 'Started the intro',
   intro_completed: 'Finished the intro',
-  auth_succeeded: 'Made an account',
+  auth_succeeded: 'Signed in',
   deposit_opened: 'Opened deposit',
-  deposit_method_selected: 'Chose a method',
-  deposit_started: 'Started paying',
-  deposit_completed: 'Paid',
-  deposit_funds_arrived: 'Money landed',
+  deposit_method_selected: 'Chose a funding method',
+  deposit_started: 'Started payment',
+  deposit_completed: 'Completed payment',
+  deposit_funds_arrived: 'Funds arrived',
   trade_submitted: 'Placed a trade',
   trade_succeeded: 'Trade filled',
 }

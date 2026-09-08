@@ -1,20 +1,21 @@
+import { Suspense } from 'react'
+import { JourneyDaily } from '@/components/JourneyDaily'
 import { auth } from '@/auth'
 import { PageHeader } from '@/components/PageHeader'
 import { SectionHeading } from '@/components/SectionHeading'
+import { JourneyMilestones, JourneyOutcome, JourneyTiming } from '@/components/JourneyMilestones'
 import {
   fetchFunnel,
-  formatDuration,
   formatCohortRange,
   daysBehind,
-  STEP_LABELS,
-  type FunnelStep,
   type FunnelCoverage,
 } from '@/lib/funnelApi'
 
 export const dynamic = 'force-dynamic'
+export const maxDuration = 60
 
 /**
- * The new-user → first-trade timeline.
+ * Daily account growth plus the intro-device → first-trade cohort.
  *
  * Starts at 100% of a day's NEW USERS — devices whose first non-replay
  * `intro_started` landed that day — and shows how far they got, with the time
@@ -27,14 +28,13 @@ export const dynamic = 'force-dynamic'
  *
  * Distinct from /funnels, which composes arbitrary sequences from the synced
  * `events` table (keyed on `wallet_address`, so it cannot see anything before an
- * account exists). This page is keyed on device identity.
+ * account exists). Only the intro cohort is keyed on device identity;
+ * the daily chart counts accounts and uses New York calendar days.
  */
 
 function first(v: string | string[] | undefined): string | undefined {
   return Array.isArray(v) ? v[0] : v
 }
-
-const pct = (f: number) => `${(f * 100).toFixed(1)}%`
 
 /**
  * Cohort dates are UTC days.
@@ -58,85 +58,6 @@ const daysAgo = (n: number) =>
  */
 const presetFrom = (n: number) => daysAgo(n - 1)
 
-function Bar({ fraction, muted = false }: { fraction: number; muted?: boolean }) {
-  return (
-    <div className="relative h-2.5 w-full overflow-hidden rounded-full bg-surface">
-      <div
-        className={`h-full rounded-full ${muted ? 'bg-accent-bar/40' : 'bg-accent-bar'}`}
-        style={{ width: `${Math.max(fraction * 100, fraction > 0 ? 1.5 : 0)}%` }}
-      />
-    </div>
-  )
-}
-
-/**
- * One funnel. Shared by the matured block and the provisional one so the two
- * can never drift into showing the same numbers differently — the only visual
- * difference is `muted`, which is what marks a block as still filling.
- */
-function FunnelTable({
-  steps,
-  muted = false,
-}: {
-  steps: FunnelStep[]
-  muted?: boolean
-}) {
-  return (
-    <div className="overflow-x-auto">
-      <table className="w-full min-w-[720px] border-collapse text-sm">
-        <thead>
-          <tr className="border-b border-hairline text-left text-xs uppercase tracking-wide text-ink-2">
-            <th className="pb-2 pr-4 font-medium">Step</th>
-            <th className="pb-2 pr-4 font-medium">Reached</th>
-            <th className="w-[28%] pb-2 pr-4 font-medium">Share</th>
-            <th className="pb-2 pr-4 text-right font-medium tabular-nums">Drop</th>
-            <th className="pb-2 pr-4 text-right font-medium tabular-nums">Median leg</th>
-            <th className="pb-2 text-right font-medium tabular-nums">p90 leg</th>
-          </tr>
-        </thead>
-        <tbody>
-          {steps.map((step: FunnelStep, i: number) => {
-            const prev = i > 0 ? steps[i - 1] : null
-            // Drop measured against the previous step, which is what the
-            // eye compares. It can be NEGATIVE: a device that skipped the
-            // step above still counts here, and that gain is the skip
-            // rate rather than an error.
-            const drop = prev ? prev.conversion - step.conversion : 0
-            return (
-              <tr key={step.step_key} className="border-b border-hairline/50">
-                <td className="py-3 pr-4 text-ink-1">
-                  {STEP_LABELS[step.step_key] ?? step.step_key}
-                  <div className="text-xs text-ink-2">{step.step_key}</div>
-                </td>
-                <td className="py-3 pr-4 tabular-nums text-ink-1">
-                  {step.users_reached.toLocaleString('en-US')}
-                </td>
-                <td className="py-3 pr-4">
-                  <div className="flex items-center gap-3">
-                    <Bar fraction={step.conversion} muted={muted} />
-                    <span className="w-14 shrink-0 text-right tabular-nums text-ink-1">
-                      {pct(step.conversion)}
-                    </span>
-                  </div>
-                </td>
-                <td className="py-3 pr-4 text-right tabular-nums text-ink-2">
-                  {i === 0 ? '—' : drop > 0 ? `−${pct(drop)}` : drop < 0 ? `+${pct(-drop)}` : '0%'}
-                </td>
-                <td className="py-3 pr-4 text-right tabular-nums text-ink-1">
-                  {formatDuration(step.p50_ms)}
-                </td>
-                <td className="py-3 text-right tabular-nums text-ink-2">
-                  {formatDuration(step.p90_ms)}
-                </td>
-              </tr>
-            )
-          })}
-        </tbody>
-      </table>
-    </div>
-  )
-}
-
 export default async function JourneyPage({
   searchParams,
 }: {
@@ -147,6 +68,7 @@ export default async function JourneyPage({
 
   const windowKey = first(params.window) === '24h' ? '24h' : '7d'
   const days = Number(first(params.days)) || 30
+  const order = first(params.order) === 'journey' ? 'journey' : 'reach'
   // Forwarded RAW, deliberately. Silently dropping a malformed date here would
   // render a confident-looking funnel for the default range instead of the
   // dedicated bad_range state — the same "plausible number for the wrong dates"
@@ -166,83 +88,85 @@ export default async function JourneyPage({
   const provisional = result.ok ? result.data.provisional : null
   const provisionalCoverage: FunnelCoverage | undefined = provisional?.coverage
   const provisionalSize = provisional?.steps[0]?.cohort_size ?? 0
-  // Percentages off a handful of people are noise, and the 7d window sits here
-  // for its first week of life. Say so rather than letting someone quote 33%.
+  // Date coverage is a separate limitation from sample size.
   const thinData = Boolean(coverage && coverage.cohort_days > 0 && coverage.cohort_days < 5)
   const headingMeta = [
-    `${cohortSize.toLocaleString('en-US')} new users`,
+    `${cohortSize.toLocaleString('en-US')} devices`,
     rangeLabel,
     `followed ${windowKey} each`,
   ]
     .filter(Boolean)
     .join(' · ')
 
-  // Presets write an explicit cohort-date range. "All" drops it and falls back
-  // to the trailing-`days` behaviour the page has always had.
+  // Date presets are inclusive UTC cohort dates, not activity dates.
   const ranges: { label: string; href: string; active: boolean }[] = [
-    // "All" drops the range entirely and asks for the widest horizon the API
-    // serves (MAX_DAYS = 90), so the label is not a promise it cannot keep.
-    { label: 'All', from: undefined, to: undefined, days: 90 },
     { label: '14d', from: presetFrom(14), to: today(), days },
     { label: '30d', from: presetFrom(30), to: today(), days },
     { label: '90d', from: presetFrom(90), to: today(), days },
   ].map((r) => {
-    const qs = new URLSearchParams({ window: windowKey, days: String(r.days) })
+    const qs = new URLSearchParams({ window: windowKey, days: String(r.days), order })
     if (r.from) qs.set('from', r.from)
     if (r.to) qs.set('to', r.to)
     return {
       label: r.label,
       href: `/journey?${qs.toString()}`,
-      active: (from ?? undefined) === r.from && (to ?? undefined) === r.to,
+      active: (from === r.from && to === r.to) || (!from && !to && Number(r.label.slice(0, -1)) === days),
     }
   })
 
   const pill = (active: boolean) =>
-    active
-      ? 'rounded-md bg-white/10 px-3 py-1.5 text-ink-1'
-      : 'rounded-md px-3 py-1.5 text-ink-2 hover:text-accent'
+    `inline-flex min-h-11 items-center rounded-md px-3 py-2 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent ${active ? 'bg-raised text-ink-1' : 'text-ink-2 hover:bg-surface hover:text-accent'}`
+
+  const orderHref = (next: string) => {
+    const qs = new URLSearchParams({ window: windowKey, days: String(days), order: next })
+    if (from) qs.set('from', from)
+    if (to) qs.set('to', to)
+    return `/journey?${qs.toString()}`
+  }
 
   return (
     // Same shell as every other page: without it the heading sits flush against
     // the viewport edge and gets clipped at the top.
-    <main className="mx-auto w-full max-w-[1600px] space-y-8 px-8 py-8">
+    <main className="mx-auto w-full max-w-[1600px] space-y-8 px-4 py-8 sm:px-8">
       <PageHeader
         title="Journey"
         subtitle={
           <>
-            How far new users get after they start the intro. Each one is followed for{' '}
-            <strong className="text-ink-1">{windowKey} from their own intro start</strong> &mdash; this
-            is <strong className="text-ink-1">not</strong> the last {windowKey} of activity, and the
-            total below is every new user across all the days listed, added together. Counting is per
-            device, so one person on two phones counts twice. Existing users and un-instrumented
-            builds never enter.
+            Track daily signups and first actions, then explore conversion after the intro.
           </>
         }
-        right={
-          <div className="flex flex-col items-end gap-1.5">
-            <div className="flex gap-1 text-sm">
+      />
+
+      <Suspense fallback={<section aria-label="Daily growth" className="rounded-xl border border-hairline p-5 text-sm text-ink-2"><p role="status">Loading daily signups and first actions…</p></section>}>
+        <JourneyDaily />
+      </Suspense>
+
+      <section aria-label="Intro cohort filters" className="flex flex-wrap items-start justify-between gap-4 border-t border-hairline pt-8">
+        <div><h2 className="text-lg font-semibold text-ink-1">Intro cohort analysis</h2><p className="mt-1 text-sm text-ink-2">Follow each device for a full observation window after it starts the intro.</p></div>
+          <div className="flex flex-col gap-1.5">
+            <div className="flex flex-wrap items-center gap-1 text-sm">
+              <span className="pr-2 text-xs text-ink-2">Time to convert</span>
               {(['24h', '7d'] as const).map((w) => {
-                const qs = new URLSearchParams({ window: w, days: String(days) })
+                const qs = new URLSearchParams({ window: w, days: String(days), order })
                 if (from) qs.set('from', from)
                 if (to) qs.set('to', to)
                 return (
-                  <a key={w} href={`/journey?${qs.toString()}`} className={pill(w === windowKey)}>
+                  <a key={w} href={`/journey?${qs.toString()}`} className={pill(w === windowKey)} aria-current={w === windowKey ? 'true' : undefined}>
                     {w}
                   </a>
                 )
               })}
             </div>
-            <div className="flex items-center gap-1 text-xs">
-              <span className="pr-1 text-ink-2">Cohort dates</span>
+            <div className="flex flex-wrap items-center gap-1 text-xs">
+              <span className="pr-1 text-ink-2">Intro start dates (UTC)</span>
               {ranges.map((r) => (
-                <a key={r.label} href={r.href} className={pill(r.active)}>
+                <a key={r.label} href={r.href} className={pill(r.active)} aria-current={r.active ? 'true' : undefined}>
                   {r.label}
                 </a>
               ))}
             </div>
           </div>
-        }
-      />
+      </section>
 
       {!result.ok && (
         <div className="rounded-lg border border-hairline p-6 text-sm text-ink-2">
@@ -278,72 +202,51 @@ export default async function JourneyPage({
 
       {result.ok && result.data.steps.length === 0 && (
         <div className="rounded-lg border border-hairline p-6 text-sm text-ink-2">
-          <span className="text-ink-1">No matured cohorts yet.</span> A cohort appears in the{' '}
-          <code className="text-ink-1">24h</code> window two days after its date, and in{' '}
-          <code className="text-ink-1">7d</code> eight days after — so this stays empty for the first
-          days after the rollup is switched on. If it is still empty later, check that{' '}
-          <code className="text-ink-1">intro_started</code> is arriving at ingest (only builds with
-          the funnel instrumentation emit it).
+          <span className="text-ink-1">No completed observation windows in this range.</span>{' '}
+          Try a wider intro date range or the 24-hour window. Recent starters appear below while
+          their observation windows are still open.
         </div>
       )}
 
       {result.ok && result.data.steps.length > 0 && (
-        <section className="space-y-4">
-          <SectionHeading meta={headingMeta}>New user &rarr; first trade</SectionHeading>
-
-          {/* A total summed over N days, printed without saying so, reads as
-              "today". That single omission is what made this page unusable. */}
-          <p className="-mt-2 text-xs leading-relaxed text-ink-2">
-            <strong className="text-ink-1">
-              {cohortSize.toLocaleString('en-US')} devices started the intro
-            </strong>{' '}
-            {rangeLabel ? (
-              <>
-                between <strong className="text-ink-1">{rangeLabel}</strong>
-                {coverage?.cohort_days ? ` (${coverage.cohort_days} days, added together)` : null}
-              </>
-            ) : (
-              'in the published range'
-            )}
-            {behind !== null && (
-              <>
-                {'. '}Newest day here is{' '}
-                <strong className="text-ink-1">
-                  {behind === 0 ? 'today' : `${behind} day${behind === 1 ? '' : 's'} old`}
-                </strong>
-                {behind > 0 && ` — a day only appears once everyone in it has had their full ${windowKey}.`}
-              </>
-            )}
+        <section className="space-y-5" aria-label="Completed observation windows">
+          <SectionHeading meta={headingMeta}>Intro to first trade</SectionHeading>
+          <p className="text-sm leading-relaxed text-ink-2">
+            Everyone here has had the full {windowKey === '24h' ? '24 hours' : '7 days'} to convert.
+            {coverage?.cohort_days ? ` Totals cover ${coverage.cohort_days} intro start dates (UTC).` : ' Actual intro date coverage was not supplied.'}
+            {behind !== null && ` The newest included start date is ${behind === 0 ? 'today' : `${behind} days ago`}.`}
           </p>
-
+          <JourneyOutcome steps={result.data.steps} windowLabel={windowKey === '24h' ? '24 hours' : '7 days'} />
           {thinData && (
-            <div className="rounded-lg border border-hairline bg-white/[0.02] p-4 text-xs leading-relaxed text-ink-2">
-              <span className="text-ink-1">Not enough data to read yet.</span> This window only has{' '}
-              {coverage?.cohort_days} day{coverage?.cohort_days === 1 ? '' : 's'} of cohorts in it,
-              because a day has to wait a full {windowKey} before it can be included. The{' '}
-              <code className="text-ink-1">7d</code> view fills in more slowly than{' '}
-              <code className="text-ink-1">24h</code> for exactly this reason: it contains fewer
-              matured days, and therefore a smaller total. The difference between the two headline
-              numbers is <em>days included</em>, not a different population &mdash; percentages off
-              this few devices are noise either way.
-            </div>
+            <p className="rounded-lg border border-hairline bg-surface/30 p-4 text-sm text-ink-2">
+              Limited date coverage: only {coverage?.cohort_days} intro start dates have completed
+              this observation window. Check a wider range before treating these results as a trend.
+            </p>
           )}
-
-          <FunnelTable steps={result.data.steps} />
-
-          <p className="text-xs leading-relaxed text-ink-2">
-            The headline number is a <strong className="text-ink-1">running total across every day
-            listed above</strong>, not a count for today. Switching between {' '}
-            <code className="text-ink-1">24h</code> and <code className="text-ink-1">7d</code> changes
-            how long each person is followed, which changes how old a day must be to qualify — so the
-            two views legitimately contain different numbers of days and different totals. Cohort =
-            new users who started the intro (non-replay), so existing users and un-instrumented builds
-            never enter here. Each row counts devices that reached that step within {windowKey} of
-            starting the intro, whether or not they passed through the step above — people do skip deposit and trade on referral points. A step can therefore read
-            higher than the one above it, and that gain is the skip rate, not a bug. Leg times are
-            medians with p90 beside them: a wide gap means a subset is stuck rather than the whole
-            step being slow.
-          </p>
+          <div className="space-y-4 pt-3">
+            <SectionHeading right={
+              <nav aria-label="Milestone order" className="flex flex-wrap gap-1 text-sm">
+                <a href={orderHref('reach')} className={pill(order === 'reach')} aria-current={order === 'reach' ? 'true' : undefined}>Most reached</a>
+                <a href={orderHref('journey')} className={pill(order === 'journey')} aria-current={order === 'journey' ? 'true' : undefined}>Journey order</a>
+              </nav>
+            }>Milestone reach</SectionHeading>
+            <p className="max-w-4xl text-sm leading-relaxed text-ink-2">
+              {order === 'reach' ? 'Sorted by device count, highest first. ' : 'Grouped in the reported journey order. '}
+              Each milestone is counted independently within the same intro cohort. People can take
+              different paths, so the difference between rows is not a drop-off rate.
+            </p>
+            <JourneyMilestones steps={result.data.steps} order={order} />
+          </div>
+          <JourneyTiming steps={result.data.steps} />
+          <details className="rounded-xl border border-hairline p-5 text-sm text-ink-2">
+            <summary className="cursor-pointer rounded font-medium text-ink-1 focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-4">How to read these numbers</summary>
+            <div className="mt-4 max-w-3xl space-y-3 leading-relaxed">
+              <p>A true step-by-step funnel counts only devices that completed every prior step in order. Its counts can only stay the same or decrease. This view receives separate milestone totals, which cannot reveal the overlap between steps or the route each device took.</p>
+              <p>For example, a transfer can add funds without a payment checkout. Referral points can let someone trade without depositing. More traders than depositors does not tell us exactly how many skipped a deposit.</p>
+              <p>Counts represent devices whose first non-replay intro start falls in the included UTC dates. One person on two devices can count twice. Existing users and builds without this tracking are excluded.</p>
+              <p>The 24-hour and 7-day views can include different intro dates because each cohort must finish its observation window. Compare the date coverage before comparing conversion rates. Recent starters below remain separate from completed windows.</p>
+            </div>
+          </details>
         </section>
       )}
 
@@ -354,27 +257,24 @@ export default async function JourneyPage({
         <section className="space-y-4 rounded-lg border border-dashed border-hairline p-5">
           <SectionHeading
             meta={[
-              `${provisionalSize.toLocaleString('en-US')} new users`,
+              `${provisionalSize.toLocaleString('en-US')} devices`,
               formatCohortRange(provisionalCoverage),
               'still filling',
             ]
               .filter(Boolean)
               .join(' · ')}
           >
-            Too recent to be final
+            Recent starters · still observing
           </SectionHeading>
 
-          <p className="-mt-2 text-xs leading-relaxed text-ink-2">
-            These days have <strong className="text-ink-1">not had their full {windowKey}</strong>{' '}
-            yet, so everyone in them still has time left. Counts here can only rise, and the later
-            steps are undercounted for that reason alone.{' '}
-            <strong className="text-ink-1">Do not add this total to the one above</strong>, and do not
-            compare these percentages with the matured ones — the two are measured over different
-            amounts of elapsed time. This is here so a campaign switched on this week is visible at
-            all, not so it can be scored yet.
+          <p className="text-sm leading-relaxed text-ink-2">
+            These devices still have time left in their {windowKey === '24h' ? '24-hour' : '7-day'} observation
+            window. Their current activity is shown separately; it is too early to score their final conversion.
           </p>
-
-          <FunnelTable steps={provisional.steps} muted />
+          <details>
+            <summary className="cursor-pointer rounded py-2 text-sm font-medium text-ink-1 focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-4">View activity so far</summary>
+            <div className="mt-3"><JourneyMilestones steps={provisional.steps} order={order} /></div>
+          </details>
         </section>
       )}
     </main>
