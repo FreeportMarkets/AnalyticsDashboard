@@ -355,7 +355,10 @@ export async function depositSummary(startDate: string, endDate: string): Promis
   // look identical on the page, and telling them apart is the whole reason this
   // function was wrong for weeks without anyone being able to see it.
   if (!result.ok) {
-    throw new Error(`depositSummary: backend ${result.reason}`)
+    // The trace id is the backend's, and it is in the log line for this exact
+    // request — see the `analytics/deposits-read-*` saved CloudWatch queries.
+    const trace = result.traceId ? ` (trace ${result.traceId})` : ''
+    throw new Error(`depositSummary: backend ${result.reason}${trace}`)
   }
 
   const d = result.data

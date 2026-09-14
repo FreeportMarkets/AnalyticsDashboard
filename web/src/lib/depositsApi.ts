@@ -24,14 +24,23 @@ export interface DepositsProviderRow {
 }
 
 export interface DepositsResponse {
+  trace_id?: string
   range: { from: string; to: string }
   totals: { initiated: number; success: number; error: number; conversion: number }
   by_provider: DepositsProviderRow[]
 }
 
+export type DepositsFailure = 'not_configured' | 'unauthorized' | 'bad_range' | 'unreachable'
+
 export type DepositsResult =
   | { ok: true; data: DepositsResponse }
-  | { ok: false; reason: 'not_configured' | 'unauthorized' | 'bad_range' | 'unreachable' }
+  /**
+   * `traceId` is the backend's, echoed in every response body including the
+   * 400 and 401. It is what turns "the page is erroring" into a single
+   * CloudWatch lookup (saved query `analytics/deposits-read-rejected`), so it
+   * is carried through to the thrown error rather than discarded here.
+   */
+  | { ok: false; reason: DepositsFailure; traceId?: string }
 
 export async function fetchDeposits(opts: {
   /** ISO `YYYY-MM-DD`. The API rejects malformed dates rather than widening. */
@@ -57,12 +66,22 @@ export async function fetchDeposits(opts: {
       // behind while someone is watching a payment go through.
       next: { revalidate: 30 },
     })
-    if (res.status === 401) return { ok: false, reason: 'unauthorized' }
-    // The API rejects an impossible range rather than quietly widening it, so
-    // this is a bad URL, not a backend fault — say so, or the page blames the
-    // backend for a typo in the address bar.
-    if (res.status === 400) return { ok: false, reason: 'bad_range' }
-    if (!res.ok) return { ok: false, reason: 'unreachable' }
+    if (!res.ok) {
+      // The API rejects an impossible range rather than quietly widening it, so
+      // a 400 is a bad URL, not a backend fault — say so, or the page blames
+      // the backend for a typo in the address bar.
+      const reason: DepositsFailure =
+        res.status === 401 ? 'unauthorized' : res.status === 400 ? 'bad_range' : 'unreachable'
+      // Best effort: an error body may not be JSON at all (a gateway's own 502
+      // page, say). Losing the trace id must not turn a 401 into a parse crash.
+      let traceId: string | undefined
+      try {
+        traceId = ((await res.json()) as { trace_id?: string }).trace_id
+      } catch {
+        traceId = undefined
+      }
+      return { ok: false, reason, traceId }
+    }
     return { ok: true, data: (await res.json()) as DepositsResponse }
   } catch {
     return { ok: false, reason: 'unreachable' }
