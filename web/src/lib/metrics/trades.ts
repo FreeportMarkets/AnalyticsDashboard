@@ -1,4 +1,5 @@
 import { sql } from '@/lib/db'
+import { fetchDeposits } from '../depositsApi'
 import { nyDateExpr } from '@/lib/time'
 import { nyRangeToUtc } from './nyRange'
 
@@ -324,47 +325,49 @@ export interface DepositSummary {
 }
 
 /**
- * Deposit funnel, sourced from `events` (deposit_initiated / deposit_success
- * / deposit_error), not `trades` -- deposits are not written to the trades
- * table in this schema. `metadata->>'provider'` gives the provider split
- * where present.
+ * Deposit funnel, served by the trading backend from RDS.
+ *
+ * ⚠️ IT USED TO READ THE NEON `events` TABLE, AND THAT IS WHY IT SHOWED ZERO.
+ *
+ * The query and the event names were right. The table was not: Neon `events`
+ * is fed ONLY by the DynamoDB sync, and the mobile app stopped writing to
+ * DynamoDB on 2026-08-08 when the analytics sink moved to
+ * `trading-api/v1/events/batch` -> RDS. This page was never repointed, so it
+ * asked a correct question of a table those events no longer reach and
+ * answered "No data in this range" for weeks.
+ *
+ * Measured 2026-09-14: RDS held 1,880 matching rows with last_seen = today
+ * (crossmint 1,331 initiated / 20 success / 55 error, applepay 214/14/42,
+ * stripe-headless 111/0/63, coinbase 10/0/10) while the page showed 0.
+ *
+ * Nothing broke. The data moved. Same reason `funnelApi.ts` exists: RDS is a
+ * private subnet with ECS-only ingress, so the backend serves the aggregate
+ * and Vercel reads it over an authenticated endpoint.
+ *
+ * Anything else on this console still reading `events` for MOBILE activity has
+ * the same bug. Web Terminal and server-side events are unaffected — those
+ * still flow to DynamoDB.
  */
 export async function depositSummary(startDate: string, endDate: string): Promise<DepositSummary> {
-  const { fromUtc, toUtc } = nyRangeToUtc(startDate, endDate)
+  const result = await fetchDeposits({ from: startDate, to: endDate })
 
-  const totalRows = (await sql(
-    `SELECT
-        count(*) FILTER (WHERE event = 'deposit_initiated')::int AS initiated,
-        count(*) FILTER (WHERE event = 'deposit_success')::int AS success,
-        count(*) FILTER (WHERE event = 'deposit_error')::int AS error
-       FROM events
-      WHERE ts >= $1 AND ts < $2
-        AND event IN ('deposit_initiated', 'deposit_success', 'deposit_error')`,
-    [fromUtc.toISOString(), toUtc.toISOString()]
-  )) as Array<{ initiated: number; success: number; error: number }>
+  // A failure is surfaced, never rendered as zeros. Zero and "we could not ask"
+  // look identical on the page, and telling them apart is the whole reason this
+  // function was wrong for weeks without anyone being able to see it.
+  if (!result.ok) {
+    // The trace id is the backend's, and it is in the log line for this exact
+    // request — see the `analytics/deposits-read-*` saved CloudWatch queries.
+    const trace = result.traceId ? ` (trace ${result.traceId})` : ''
+    throw new Error(`depositSummary: backend ${result.reason}${trace}`)
+  }
 
-  const byProviderRows = (await sql(
-    `SELECT coalesce(metadata->>'provider', 'unknown') AS provider,
-            count(*) FILTER (WHERE event = 'deposit_initiated')::int AS initiated,
-            count(*) FILTER (WHERE event = 'deposit_success')::int AS success,
-            count(*) FILTER (WHERE event = 'deposit_error')::int AS error
-       FROM events
-      WHERE ts >= $1 AND ts < $2
-        AND event IN ('deposit_initiated', 'deposit_success', 'deposit_error')
-      GROUP BY 1
-      ORDER BY initiated DESC`,
-    [fromUtc.toISOString(), toUtc.toISOString()]
-  )) as Array<{ provider: string; initiated: number; success: number; error: number }>
-
-  const t = totalRows[0]
-  if (!t) throw new Error('depositSummary: aggregate query returned no rows')
-
+  const d = result.data
   return {
-    initiated: t.initiated,
-    success: t.success,
-    error: t.error,
-    conversionRate: t.initiated > 0 ? t.success / t.initiated : 0,
-    byProvider: byProviderRows.map(r => ({
+    initiated: d.totals.initiated,
+    success: d.totals.success,
+    error: d.totals.error,
+    conversionRate: d.totals.conversion,
+    byProvider: d.by_provider.map(r => ({
       provider: r.provider, initiated: r.initiated, success: r.success, error: r.error,
     })),
   }
