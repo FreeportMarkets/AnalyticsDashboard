@@ -6,6 +6,7 @@ import {
   dailySeries,
   hourlyActivity,
   tradeSummary,
+  resolveVolume,
 } from '@/lib/metrics/overview'
 import { watermarkAge } from '@/lib/metrics/staleness'
 import { NY_TZ } from '@/lib/time'
@@ -113,11 +114,11 @@ export default async function OverviewPage({
   const maxHour = Math.max(...hourly.map(h => h.count), 1)
 
   // Prefer the HL builder-fee-authoritative volume (exact, per-fill) once the
-  // backfill has populated wallet_volume_daily; fall back to the DB
-  // reconstruction (labeled "est.") until then. See docs/volume-tracking.md.
-  const volume = hlVol.hasData
-    ? { current: hlVol.current, previous: hlVol.previous, source: 'hl' as const }
-    : { current: kpis.volumeUsd.current, previous: kpis.volumeUsd.previous, source: 'est' as const }
+  // backfill has populated wallet_volume_daily, plus exact swap volume added
+  // back on top (HL covers perps only); fall back to the DB reconstruction
+  // (labeled "est.") until then. See resolveVolume's doc comment and
+  // docs/volume-tracking.md.
+  const volume = resolveVolume(hlVol, kpis)
 
   return (
     <main className="mx-auto w-full max-w-[1600px] px-8 py-8">

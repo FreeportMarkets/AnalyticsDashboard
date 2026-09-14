@@ -3,6 +3,11 @@ import { nyDateExpr } from '@/lib/time'
 import { nyRangeToUtc } from './nyRange'
 import { VOLUME_USD_EXPR } from './trades'
 
+// Re-exported so existing `from '@/lib/metrics/overview'` call sites (the
+// Overview page) keep working unchanged -- see volumeResolve.ts's doc
+// comment for why the logic itself lives in a db-import-free module.
+export { resolveVolume, type VolumeResult } from './volumeResolve'
+
 /**
  * Same two rules as queries.ts: bucket with nyDateExpr('ts'), filter `ts`
  * with nyRangeToUtc bounds. Never GROUP BY or range-filter on `date` --
@@ -71,6 +76,8 @@ export interface KpiSummary {
   sessions: KpiValue
   trades: KpiValue
   volumeUsd: KpiValue
+  /** Swap-only volume, exact (never leverage-reconstructed). See `resolveVolume`. */
+  swapVolumeUsd: KpiValue
 }
 
 export async function kpiSummary(startDate: string, endDate: string): Promise<KpiSummary> {
@@ -115,7 +122,9 @@ export async function kpiSummary(startDate: string, endDate: string): Promise<Kp
         count(*) FILTER (WHERE ts >= $3 AND wallet_address <> ALL($4::text[]))::int AS trades_current,
         count(*) FILTER (WHERE ts < $3 AND wallet_address <> ALL($4::text[]))::int AS trades_previous,
         coalesce(sum(${VOLUME_USD_EXPR}) FILTER (WHERE ts >= $3 AND wallet_address <> ALL($4::text[])), 0)::float8 AS volume_current,
-        coalesce(sum(${VOLUME_USD_EXPR}) FILTER (WHERE ts < $3 AND wallet_address <> ALL($4::text[])), 0)::float8 AS volume_previous
+        coalesce(sum(${VOLUME_USD_EXPR}) FILTER (WHERE ts < $3 AND wallet_address <> ALL($4::text[])), 0)::float8 AS volume_previous,
+        coalesce(sum(${VOLUME_USD_EXPR}) FILTER (WHERE ts >= $3 AND wallet_address <> ALL($4::text[]) AND type = 'swap'), 0)::float8 AS swap_volume_current,
+        coalesce(sum(${VOLUME_USD_EXPR}) FILTER (WHERE ts < $3 AND wallet_address <> ALL($4::text[]) AND type = 'swap'), 0)::float8 AS swap_volume_previous
        FROM trades
       WHERE ts >= $1 AND ts < $2
         AND type IN ('swap', 'perps')`,
@@ -125,6 +134,8 @@ export async function kpiSummary(startDate: string, endDate: string): Promise<Kp
     trades_previous: number
     volume_current: number
     volume_previous: number
+    swap_volume_current: number
+    swap_volume_previous: number
   }>
 
   const e = eventRows[0]
@@ -137,6 +148,7 @@ export async function kpiSummary(startDate: string, endDate: string): Promise<Kp
     sessions: { current: e.sessions_current, previous: e.sessions_previous },
     trades: { current: t.trades_current, previous: t.trades_previous },
     volumeUsd: { current: t.volume_current, previous: t.volume_previous },
+    swapVolumeUsd: { current: t.swap_volume_current, previous: t.swap_volume_previous },
   }
 }
 

@@ -94,6 +94,25 @@ const { nyRangeToUtc } = DB_URL
   ? await import('@/lib/metrics/nyRange')
   : { nyRangeToUtc: undefined as unknown as typeof import('@/lib/metrics/nyRange')['nyRangeToUtc'] }
 
+const { resolveVolume } = DB_URL
+  ? await import('@/lib/metrics/overview')
+  : { resolveVolume: undefined as unknown as typeof import('@/lib/metrics/overview')['resolveVolume'] }
+
+const { hlVolumeKpi, hlVolumeTotal } = DB_URL
+  ? await import('@/lib/metrics/hlVolumeRead')
+  : {
+      hlVolumeKpi: undefined as unknown as typeof import('@/lib/metrics/hlVolumeRead')['hlVolumeKpi'],
+      hlVolumeTotal: undefined as unknown as typeof import('@/lib/metrics/hlVolumeRead')['hlVolumeTotal'],
+    }
+
+const { todayNy, rangeStart, addDays } = DB_URL
+  ? await import('@/lib/ranges')
+  : {
+      todayNy: undefined as unknown as typeof import('@/lib/ranges')['todayNy'],
+      rangeStart: undefined as unknown as typeof import('@/lib/ranges')['rangeStart'],
+      addDays: undefined as unknown as typeof import('@/lib/ranges')['addDays'],
+    }
+
 // Fixed historical window with known data: 1,905 trades / $11,284,002.16
 // over 2026-06-21 -> 2026-07-20 (verified against DATABASE_URL above).
 const START = '2026-06-21'
@@ -168,5 +187,46 @@ describe.skipIf(!DB_URL)('volume parity across modules (real DB, read-only)', ()
     // absent from this window.
     expect(r.scoped_count).toBeLessThan(r.all_count)
     expect(vol.totalTrades).not.toBe(r.all_count)
+  })
+})
+
+describe.skipIf(!DB_URL)('volume parity on the HL-authoritative path (real DB, read-only)', () => {
+  it('Overview.resolveVolume and the Trades page compute the SAME total for the same range, on both the "hl" and "est." paths', async () => {
+    // A recent, moving window (not the fixed historical one above) so this
+    // actually exercises whatever HL-backfill state production is in today,
+    // rather than a window frozen before the backfill existed. Computed
+    // inside the test body, not the describe body -- `describe.skipIf` still
+    // EXECUTES the describe callback during collection to discover its
+    // `it`s, even when the suite will be skipped, so a top-level call to a
+    // DB_URL-gated placeholder function here would throw before skip logic
+    // ever runs.
+    const end = todayNy()
+    const start = rangeStart(end, '7d')
+    const prevEnd = addDays(start, -1)
+    const prevStart = rangeStart(prevEnd, '7d')
+
+    // This is the Trades page's own combination (trades/page.tsx): perps
+    // volume, authoritative when available, plus exact swap volume added
+    // back on top. It is the ground truth this test holds Overview to.
+    const [kpi, vol, hlKpi, hlTotal] = await Promise.all([
+      kpiSummary(start, end),
+      volumeSummary(start, end),
+      hlVolumeKpi(start, end, prevStart, prevEnd),
+      hlVolumeTotal(start, end),
+    ])
+
+    const swap = vol.byType.find(t => t.type === 'swap')?.volumeUsd ?? 0
+    const tradesPageTotal = (hlTotal.fillCount > 0 ? hlTotal.notionalUsd : (vol.byType.find(t => t.type === 'perps')?.volumeUsd ?? 0)) + swap
+
+    const overviewVolume = resolveVolume(hlKpi, kpi)
+
+    // Regression for the bug where Overview went perps-only (dropped swap
+    // entirely) the instant hlKpi.hasData flipped true -- see
+    // resolveVolume's doc comment. Exact equality: both read the same
+    // underlying tables via the same SQL expressions, so any drift is a bug.
+    expect(overviewVolume.current).toBe(tradesPageTotal)
+    // hasData reflects real backfill state either way -- this assertion must
+    // hold whether it's currently true or false for `start..end`.
+    expect(overviewVolume.source).toBe(hlKpi.hasData ? 'hl' : 'est')
   })
 })
