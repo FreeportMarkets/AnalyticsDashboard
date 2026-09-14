@@ -241,6 +241,14 @@ export interface RecentTradeRow {
   venue: string | null
   volumeUsd: number
   walletAddress: string
+  /**
+   * Perps only: true = this row closes a position, false = this row opens
+   * one, null for swaps (the concept doesn't apply). Opening and closing a
+   * position are each their own row here and each their own trade in every
+   * count on this page -- this just makes which is which visible instead of
+   * both rendering as an undifferentiated "perps" trade.
+   */
+  isClose: boolean | null
 }
 
 /**
@@ -265,7 +273,8 @@ export async function recentTrades(startDate: string, endDate: string, limit = 5
             status,
             category AS venue,
             ${VOLUME_USD_EXPR} AS volume_usd,
-            wallet_address
+            wallet_address,
+            is_close
        FROM trades
       WHERE ts >= $1 AND ts < $2
         AND type IN ('swap', 'perps')
@@ -286,6 +295,7 @@ export async function recentTrades(startDate: string, endDate: string, limit = 5
     venue: string | null
     volume_usd: number
     wallet_address: string
+    is_close: boolean | null
   }>
 
   return rows.map(r => ({
@@ -301,6 +311,7 @@ export async function recentTrades(startDate: string, endDate: string, limit = 5
     venue: r.venue,
     volumeUsd: r.volume_usd,
     walletAddress: r.wallet_address,
+    isClose: r.type === 'perps' ? (r.is_close ?? false) : null,
   }))
 }
 

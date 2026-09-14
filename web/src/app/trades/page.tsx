@@ -335,6 +335,11 @@ export default async function TradesPage({
                 { key: 'ts', header: 'Time', render: r => formatTradeTs(r.ts) },
                 { key: 'trader', header: 'Trader', render: r => <TraderCell wallet={r.walletAddress} privyMap={privyMap} /> },
                 { key: 'type', header: 'Type', render: r => r.type },
+                {
+                  key: 'action',
+                  header: 'Action',
+                  render: r => (r.isClose === null ? '—' : r.isClose ? 'Close' : 'Open'),
+                },
                 { key: 'asset', header: 'Asset', render: r => r.asset },
                 { key: 'side', header: 'Side', render: r => r.side ?? '—' },
                 { key: 'size', header: 'Size', align: 'right', render: r => (r.size == null ? '—' : num2(r.size)) },
