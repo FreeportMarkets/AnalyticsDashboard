@@ -22,6 +22,32 @@ describe('account measurement contract', () => {
     data.rows[0]!.horizons[0]!.fundedAccounts = 11
     expect(isAccountMetrics(data, data.range.from, data.range.to)).toBe(false)
   })
+  it('rejects account observations without an account snapshot, including contradictory coverage labels', () => {
+    for (const status of ['partial', 'unavailable', 'stale'] as const) {
+      const data = accountFixture()
+      data.coverage.accountsAsOf = null
+      data.coverage.status = status
+      expect(isAccountMetrics(data, data.range.from, data.range.to)).toBe(false)
+      data.rows = []
+      expect(isAccountMetrics(data, data.range.from, data.range.to)).toBe(true)
+    }
+  })
+  it.each(['activityAsOf', 'activitySourceFrom', 'activitySourceThrough'] as const)('rejects mobile-return observations without %s but keeps independently covered finances', key => {
+    const data = accountFixture()
+    data.coverage[key] = null
+    data.coverage.status = 'unavailable'
+    expect(isAccountMetrics(data, data.range.from, data.range.to)).toBe(false)
+    const cell = data.rows[0]!.horizons[0]!
+    cell.appReturningAccounts = null
+    cell.appReturnRate = null
+    expect(isAccountMetrics(data, data.range.from, data.range.to)).toBe(false) // Missing denominator evidence.
+    cell.eligibleMobileAccounts = 0
+    expect(isAccountMetrics(data, data.range.from, data.range.to)).toBe(true)
+    expect(cell.fundedAccounts).toBe(2)
+    expect(cell.observedFeeRevenueUsd).toBe('1.50')
+    cell.appReturningAccounts = 0
+    expect(isAccountMetrics(data, data.range.from, data.range.to)).toBe(false) // Unknown is not zero.
+  })
   it('weights mature observed denominators and uses mobile denominators for app return', () => {
     const rows = [
       { observedFundedAccounts: null, observedFirstTradeAccounts: null, cohortDate: '2026-09-01', accounts: 1, mobileLinkedAccounts: 1, horizons: [horizon({ eligibleAccounts: 1, eligibleMobileAccounts: 1, appReturningAccounts: 1 })] },

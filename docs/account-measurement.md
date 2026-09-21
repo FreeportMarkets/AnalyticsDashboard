@@ -32,6 +32,15 @@ A horizon stays **Still observing** until its full return day has closed.
 Unavailable values stay null. Totals sum eligible numerators and denominators,
 never average cohort percentages. Missing observations are excluded, not zeroed.
 The UI shows account/activity/report timestamps and source limitations.
+Responses with cohort observations but no account snapshot are rejected. Missing
+activity timestamps or coverage bounds prohibit app-return observations; valid
+account funding, trading and fees remain available when only activity is missing.
+
+Journey presets carry independent inclusive date ranges: `accountFrom` /
+`accountTo` follow New York account cohorts; legacy intro `from` / `to` remain
+UTC. Diagnostic window and sort controls preserve both. Old intro-only URLs do
+not reinterpret UTC dates as account dates; account cohorts use their default
+New York range.
 
 Expected LTV has no validated forecast yet. Backend creator/referral/terms
 records do not establish complete ad hoc deal costs. The September 21 read found

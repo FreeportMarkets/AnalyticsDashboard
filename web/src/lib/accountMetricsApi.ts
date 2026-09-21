@@ -16,6 +16,11 @@ export function isAccountMetrics(value: unknown, from: string, to: string): valu
     || !Array.isArray(value.coverage.warnings) || !value.coverage.warnings.every(w => typeof w === 'string')
     || !['accountsAsOf', 'activityAsOf', 'activitySourceFrom', 'activitySourceThrough'].every(key => timestamp(value.coverage && (value.coverage as Record<string, unknown>)[key]))
     || !Array.isArray(value.rows) || value.expectedLtv !== null || value.acquisitionCost !== null) return false
+  // Status can be unavailable because only activity is missing. Validate each
+  // source separately so valid financial observations remain usable.
+  if (value.coverage.accountsAsOf === null && value.rows.length > 0) return false
+  const hasActivityCoverage = ['activityAsOf', 'activitySourceFrom', 'activitySourceThrough']
+    .every(key => value.coverage && (value.coverage as Record<string, unknown>)[key] !== null)
   const dates = new Set<string>()
   return value.rows.every(row => {
     if (!record(row) || !date(row.cohortDate) || row.cohortDate < from || row.cohortDate > to || dates.has(row.cohortDate)
@@ -30,6 +35,7 @@ export function isAccountMetrics(value: unknown, from: string, to: string): valu
         || !integer(cell.eligibleMobileAccounts) || cell.eligibleMobileAccounts > (row.mobileLinkedAccounts as number)
         || !money(cell.observedFeeRevenueUsd) || !money(cell.observedFeeRevenuePerAccountUsd)) return false
       days.add(cell.days)
+      if (!hasActivityCoverage && (cell.eligibleMobileAccounts !== 0 || cell.appReturningAccounts !== null || cell.appReturnRate !== null)) return false
       if (!cell.mature && (cell.eligibleAccounts !== 0 || cell.eligibleMobileAccounts !== 0 || cell.observedFeeRevenueUsd !== null || cell.observedFeeRevenuePerAccountUsd !== null)) return false
       return [['fundedAccounts', 'fundingRate'], ['firstTradeAccounts', 'firstTradeRate'], ['appReturningAccounts', 'appReturnRate'], ['tradingReturningAccounts', 'tradingReturnRate']].every(([countKey, rateKey]) => {
         const count = cell[countKey!], rate = cell[rateKey!]

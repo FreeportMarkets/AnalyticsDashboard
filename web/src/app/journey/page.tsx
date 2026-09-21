@@ -5,6 +5,7 @@ import { auth } from '@/auth'
 import { PageHeader } from '@/components/PageHeader'
 import { SectionHeading } from '@/components/SectionHeading'
 import { JourneyMilestones, JourneyTiming } from '@/components/JourneyMilestones'
+import { journeyPreset } from '@/lib/journeyRanges'
 import {
   fetchFunnel,
   formatCohortRange,
@@ -21,28 +22,6 @@ function first(v: string | string[] | undefined): string | undefined {
   return Array.isArray(v) ? v[0] : v
 }
 
-/**
- * Cohort dates are UTC days.
- *
- * `cohort_date` is derived from `server_ts` in UTC by the rollup, and the rest
- * of this page already reads them that way (`formatCohortRange` parses at UTC
- * noon on purpose). Deriving presets in local time instead would shift the
- * bounds by a day for anyone west of Greenwich and, between 00:00 UTC and local
- * midnight, would ask for a `to` that excludes the newest cohort — the exact
- * blind spot the provisional block exists to close.
- */
-const today = () => new Date().toISOString().slice(0, 10)
-const daysAgo = (n: number) =>
-  new Date(Date.now() - n * 86_400_000).toISOString().slice(0, 10)
-
-/**
- * A preset labelled "14d" must select 14 cohort dates, not 15.
- *
- * The API's range is inclusive at BOTH ends, so `from = today - 14` through
- * `to = today` is 15 calendar days. Offsetting by n-1 makes the label true.
- */
-const presetFrom = (n: number) => daysAgo(n - 1)
-
 async function IntroDiagnostics({ params }: { params: Record<string, string | string[] | undefined> }) {
   const windowKey = first(params.window) === '24h' ? '24h' : '7d'
   const days = Number(first(params.days)) || 30
@@ -53,6 +32,13 @@ async function IntroDiagnostics({ params }: { params: Record<string, string | st
   // failure the API rejects 400 to avoid. The API is the single validator.
   const from = first(params.from)
   const to = first(params.to)
+  const accountFrom = first(params.accountFrom)
+  const accountTo = first(params.accountTo)
+  const preserveAccountRange = (qs: URLSearchParams) => {
+    if (accountFrom) qs.set('accountFrom', accountFrom)
+    if (accountTo) qs.set('accountTo', accountTo)
+    return qs
+  }
 
   const result = await fetchFunnel({ window: windowKey, days, from, to })
 
@@ -76,15 +62,18 @@ async function IntroDiagnostics({ params }: { params: Record<string, string | st
     .filter(Boolean)
     .join(' · ')
 
-  // Date presets are inclusive UTC cohort dates, not activity dates.
+  // Keep each API's calendar explicit, including between UTC and NY midnight.
+  const presetNow = new Date()
   const ranges: { label: string; href: string; active: boolean }[] = [
-    { label: '14d', from: presetFrom(14), to: today(), days },
-    { label: '30d', from: presetFrom(30), to: today(), days },
-    { label: '90d', from: presetFrom(90), to: today(), days },
+    { label: '14d', ...journeyPreset(14, presetNow), days },
+    { label: '30d', ...journeyPreset(30, presetNow), days },
+    { label: '90d', ...journeyPreset(90, presetNow), days },
   ].map((r) => {
     const qs = new URLSearchParams({ window: windowKey, days: String(r.days), order })
     if (r.from) qs.set('from', r.from)
     if (r.to) qs.set('to', r.to)
+    qs.set('accountFrom', r.accountFrom)
+    qs.set('accountTo', r.accountTo)
     return {
       label: r.label,
       href: `/journey?${qs.toString()}`,
@@ -96,7 +85,7 @@ async function IntroDiagnostics({ params }: { params: Record<string, string | st
     `inline-flex min-h-11 items-center rounded-md px-3 py-2 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent ${active ? 'bg-raised text-ink-1' : 'text-ink-2 hover:bg-surface hover:text-accent'}`
 
   const orderHref = (next: string) => {
-    const qs = new URLSearchParams({ window: windowKey, days: String(days), order: next })
+    const qs = preserveAccountRange(new URLSearchParams({ window: windowKey, days: String(days), order: next }))
     if (from) qs.set('from', from)
     if (to) qs.set('to', to)
     return `/journey?${qs.toString()}`
@@ -110,7 +99,7 @@ async function IntroDiagnostics({ params }: { params: Record<string, string | st
             <div className="flex flex-wrap items-center gap-1 text-sm">
               <span className="pr-2 text-xs text-ink-2">Observation window</span>
               {(['24h', '7d'] as const).map((w) => {
-                const qs = new URLSearchParams({ window: w, days: String(days), order })
+                const qs = preserveAccountRange(new URLSearchParams({ window: w, days: String(days), order }))
                 if (from) qs.set('from', from)
                 if (to) qs.set('to', to)
                 return (
@@ -249,8 +238,8 @@ export default async function JourneyPage({ searchParams }: { searchParams: Prom
   if (!session?.user) return null
   return <main className="mx-auto w-full max-w-[1600px] space-y-8 px-4 py-8 sm:px-8">
     <PageHeader title="Journey" subtitle="Account creation cohorts and independent device intro diagnostics." />
-    <Suspense key={`accounts:${first(params.from)}:${first(params.to)}`} fallback={<AccountCohortsLoading />}>
-      <JourneyDaily from={first(params.from)} to={first(params.to)} />
+    <Suspense key={`accounts:${first(params.accountFrom)}:${first(params.accountTo)}`} fallback={<AccountCohortsLoading />}>
+      <JourneyDaily from={first(params.accountFrom)} to={first(params.accountTo)} />
     </Suspense>
     <Suspense key={`intro:${JSON.stringify(params)}`} fallback={<p role="status" className="text-sm text-ink-2">Loading device intro diagnostics…</p>}>
       <IntroDiagnostics params={params} />
