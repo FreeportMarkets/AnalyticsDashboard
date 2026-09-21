@@ -61,14 +61,14 @@ export interface ActiveUsersResult {
   mau: number
 }
 
-export async function activeUsers(startDate: string, endDate: string): Promise<ActiveUsersResult> {
+export async function activeUsers(startDate: string, endDate: string, scope: 'web' | 'legacy' = 'legacy'): Promise<ActiveUsersResult> {
   const { fromUtc, toUtc } = nyRangeToUtc(startDate, endDate)
 
   const dailyRows = (await sql(
     `SELECT ${nyDateExpr('ts')} AS day,
             count(DISTINCT wallet_address) FILTER (
               WHERE wallet_address IS NOT NULL AND wallet_address <> ALL($3::text[])
-                AND (platform IS NULL OR platform <> 'server')
+                AND ${scope === 'web' ? "platform = 'web'" : "(platform IS NULL OR platform <> 'server')"}
             )::int AS users
        FROM events
       WHERE ts >= $1 AND ts < $2
@@ -90,7 +90,7 @@ export async function activeUsers(startDate: string, endDate: string): Promise<A
        FROM events
       WHERE ts >= $1 AND ts < $3
         AND wallet_address IS NOT NULL AND wallet_address <> ALL($4::text[])
-        AND (platform IS NULL OR platform <> 'server')`,
+        AND ${scope === 'web' ? "platform = 'web'" : "(platform IS NULL OR platform <> 'server')"}`,
     [mauFrom.toISOString(), wauFrom.toISOString(), toUtc.toISOString(), SYSTEM_WALLETS]
   )) as Array<{ wau: number; mau: number }>
 
@@ -122,7 +122,7 @@ export interface SessionStats {
  * positive numeric values count -- `jsonb_typeof(...) = 'number'` mirrors
  * app.py's `isinstance(d, (int, float))` guard, and `> 0` mirrors `d > 0`.
  */
-export async function sessionStats(startDate: string, endDate: string): Promise<SessionStats> {
+export async function sessionStats(startDate: string, endDate: string, scope: 'web' | 'legacy' = 'legacy'): Promise<SessionStats> {
   const { fromUtc, toUtc } = nyRangeToUtc(startDate, endDate)
 
   const aggRows = (await sql(
@@ -132,7 +132,7 @@ export async function sessionStats(startDate: string, endDate: string): Promise<
          WHERE event = 'session_end'
            AND ts >= $1 AND ts < $2
            AND wallet_address IS NOT NULL AND wallet_address <> ALL($3::text[])
-           AND (platform IS NULL OR platform <> 'server')
+           AND ${scope === 'web' ? "platform = 'web'" : "(platform IS NULL OR platform <> 'server')"}
            AND jsonb_typeof(metadata -> 'duration_ms') = 'number'
            AND (metadata->>'duration_ms')::numeric > 0
      )
@@ -157,7 +157,7 @@ export async function sessionStats(startDate: string, endDate: string): Promise<
       WHERE event = 'session_end'
         AND ts >= $1 AND ts < $2
         AND wallet_address IS NOT NULL AND wallet_address <> ALL($3::text[])
-        AND (platform IS NULL OR platform <> 'server')
+        AND ${scope === 'web' ? "platform = 'web'" : "(platform IS NULL OR platform <> 'server')"}
         AND jsonb_typeof(metadata -> 'duration_ms') = 'number'
         AND (metadata->>'duration_ms')::numeric > 0
       GROUP BY 1
@@ -196,7 +196,8 @@ export interface TopUser {
 export async function topUsersByActivity(
   startDate: string,
   endDate: string,
-  limit = 20
+  limit = 20,
+  scope: 'web' | 'legacy' = 'legacy'
 ): Promise<TopUser[]> {
   const { fromUtc, toUtc } = nyRangeToUtc(startDate, endDate)
   const rows = (await sql(
@@ -207,7 +208,7 @@ export async function topUsersByActivity(
        FROM events
       WHERE ts >= $1 AND ts < $2
         AND wallet_address IS NOT NULL AND wallet_address <> ALL($3::text[])
-        AND (platform IS NULL OR platform <> 'server')
+        AND ${scope === 'web' ? "platform = 'web'" : "(platform IS NULL OR platform <> 'server')"}
       GROUP BY 1
       ORDER BY events DESC
       LIMIT $4`,
@@ -271,7 +272,7 @@ export interface HeatmapCell {
   count: number
 }
 
-export async function activityHeatmap(startDate: string, endDate: string): Promise<HeatmapCell[]> {
+export async function activityHeatmap(startDate: string, endDate: string, scope: 'web' | 'legacy' = 'legacy'): Promise<HeatmapCell[]> {
   const { fromUtc, toUtc } = nyRangeToUtc(startDate, endDate)
   const rows = (await sql(
     `SELECT extract(dow FROM (ts AT TIME ZONE 'America/New_York'))::int AS day_of_week,
@@ -280,7 +281,7 @@ export async function activityHeatmap(startDate: string, endDate: string): Promi
        FROM events
       WHERE ts >= $1 AND ts < $2
         AND wallet_address IS NOT NULL AND wallet_address <> ALL($3::text[])
-        AND (platform IS NULL OR platform <> 'server')
+        AND ${scope === 'web' ? "platform = 'web'" : "(platform IS NULL OR platform <> 'server')"}
       GROUP BY 1, 2`,
     [fromUtc.toISOString(), toUtc.toISOString(), SYSTEM_WALLETS]
   )) as Array<{ day_of_week: number; hour: number; count: number }>
@@ -307,6 +308,7 @@ export interface NewVsReturningRow {
  * Daily split of users whose first-ever event (within [startDate, endDate])
  * falls on that day (new) vs. an earlier day in the same window (returning).
  */
+/** @deprecated Historical mirror diagnostic only; use accountMetrics for account/mobile retention. */
 export async function newVsReturning(startDate: string, endDate: string): Promise<NewVsReturningRow[]> {
   const { fromUtc, toUtc } = nyRangeToUtc(startDate, endDate)
   const rows = (await sql(
@@ -355,6 +357,7 @@ export interface RetentionCurvePoint {
  * -- each cohort's D-day retention percentage counts equally, not weighted
  * by cohort size.
  */
+/** @deprecated Historical mirror diagnostic only; use accountMetrics for account/mobile retention. */
 export async function retentionCurve(startDate: string, endDate: string): Promise<RetentionCurvePoint[]> {
   const { fromUtc, toUtc } = nyRangeToUtc(startDate, endDate)
   const rows = (await sql(
@@ -414,6 +417,7 @@ export interface CohortRetentionRow {
 }
 
 /** Cohort (first-seen NY day, within range) x day-offset grid of retention percentages. */
+/** @deprecated Historical mirror diagnostic only; use accountMetrics for account/mobile retention. */
 export async function cohortRetention(startDate: string, endDate: string): Promise<CohortRetentionRow[]> {
   const { fromUtc, toUtc } = nyRangeToUtc(startDate, endDate)
   const rows = (await sql(

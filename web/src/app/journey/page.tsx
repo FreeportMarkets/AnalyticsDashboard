@@ -1,9 +1,11 @@
 import { Suspense } from 'react'
 import { JourneyDaily } from '@/components/JourneyDaily'
+import { AccountCohortsLoading } from '@/components/AccountCohortsSection'
 import { auth } from '@/auth'
 import { PageHeader } from '@/components/PageHeader'
 import { SectionHeading } from '@/components/SectionHeading'
-import { JourneyMilestones, JourneyOutcome, JourneyTiming } from '@/components/JourneyMilestones'
+import { JourneyMilestones, JourneyTiming } from '@/components/JourneyMilestones'
+import { journeyPreset } from '@/lib/journeyRanges'
 import {
   fetchFunnel,
   formatCohortRange,
@@ -14,58 +16,13 @@ import {
 export const dynamic = 'force-dynamic'
 export const maxDuration = 60
 
-/**
- * Daily account growth plus the intro-device → first-trade cohort.
- *
- * Starts at 100% of a day's NEW USERS — devices whose first non-replay
- * `intro_started` landed that day — and shows how far they got, with the time
- * each leg took. The cohort is deliberately NOT `app_first_open`: that fires on
- * every build (including ones predating the funnel instrumentation) and on
- * existing users reinstalling, which polluted the top of the funnel. Only
- * instrumented builds emit `intro_started`, and only a genuinely-new user emits
- * it non-replay, so this cohort excludes both by construction. See
- * docs/analytics-funnel.md in freeport-trading-backend.
- *
- * Distinct from /funnels, which composes arbitrary sequences from the synced
- * `events` table (keyed on `wallet_address`, so it cannot see anything before an
- * account exists). Only the intro cohort is keyed on device identity;
- * the daily chart counts accounts and uses New York calendar days.
- */
+/** Legacy device telemetry is diagnostic; account metrics use the separate model. */
 
 function first(v: string | string[] | undefined): string | undefined {
   return Array.isArray(v) ? v[0] : v
 }
 
-/**
- * Cohort dates are UTC days.
- *
- * `cohort_date` is derived from `server_ts` in UTC by the rollup, and the rest
- * of this page already reads them that way (`formatCohortRange` parses at UTC
- * noon on purpose). Deriving presets in local time instead would shift the
- * bounds by a day for anyone west of Greenwich and, between 00:00 UTC and local
- * midnight, would ask for a `to` that excludes the newest cohort — the exact
- * blind spot the provisional block exists to close.
- */
-const today = () => new Date().toISOString().slice(0, 10)
-const daysAgo = (n: number) =>
-  new Date(Date.now() - n * 86_400_000).toISOString().slice(0, 10)
-
-/**
- * A preset labelled "14d" must select 14 cohort dates, not 15.
- *
- * The API's range is inclusive at BOTH ends, so `from = today - 14` through
- * `to = today` is 15 calendar days. Offsetting by n-1 makes the label true.
- */
-const presetFrom = (n: number) => daysAgo(n - 1)
-
-export default async function JourneyPage({
-  searchParams,
-}: {
-  searchParams: Promise<Record<string, string | string[] | undefined>>
-}) {
-  const [session, params] = [await auth(), await searchParams]
-  if (!session) return null
-
+async function IntroDiagnostics({ params }: { params: Record<string, string | string[] | undefined> }) {
   const windowKey = first(params.window) === '24h' ? '24h' : '7d'
   const days = Number(first(params.days)) || 30
   const order = first(params.order) === 'journey' ? 'journey' : 'reach'
@@ -75,6 +32,13 @@ export default async function JourneyPage({
   // failure the API rejects 400 to avoid. The API is the single validator.
   const from = first(params.from)
   const to = first(params.to)
+  const accountFrom = first(params.accountFrom)
+  const accountTo = first(params.accountTo)
+  const preserveAccountRange = (qs: URLSearchParams) => {
+    if (accountFrom) qs.set('accountFrom', accountFrom)
+    if (accountTo) qs.set('accountTo', accountTo)
+    return qs
+  }
 
   const result = await fetchFunnel({ window: windowKey, days, from, to })
 
@@ -98,15 +62,18 @@ export default async function JourneyPage({
     .filter(Boolean)
     .join(' · ')
 
-  // Date presets are inclusive UTC cohort dates, not activity dates.
+  // Keep each API's calendar explicit, including between UTC and NY midnight.
+  const presetNow = new Date()
   const ranges: { label: string; href: string; active: boolean }[] = [
-    { label: '14d', from: presetFrom(14), to: today(), days },
-    { label: '30d', from: presetFrom(30), to: today(), days },
-    { label: '90d', from: presetFrom(90), to: today(), days },
+    { label: '14d', ...journeyPreset(14, presetNow), days },
+    { label: '30d', ...journeyPreset(30, presetNow), days },
+    { label: '90d', ...journeyPreset(90, presetNow), days },
   ].map((r) => {
     const qs = new URLSearchParams({ window: windowKey, days: String(r.days), order })
     if (r.from) qs.set('from', r.from)
     if (r.to) qs.set('to', r.to)
+    qs.set('accountFrom', r.accountFrom)
+    qs.set('accountTo', r.accountTo)
     return {
       label: r.label,
       href: `/journey?${qs.toString()}`,
@@ -118,36 +85,21 @@ export default async function JourneyPage({
     `inline-flex min-h-11 items-center rounded-md px-3 py-2 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent ${active ? 'bg-raised text-ink-1' : 'text-ink-2 hover:bg-surface hover:text-accent'}`
 
   const orderHref = (next: string) => {
-    const qs = new URLSearchParams({ window: windowKey, days: String(days), order: next })
+    const qs = preserveAccountRange(new URLSearchParams({ window: windowKey, days: String(days), order: next }))
     if (from) qs.set('from', from)
     if (to) qs.set('to', to)
     return `/journey?${qs.toString()}`
   }
 
   return (
-    // Same shell as every other page: without it the heading sits flush against
-    // the viewport edge and gets clipped at the top.
-    <main className="mx-auto w-full max-w-[1600px] space-y-8 px-4 py-8 sm:px-8">
-      <PageHeader
-        title="Journey"
-        subtitle={
-          <>
-            Track daily signups and first actions, then explore conversion after the intro.
-          </>
-        }
-      />
-
-      <Suspense fallback={<section aria-label="Daily growth" className="rounded-xl border border-hairline p-5 text-sm text-ink-2"><p role="status">Loading daily signups and first actions…</p></section>}>
-        <JourneyDaily />
-      </Suspense>
-
+    <>
       <section aria-label="Intro cohort filters" className="flex flex-wrap items-start justify-between gap-4 border-t border-hairline pt-8">
-        <div><h2 className="text-lg font-semibold text-ink-1">Intro cohort analysis</h2><p className="mt-1 text-sm text-ink-2">Follow each device for a full observation window after it starts the intro.</p></div>
+        <div><h2 className="text-lg font-semibold text-ink-1">Device intro diagnostics</h2><p className="mt-1 max-w-3xl text-sm text-ink-2">Legacy device-level event reach. Restored sessions, replay markers and instrumentation changes can affect who is included. These are not new-account conversion, verified funding, or retention metrics.</p></div>
           <div className="flex flex-col gap-1.5">
             <div className="flex flex-wrap items-center gap-1 text-sm">
-              <span className="pr-2 text-xs text-ink-2">Time to convert</span>
+              <span className="pr-2 text-xs text-ink-2">Observation window</span>
               {(['24h', '7d'] as const).map((w) => {
-                const qs = new URLSearchParams({ window: w, days: String(days), order })
+                const qs = preserveAccountRange(new URLSearchParams({ window: w, days: String(days), order }))
                 if (from) qs.set('from', from)
                 if (to) qs.set('to', to)
                 return (
@@ -210,13 +162,12 @@ export default async function JourneyPage({
 
       {result.ok && result.data.steps.length > 0 && (
         <section className="space-y-5" aria-label="Completed observation windows">
-          <SectionHeading meta={headingMeta}>Intro to first trade</SectionHeading>
+          <SectionHeading meta={headingMeta}>Recorded intro milestone reach</SectionHeading>
           <p className="text-sm leading-relaxed text-ink-2">
-            Everyone here has had the full {windowKey === '24h' ? '24 hours' : '7 days'} to convert.
+            Each included device has a completed {windowKey === '24h' ? '24-hour' : '7-day'} observation window.
             {coverage?.cohort_days ? ` Totals cover ${coverage.cohort_days} intro start dates (UTC).` : ' Actual intro date coverage was not supplied.'}
             {behind !== null && ` The newest included start date is ${behind === 0 ? 'today' : `${behind} days ago`}.`}
           </p>
-          <JourneyOutcome steps={result.data.steps} windowLabel={windowKey === '24h' ? '24 hours' : '7 days'} />
           {thinData && (
             <p className="rounded-lg border border-hairline bg-surface/30 p-4 text-sm text-ink-2">
               Limited date coverage: only {coverage?.cohort_days} intro start dates have completed
@@ -243,7 +194,7 @@ export default async function JourneyPage({
             <div className="mt-4 max-w-3xl space-y-3 leading-relaxed">
               <p>A true step-by-step funnel counts only devices that completed every prior step in order. Its counts can only stay the same or decrease. This view receives separate milestone totals, which cannot reveal the overlap between steps or the route each device took.</p>
               <p>For example, a transfer can add funds without a payment checkout. Referral points can let someone trade without depositing. More traders than depositors does not tell us exactly how many skipped a deposit.</p>
-              <p>Counts represent devices whose first non-replay intro start falls in the included UTC dates. One person on two devices can count twice. Existing users and builds without this tracking are excluded.</p>
+              <p>Counts represent devices whose first non-replay intro start falls in the included UTC dates. One person on two devices can count twice. Missing or incorrect replay markers can include returning users. Builds without this tracking are absent; instrumentation changes limit comparisons. Deposit and trade milestones are recorded client telemetry, not the verified account ledger.</p>
               <p>The 24-hour and 7-day views can include different intro dates because each cohort must finish its observation window. Compare the date coverage before comparing conversion rates. Recent starters below remain separate from completed windows.</p>
             </div>
           </details>
@@ -269,7 +220,7 @@ export default async function JourneyPage({
 
           <p className="text-sm leading-relaxed text-ink-2">
             These devices still have time left in their {windowKey === '24h' ? '24-hour' : '7-day'} observation
-            window. Their current activity is shown separately; it is too early to score their final conversion.
+            window. Their current activity is shown separately; their recorded reach is incomplete and must not be scored as a final outcome.
           </p>
           <details>
             <summary className="cursor-pointer rounded py-2 text-sm font-medium text-ink-1 focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-4">View activity so far</summary>
@@ -277,6 +228,21 @@ export default async function JourneyPage({
           </details>
         </section>
       )}
-    </main>
+    </>
   )
+}
+
+
+export default async function JourneyPage({ searchParams }: { searchParams: Promise<Record<string, string | string[] | undefined>> }) {
+  const [session, params] = await Promise.all([auth(), searchParams])
+  if (!session?.user) return null
+  return <main className="mx-auto w-full max-w-[1600px] space-y-8 px-4 py-8 sm:px-8">
+    <PageHeader title="Journey" subtitle="Account creation cohorts and independent device intro diagnostics." />
+    <Suspense key={`accounts:${first(params.accountFrom)}:${first(params.accountTo)}`} fallback={<AccountCohortsLoading />}>
+      <JourneyDaily from={first(params.accountFrom)} to={first(params.accountTo)} />
+    </Suspense>
+    <Suspense key={`intro:${JSON.stringify(params)}`} fallback={<p role="status" className="text-sm text-ink-2">Loading device intro diagnostics…</p>}>
+      <IntroDiagnostics params={params} />
+    </Suspense>
+  </main>
 }

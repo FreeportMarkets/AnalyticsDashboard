@@ -1,3 +1,5 @@
+import { Suspense } from 'react'
+import { AccountCohortsSection, AccountCohortsLoading } from '@/components/AccountCohortsSection'
 import { auth, signOut } from '@/auth'
 import {
   activeUsers,
@@ -5,9 +7,6 @@ import {
   topUsersByActivity,
   topTraders,
   activityHeatmap,
-  newVsReturning,
-  retentionCurve,
-  cohortRetention,
 } from '@/lib/metrics/users'
 import { watermarkAge } from '@/lib/metrics/staleness'
 import { NY_TZ } from '@/lib/time'
@@ -46,7 +45,6 @@ function formatTimestamp(iso: string): string {
 const compact = (n: number) => Math.round(n).toLocaleString('en-US')
 const usd = (n: number) => `$${Math.round(n).toLocaleString('en-US')}`
 const minutes = (n: number) => `${n.toFixed(1)}m`
-const pct = (n: number) => `${n.toFixed(0)}%`
 
 const DOW_LABELS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
 
@@ -62,24 +60,6 @@ export default async function UsersPage({
   const [session, end] = [await auth(), todayNy()]
   const start = rangeStart(end, range)
 
-  const [au, ss, topUsers, traders, heatmap, nvr, curve, cohorts, ages] = await Promise.all([
-    activeUsers(start, end),
-    sessionStats(start, end),
-    topUsersByActivity(start, end, 20),
-    topTraders(start, end, 20),
-    activityHeatmap(start, end),
-    newVsReturning(start, end),
-    retentionCurve(start, end),
-    cohortRetention(start, end),
-    watermarkAge(),
-  ])
-  // Identity lookup scoped to just the wallets on this page -- see
-  // src/lib/privyIdentities.ts and the identical comment on /trades.
-  const privyMap = await fetchWalletIdentities(sql, [...topUsers.map(u => u.wallet), ...traders.map(t => t.wallet)])
-
-  const maxHeat = Math.max(...heatmap.map(c => c.count), 1)
-  const maxNvr = Math.max(...nvr.map(d => d.newUsers + d.returningUsers), 1)
-  const heatByKey = new Map(heatmap.map(c => [`${c.dayOfWeek}-${c.hour}`, c.count]))
 
   return (
     <main className="mx-auto w-full max-w-[1600px] px-8 py-8">
@@ -108,8 +88,7 @@ export default async function UsersPage({
         }
         right={
           <div className="flex items-center gap-4">
-            <AutoRefresh intervalMs={60_000} />
-            <StalenessBadge ages={ages} />
+            <AutoRefresh intervalMs={60_000} renderedAt={Date.now()} />
             <form action={async () => { 'use server'; await signOut({ redirectTo: '/login' }) }}>
               <button className="text-xs text-ink-2 outline-none transition-colors hover:text-ink-1 focus-visible:ring-2 focus-visible:ring-accent">
                 {session?.user?.email} · sign out
@@ -119,20 +98,54 @@ export default async function UsersPage({
         }
       />
 
-      <div key={range} className="animate-content-fade">
+      <Suspense key={`accounts:${start}:${end}`} fallback={<AccountCohortsLoading />}>
+        <AccountCohortsSection from={start} to={end} initialMetric="appReturn" />
+      </Suspense>
+
+      <Suspense key={`web:${start}:${end}`} fallback={<p role="status" className="mt-8 text-sm text-ink-2">Loading web activity and trading diagnostics…</p>}>
+        <WebDiagnostics start={start} end={end} />
+      </Suspense>
+    </main>
+  )
+}
+
+
+async function WebDiagnostics({ start, end }: { start: string; end: string }) {
+  try {
+    const [au, ss, topUsers, traders, heatmap, ages] = await Promise.all([
+      activeUsers(start, end, 'web'),
+      sessionStats(start, end, 'web'),
+      topUsersByActivity(start, end, 20, 'web'),
+      topTraders(start, end, 20),
+      activityHeatmap(start, end, 'web'),
+      watermarkAge(),
+    ])
+    // Identity lookup scoped to just the wallets on this page -- see
+    // src/lib/privyIdentities.ts and the identical comment on /trades.
+    const privyMap = await fetchWalletIdentities(sql, [...topUsers.map(u => u.wallet), ...traders.map(t => t.wallet)])
+
+    const maxHeat = Math.max(...heatmap.map(c => c.count), 1)
+    const heatByKey = new Map(heatmap.map(c => [`${c.dayOfWeek}-${c.hour}`, c.count]))
+
+    return (
+      <div className="animate-content-fade">
+        <section className="mt-8 border-t border-hairline pt-8">
+          <SectionHeading meta={<StalenessBadge ages={ages} />}>Web activity</SectionHeading>
+          <p className="mt-2 max-w-3xl text-sm text-ink-2">Web events from the legacy analytics mirror only. Active users are distinct connected wallets, not account cohorts; anonymous visitors are excluded. This source does not measure current mobile activity or retention.</p>
+        </section>
         <section aria-label="Key metrics" className="mt-8 grid gap-x-6 divide-y divide-hairline sm:grid-cols-5 sm:divide-x sm:divide-y-0">
-          <StatTile label="DAU" value={au.dau} format={compact} />
+          <StatTile label="Daily active web wallets" value={au.dau} format={compact} />
           <div className="sm:pl-6">
-            <StatTile label="WAU" value={au.wau} format={compact} />
+            <StatTile label="Weekly active web wallets" value={au.wau} format={compact} />
           </div>
           <div className="sm:pl-6">
-            <StatTile label="MAU" value={au.mau} format={compact} />
+            <StatTile label="Monthly active web wallets" value={au.mau} format={compact} />
           </div>
           <div className="sm:pl-6">
-            <StatTile label="Sessions" value={ss.sessionCount} format={compact} />
+            <StatTile label="Web session events" value={ss.sessionCount} format={compact} />
           </div>
           <div className="sm:pl-6">
-            <StatTile label="Median session" value={ss.medianDurationMin} format={minutes} />
+            <StatTile label="Median reported duration" value={ss.medianDurationMin} format={minutes} />
           </div>
         </section>
 
@@ -143,7 +156,7 @@ export default async function UsersPage({
         </section>
 
         <section aria-label="Daily active users" className="mt-8 border-t border-hairline pt-8">
-          <SectionHeading meta={NY_TZ}>Daily active users</SectionHeading>
+          <SectionHeading meta={NY_TZ}>Daily active web wallets</SectionHeading>
           <div className="mt-4">
             <TimeSeriesBars
               data={au.daily.map(d => ({ day: d.day, value: d.users }))}
@@ -153,40 +166,8 @@ export default async function UsersPage({
           </div>
         </section>
 
-        <section aria-label="New vs returning users" className="mt-8 border-t border-hairline pt-8">
-          <div className="flex items-center justify-between">
-            <SectionHeading>New vs returning</SectionHeading>
-            <div className="flex items-center gap-3 text-[10px] text-ink-3">
-              <span className="flex items-center gap-1"><span className="h-1.5 w-1.5 rounded-full bg-accent" aria-hidden="true" />new</span>
-              <span className="flex items-center gap-1"><span className="h-1.5 w-1.5 rounded-full bg-accent-bar" aria-hidden="true" />returning</span>
-            </div>
-          </div>
-          <div className="mt-4 flex h-20 items-end gap-[2px]">
-            {nvr.map(d => {
-              const total = d.newUsers + d.returningUsers
-              const newPct = total > 0 ? (d.newUsers / maxNvr) * 100 : 0
-              const retPct = total > 0 ? (d.returningUsers / maxNvr) * 100 : 0
-              return (
-                <div key={d.day} className="group relative h-full flex-1">
-                  <div className="mx-auto flex h-full w-full max-w-[72px] flex-col justify-end">
-                    <div className="rounded-t-sm bg-accent transition-opacity group-hover:opacity-80" style={{ height: `${newPct}%` }} />
-                    <div className="bg-accent-bar transition-opacity group-hover:opacity-80" style={{ height: `${retPct}%` }} />
-                  </div>
-                  <span className="pointer-events-none absolute -top-6 left-1/2 z-10 hidden -translate-x-1/2 whitespace-nowrap rounded-sm border border-hairline bg-raised px-1.5 py-0.5 text-[10px] text-ink-1 group-hover:block">
-                    {shortDay(d.day)} · {d.newUsers}n/{d.returningUsers}r
-                  </span>
-                </div>
-              )
-            })}
-          </div>
-          <div className="numeral mt-1.5 flex justify-between text-[10px] text-ink-3">
-            <span>{shortDay(nvr[0]?.day ?? start)}</span>
-            <span>{shortDay(nvr[nvr.length - 1]?.day ?? end)}</span>
-          </div>
-        </section>
-
         <section aria-label="Activity heatmap" className="mt-8 border-t border-hairline pt-8">
-          <SectionHeading meta={NY_TZ}>Activity heatmap</SectionHeading>
+          <SectionHeading meta={NY_TZ}>Web activity heatmap</SectionHeading>
           <div className="mt-4 overflow-x-auto">
             <div className="grid min-w-[640px] grid-cols-[2.5rem_repeat(24,1fr)] gap-[2px]">
               <div />
@@ -221,7 +202,7 @@ export default async function UsersPage({
           className="mt-8 grid items-start gap-x-10 gap-y-8 divide-y divide-hairline border-t border-hairline pt-8 md:grid-cols-2 md:divide-x md:divide-y-0"
         >
           <div>
-            <SectionHeading>Top users by activity</SectionHeading>
+            <SectionHeading>Top web wallets by activity</SectionHeading>
             <div className="mt-3">
               <DataTable
                 rowKey={row => row.wallet}
@@ -251,60 +232,10 @@ export default async function UsersPage({
           </div>
         </section>
 
-        <section aria-label="Retention curve" className="mt-8 border-t border-hairline pt-8">
-          <SectionHeading>Average retention curve</SectionHeading>
-          <div className="mt-4 flex items-start gap-4">
-            {curve.map(pt => (
-              <div key={pt.offsetDay} className="group relative flex flex-1 flex-col items-center">
-                <span className="numeral mb-1 text-[10px] text-ink-2">{pt.avgPct.toFixed(0)}%</span>
-                {/* Fixed-height track so the percentage height below resolves
-                    against a real pixel value instead of an auto-height
-                    ancestor (the flex column here isn't itself given a
-                    height -- see TimeSeriesBars for the same fix applied to
-                    the page's primary chart). */}
-                <div className="flex h-16 w-full max-w-8 items-end">
-                  <div
-                    className="w-full rounded-t-sm bg-accent-bar transition-colors group-hover:bg-accent"
-                    style={{ height: `${Math.max(pt.avgPct, pt.avgPct > 0 ? 3 : 1)}%` }}
-                  />
-                </div>
-                <span className="numeral mt-1.5 text-[10px] text-ink-3">{pt.label}</span>
-              </div>
-            ))}
-          </div>
-        </section>
 
-        <section aria-label="Cohort retention" className="mt-8 border-t border-hairline pt-8">
-          <SectionHeading>Cohort retention</SectionHeading>
-          <div className="mt-4 overflow-x-auto">
-            <div className="min-w-[560px]">
-              <div className="grid grid-cols-[5.5rem_5rem_repeat(6,1fr)] gap-1 text-[10px] uppercase tracking-wide text-ink-3">
-                <div>Cohort</div>
-                <div className="text-right">Users</div>
-                {curve.map(pt => <div key={pt.offsetDay} className="text-center">{pt.label}</div>)}
-              </div>
-              <div className="mt-1 space-y-1">
-                {cohorts.map(c => (
-                  <div key={c.cohortDate} className="grid grid-cols-[5.5rem_5rem_repeat(6,1fr)] items-center gap-1">
-                    <div className="numeral text-xs text-ink-2">{shortDay(c.cohortDate)}</div>
-                    <div className="numeral text-right text-xs text-ink-1">{compact(c.cohortSize)}</div>
-                    {c.cells.map(cell => (
-                      <div
-                        key={cell.offsetDay}
-                        title={`${shortDay(c.cohortDate)} → D${cell.offsetDay}: ${cell.pct.toFixed(0)}% (${cell.retained}/${c.cohortSize})`}
-                        className="numeral flex h-6 items-center justify-center rounded-[1px] text-[10px] text-ink-1"
-                        style={{ backgroundColor: 'var(--color-accent)', opacity: cell.retained > 0 ? Math.max(cell.pct / 100, 0.1) : 0 }}
-                      >
-                        {pct(cell.pct)}
-                      </div>
-                    ))}
-                  </div>
-                ))}
-              </div>
-            </div>
-          </div>
-        </section>
       </div>
-    </main>
-  )
+    )
+  } catch {
+    return <section className="mt-8 border-t border-hairline pt-8"><SectionHeading>Web activity</SectionHeading><p role="status" className="mt-3 text-sm text-alert">The legacy web/trading mirror is unavailable. Account cohorts above use an independent source.</p></section>
+  }
 }

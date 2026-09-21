@@ -94,7 +94,7 @@ export default async function NotificationsPage({
         }
         right={
           <div className="flex items-center gap-4">
-            <AutoRefresh intervalMs={60_000} />
+            <AutoRefresh intervalMs={60_000} renderedAt={Date.now()} />
             <StalenessBadge ages={ages} />
           </div>
         }

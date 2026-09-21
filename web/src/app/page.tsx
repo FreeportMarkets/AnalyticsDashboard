@@ -147,7 +147,7 @@ export default async function OverviewPage({
         }
         right={
           <div className="flex items-center gap-4">
-            <AutoRefresh intervalMs={60_000} />
+            <AutoRefresh intervalMs={60_000} renderedAt={Date.now()} />
             <StalenessBadge ages={ages} />
             <form action={async () => { 'use server'; await signOut({ redirectTo: '/login' }) }}>
               <button className="text-xs text-ink-2 outline-none transition-colors hover:text-ink-1 focus-visible:ring-2 focus-visible:ring-accent">
@@ -159,6 +159,7 @@ export default async function OverviewPage({
       />
 
       <div key={range} className="animate-content-fade">
+        <p className="mt-6 max-w-4xl text-sm text-ink-2">Event, active-wallet and session metrics below use the legacy analytics mirror, which does not cover current mobile activity. Use Users, Funnels or Journey for account cohorts from the trading backend. Trade and volume sources are unchanged.</p>
         <section aria-label="Key metrics" className="mt-8 grid gap-x-6 divide-y divide-hairline sm:grid-cols-5 sm:divide-x sm:divide-y-0">
           <StatTile
             label="Events"

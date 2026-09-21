@@ -11,7 +11,7 @@ npm run dev
 ```
 
 Environment variables (Vercel project settings / `web/.env.local`):
-- `ANALYTICS_FUNNEL_READ_SECRET` — reads the acquisition funnel from the trading backend (`/v1/analytics/funnel`). Value is in Secrets Manager.
+- `ANALYTICS_FUNNEL_READ_SECRET` — reads account cohorts, legacy device intro diagnostics and deposit events from the trading backend (`/v1/analytics/accounts`, `/v1/analytics/funnel`, `/v1/analytics/deposits`). Value is in Secrets Manager.
 - Neon / DynamoDB / Privy credentials for the other pages — see `web/src/lib/`.
 
 ## History
@@ -24,6 +24,5 @@ page files). Recover the old Streamlit code from git history if ever needed.
 
 ## Docs
 
-- Acquisition funnel semantics (what the Journey tab measures, the new-user
-  cohort, and how to read it): `docs/analytics-funnel.md` in
-  `freeport-trading-backend`, and the team guide published from this repo.
+- [Account measurement and dashboard source guide](docs/account-measurement.md).
+- Legacy device intro diagnostics: `docs/analytics-funnel.md` in `freeport-trading-backend`. These are event reach diagnostics, not verified new-account or funding conversion.
