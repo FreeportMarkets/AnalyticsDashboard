@@ -21,6 +21,7 @@ function CohortCell({ row, cell, metric }: { row: AccountCohort; cell: AccountHo
   return <>
     <span className="numeral block font-medium">{metric === 'revenue' ? usd(point.rate) : `${(point.rate * 100).toFixed(1)}%`}</span>
     <span className="numeral mt-1 block text-xs text-ink-2">{metric === 'revenue' ? `${usd(point.value!)} / ${count(point.denominator)} accounts` : `${count(point.value!)} / ${count(point.denominator)}`}</span>
+    {point.denominator < 30 && <span className="mt-1 block text-xs text-alert">Small sample · fewer than 30 accounts</span>}
   </>
 }
 

@@ -101,6 +101,26 @@ describe('account measurement contract', () => {
     expect(missing).toContain('Account counts are unavailable')
     expect(missing).not.toContain('0</span> non-guest accounts')
   })
+  it('warns on individual small cohorts even when aggregate samples are large, using the metric denominator', () => {
+    for (const metric of ['appReturn', 'tradingReturn', 'funding', 'firstTrade', 'revenue'] as const) {
+      const data = accountFixture()
+      data.rows[0]!.accounts = 30
+      data.rows[0]!.mobileLinkedAccounts = 5
+      data.rows[0]!.horizons[0] = horizon({ eligibleAccounts: 30, eligibleMobileAccounts: 5 })
+      data.rows.push({ ...data.rows[0]!, cohortDate: '2026-09-16', accounts: 10, mobileLinkedAccounts: 5, horizons: [horizon(), immature(7), immature(14), immature(30)] })
+      data.rows.push({ ...data.rows[0]!, cohortDate: '2026-09-17', accounts: 100, mobileLinkedAccounts: 100, horizons: [horizon({ eligibleAccounts: 100, eligibleMobileAccounts: 100 }), immature(7), immature(14), immature(30)] })
+      const html: string = renderToStaticMarkup(createElement(AccountCohortReport, { data, initialMetric: metric }))
+      const rows = html.split('<tr').map(row => row.split('</tr>')[0]!).filter(row => row.includes('scope="row"'))
+      const small = rows.find(row => row.includes('2026-09-16'))!
+      const boundary = rows.find(row => row.includes('2026-09-15'))!
+      expect(small).toContain('Small sample')
+      // Three immature horizons must not carry a sample warning.
+      expect(small.match(/Small sample/g)).toHaveLength(1)
+      expect(boundary.includes('Small sample')).toBe(metric === 'appReturn')
+      expect(rows.find(row => row.includes('Cohort totals'))).not.toContain('Small sample')
+      expect(rows.find(row => row.includes('2026-09-17'))).not.toContain('Small sample')
+    }
+  })
   it('shows current progress without mixing it into fixed-age denominators', () => {
     const data = accountFixture()
     data.rows[0]!.observedFundedAccounts = 4
