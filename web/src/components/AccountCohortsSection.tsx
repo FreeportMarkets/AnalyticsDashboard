@@ -1,5 +1,5 @@
 import { fetchAccountMetrics } from '@/lib/accountMetricsApi'
-import type { AccountMetric } from '@/lib/accountMetrics'
+import type { AccountMetric, AccountPopulation } from '@/lib/accountMetrics'
 import { AccountCohortReport } from './AccountCohortReport'
 import { SectionHeading } from './SectionHeading'
 
@@ -10,8 +10,8 @@ export function AccountCohortsLoading() {
   </section>
 }
 
-export async function AccountCohortsSection({ from, to, initialMetric }: { from: string; to: string; initialMetric?: AccountMetric }) {
-  const result = await fetchAccountMetrics({ from, to })
+export async function AccountCohortsSection({ from, to, initialMetric, population }: { from: string; to: string; initialMetric?: AccountMetric; population?: AccountPopulation }) {
+  const result = await fetchAccountMetrics({ from, to, population })
   if (result.ok) return <AccountCohortReport data={result.data} initialMetric={initialMetric} />
   const reason = result.reason === 'not_deployed' ? 'The versioned account measurement endpoint is not deployed yet.'
     : result.reason === 'not_configured' || result.reason === 'unauthorized' ? 'The dashboard cannot authenticate to the account measurement source.'
