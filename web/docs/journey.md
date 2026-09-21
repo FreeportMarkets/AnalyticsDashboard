@@ -1,3 +1,5 @@
+> Historical implementation notes. Current account cohorts, source coverage and population controls are documented in [account measurement](../../docs/account-measurement.md). The legacy daily-action path below is not the current Journey account report.
+
 # Journey metrics
 
 The page separates daily account activity from the intro device cohort.

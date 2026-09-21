@@ -96,3 +96,46 @@ not deployed. Real web-only Neon queries were invoked successfully (17–202ms
 in this local sample). Trades slow/failing deposits were tested through the
 actual route/section implementations with a controlled pending dependency;
 production streaming-network TTFB has not been measured after this change.
+
+
+## Journey population and interpretation controls (September 21 follow-up)
+
+Journey can request `population=all|mobile_linked|unlinked`. The default remains
+all accounts. Mobile-linked means at least one server-verified, nonambiguous
+install binding observed by report time. No verified link does not prove web
+acquisition: it includes older mobile users without trustworthy bindings.
+Bindings can arrive later and change segment membership; these are account
+creation cohorts filtered by observed app use, not mobile signup/install cohorts.
+
+Backend filtering happens before aggregation. The dashboard verifies that the
+response identifies the requested population; an old unfiltered response cannot
+silently substitute for a segment. Date presets and diagnostic controls preserve
+the selected population. Device intro diagnostics keep their independent scope.
+Deploy the backend population parameter before enabling segmented reads; an older
+endpoint continues to serve the default all-account report, while unsupported
+segments display unavailable.
+
+Return columns now say **On day 1/7/14/30**. Card funding, first recorded trade and
+fees say **Within 24h / 7 / 14 / 30 days**. Aggregate columns can contain different
+eligible cohorts; compare a single creation-date row across horizons. Show a
+small-sample notice for fewer than 30 eligible accounts, without implying that 30
+proves statistical significance. Explicit card-only coverage stays visible:
+external crypto funding remains unmeasured, never reported as zero. Source-chain
+USDC arrivals can be card autobridges or token-sale proceeds and cannot establish
+new principal without origin classification.
+
+The inline Journey guide explains population, activation, exact-day return and
+observed gross fees. LTV and churn are not inferred from short-window return.
+No mobile app change or OTA is needed for this dashboard batch.
+
+
+Follow-up validation: 290 dashboard tests passed (two optional DynamoDB tests
+skipped), TypeScript and date-query lint passed. Actual updated components were
+rendered in Chrome with three real backend query outputs: 1,687 total accounts,
+128 mobile-linked and 1,559 unlinked. All population controls and five metric
+modes were exercised; exact-day versus cumulative columns, null return coverage,
+small samples, and the inline guide were checked. A 390px viewport kept overflow
+inside the 780px table, with no document overflow or browser errors. These are
+saved-source replay figures before historical funding recovery, not live counts.
+The separately approved production recovery was verified in the live existing
+Journey page: its selected creation window showed 14 card-funded accounts.

@@ -1,7 +1,7 @@
 'use client'
 
 import { useState } from 'react'
-import { COHORT_DAYS, metricValue, summarizeHorizon, unavailableCellLabel, type AccountMetric, type AccountMetrics, type AccountHorizon, type AccountCohort } from '@/lib/accountMetrics'
+import { ACCOUNT_POPULATIONS, horizonLabel, COHORT_DAYS, metricValue, summarizeHorizon, unavailableCellLabel, type AccountMetric, type AccountMetrics, type AccountHorizon, type AccountCohort } from '@/lib/accountMetrics'
 import { SectionHeading } from './SectionHeading'
 
 const count = (value: number) => value.toLocaleString('en-US')
@@ -36,12 +36,15 @@ export function AccountCohortReport({ data, initialMetric = 'appReturn' }: { dat
       <div><SectionHeading>Account cohorts</SectionHeading><p className="mt-1 text-sm text-ink-2">Created {data.range.from} – {data.range.to} · New York time</p></div>
       <span className="rounded-md border border-hairline px-3 py-1.5 text-sm text-alert">{data.coverage.status === 'stale' ? 'Sources delayed' : data.coverage.status === 'unavailable' ? 'Source coverage unavailable' : 'Partial coverage'}</span>
     </div>
-    <p className="max-w-3xl text-sm leading-relaxed text-ink-2">{data.coverage.accountsAsOf ? <><span className="numeral text-ink-1">{count(accounts)}</span> non-guest accounts · <span className="numeral text-ink-1">{count(mobile)}</span> linked to mobile installs. </> : <>Account counts are unavailable until a complete snapshot is recorded. </>}Account creation includes web, imported and walletless accounts. This is not an install or mobile-signup cohort.</p>
+    <p className="max-w-3xl text-sm leading-relaxed text-ink-2">{data.coverage.accountsAsOf ? <><span className="numeral text-ink-1">{count(accounts)}</span> non-guest accounts · <span className="numeral text-ink-1">{count(mobile)}</span> linked to mobile installs. </> : <>Account counts are unavailable until a complete snapshot is recorded. </>}Population: {ACCOUNT_POPULATIONS[data.population ?? 'all']}. Accounts are grouped by creation date, not install date. A verified mobile link establishes app use, not where signup happened. Accounts without a link may still be mobile users.</p>
+    <aside aria-label="Funding coverage" className="border-l-2 border-alert bg-surface px-4 py-3 text-sm leading-relaxed text-ink-2">
+      <strong className="font-medium text-ink-1">Card funding is a lower bound.</strong> External crypto funding is not yet measured. A user can trade after a crypto transfer, an imported funded wallet or a reward without a recorded card deposit. Zero card deposits does not mean zero funded users.
+    </aside>
     <div className="flex flex-wrap gap-1" aria-label="Cohort metric">
       {(Object.entries(ACCOUNT_METRICS) as Array<[AccountMetric, typeof ACCOUNT_METRICS[AccountMetric]]>).map(([key, option]) => <button key={key} type="button" aria-pressed={metric === key} onClick={() => setMetric(key)} className={`min-h-10 rounded-md px-3 py-2 text-sm font-medium focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent ${metric === key ? 'bg-raised text-ink-1' : 'text-ink-2 hover:bg-surface'}`}>{option.label}</button>)}
     </div>
     <p className="max-w-4xl text-sm leading-relaxed text-ink-2">{ACCOUNT_METRICS[metric].definition}</p>
-    {progressKey && <p className="max-w-4xl text-sm text-ink-2"><strong className="font-medium text-ink-1">Observed so far</strong> includes current progress through the report time, even for immature cohorts. These counts are not D1/D7 conversion rates; every cohort has had a different amount of time.</p>}
+    {progressKey && <p className="max-w-4xl text-sm text-ink-2"><strong className="font-medium text-ink-1">Observed so far</strong> includes current progress through the report time, even for immature cohorts. These counts are not fixed-window conversion rates; every cohort has had a different amount of time.</p>}
     <div className="overflow-x-auto rounded-md border border-hairline">
       <table className="w-full min-w-[780px] border-collapse text-sm">
         <caption className="sr-only">{ACCOUNT_METRICS[metric].label} by account creation date; each metric displays its eligible denominator.</caption>
@@ -49,7 +52,7 @@ export function AccountCohortReport({ data, initialMetric = 'appReturn' }: { dat
           <th scope="col" className="px-3 py-3 font-medium">Account creation date</th>
           <th scope="col" className="px-3 py-3 text-right font-medium">Accounts / mobile linked</th>
           {progressKey && <th scope="col" className="px-3 py-3 text-right font-medium">Observed so far</th>}
-          {COHORT_DAYS.map(day => <th scope="col" key={day} className="px-3 py-3 text-right font-medium">D{day}</th>)}
+          {COHORT_DAYS.map(day => <th scope="col" key={day} className="px-3 py-3 text-right font-medium">{horizonLabel(metric, day)}</th>)}
         </tr></thead>
         <tbody>
           <tr className="border-b border-hairline bg-surface align-top">
@@ -58,7 +61,7 @@ export function AccountCohortReport({ data, initialMetric = 'appReturn' }: { dat
             {progressKey && <td className="px-3 py-4 text-right"><span className="numeral block font-semibold">{progressRows.length ? count(progressCount!) : 'Unavailable'}</span><span className="mt-1 block text-xs text-ink-2">{progressRows.length ? `${progressRows.length} cohorts · current count` : 'Source unavailable'}</span></td>}
             {COHORT_DAYS.map(day => {
               const summary = summarizeHorizon(data.rows, day, metric)
-              return <td key={day} className="px-3 py-4 text-right">{summary.rate === null ? <span className="text-xs text-ink-2">No eligible observations</span> : <><span className="numeral block font-semibold">{metric === 'revenue' ? usd(summary.rate) : `${(summary.rate * 100).toFixed(1)}%`}</span><span className="numeral mt-1 block text-xs text-ink-2">{metric === 'revenue' ? usd(summary.numerator) : count(summary.numerator)} / {count(summary.denominator)}</span><span className="mt-1 block text-xs text-ink-2">{summary.includedCohorts} {summary.includedCohorts === 1 ? 'cohort' : 'cohorts'}</span></>}</td>
+              return <td key={day} className="px-3 py-4 text-right">{summary.rate === null ? <span className="text-xs text-ink-2">No eligible observations</span> : <><span className="numeral block font-semibold">{metric === 'revenue' ? usd(summary.rate) : `${(summary.rate * 100).toFixed(1)}%`}</span><span className="numeral mt-1 block text-xs text-ink-2">{metric === 'revenue' ? usd(summary.numerator) : count(summary.numerator)} / {count(summary.denominator)}</span><span className="mt-1 block text-xs text-ink-2">{summary.includedCohorts} {summary.includedCohorts === 1 ? 'cohort' : 'cohorts'}</span>{summary.denominator < 30 && <span className="mt-1 block text-xs text-alert">Small sample · fewer than 30 accounts</span>}</>}</td>
             })}
           </tr>
           {[...data.rows].reverse().map(row => <tr key={row.cohortDate} className="border-b border-hairline align-top last:border-0 hover:bg-surface">
@@ -71,7 +74,7 @@ export function AccountCohortReport({ data, initialMetric = 'appReturn' }: { dat
         </tbody>
       </table>
     </div>
-    <p className="max-w-4xl text-xs leading-relaxed text-ink-2">“Still observing” means the full observation window has not elapsed. Unavailable cells are excluded from the weighted total, not counted as zero. Conversion and fee windows wait until the cohort’s full exact-return day has closed, so the last eligible date is conservative.</p>
+    <p className="max-w-4xl text-xs leading-relaxed text-ink-2">Each column can include different eligible cohorts. Compare a single creation-date row across ages; a lower aggregate at a later age does not mean revenue or conversions went backwards. “Still observing” means the full observation window has not elapsed. Unavailable cells are excluded from the weighted total, not counted as zero. Conversion and fee windows wait until the cohort’s full exact-return day has closed, so the last eligible date is conservative.</p>
     <dl className="flex flex-wrap gap-x-8 gap-y-3 border-t border-hairline pt-4 text-xs text-ink-2">
       <div><dt>Account snapshot</dt><dd className="mt-1 text-ink-1">{time(data.coverage.accountsAsOf)}</dd></div>
       <div><dt>Mobile activity checked</dt><dd className="mt-1 text-ink-1">{time(data.coverage.activityAsOf)}</dd></div>
@@ -81,6 +84,15 @@ export function AccountCohortReport({ data, initialMetric = 'appReturn' }: { dat
       <summary className="cursor-pointer font-medium text-ink-1 focus-visible:outline-2 focus-visible:outline-accent">Source coverage and definitions</summary>
       <p className="mt-3">Mobile activity source: {time(data.coverage.activitySourceFrom)} through {time(data.coverage.activitySourceThrough)}. Account and mobile metrics come from the trading backend’s versioned measurement model.</p>
       <ul className="mt-3 list-disc space-y-2 pl-5">{data.coverage.warnings.map((warning, index) => <li key={index}>{warning}</li>)}</ul>
+    </details>
+    <details className="rounded-md border border-hairline p-4 text-sm text-ink-2">
+      <summary className="cursor-pointer font-medium text-ink-1 focus-visible:outline-2 focus-visible:outline-accent">How to use Journey</summary>
+      <ol className="mt-3 list-decimal space-y-2 pl-5">
+        <li>Choose account creation dates and a population. Mobile-linked accounts isolate accounts with verified app use; this is not an install-to-signup funnel.</li>
+        <li>Use First recorded trade to assess trading activation and Verified card funding for the portion supported by payment evidence. Each cell shows the numerator and eligible accounts.</li>
+        <li>Use App return or Trading return for activity on that exact day. A missing return is not proof of churn. Small samples can produce extreme percentages.</li>
+        <li>Use Observed fees / account for recorded gross fee revenue. Compare the same mature cohorts and inspect source coverage before using it for spending decisions.</li>
+      </ol>
     </details>
     <dl className="grid gap-5 border-t border-hairline pt-5 sm:grid-cols-2">
       <div><dt className="font-medium">Expected LTV — unavailable</dt><dd className="mt-1 max-w-prose text-sm text-ink-2">A forecast requires longer mature cohorts, explicit assumptions and backtesting. Observed fee revenue is not an LTV estimate.</dd></div>

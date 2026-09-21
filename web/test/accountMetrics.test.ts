@@ -2,7 +2,8 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createElement } from 'react'
 import { createRequire } from 'node:module'
 import { accountFixture, horizon, immature } from './fixtures/accountMetrics'
-import { summarizeHorizon, unavailableCellLabel } from '@/lib/accountMetrics'
+import { populationHref } from '@/components/AccountPopulationControls'
+import { horizonLabel, summarizeHorizon, unavailableCellLabel } from '@/lib/accountMetrics'
 import { fetchAccountMetrics, isAccountMetrics } from '@/lib/accountMetricsApi'
 import { AccountCohortReport } from '@/components/AccountCohortReport'
 import { AccountCohortsSection } from '@/components/AccountCohortsSection'
@@ -10,6 +11,35 @@ const { renderToStaticMarkup } = createRequire(import.meta.url)('react-dom/serve
 afterEach(() => { vi.unstubAllEnvs(); vi.unstubAllGlobals() })
 
 describe('account measurement contract', () => {
+  it('never accepts an unfiltered or wrong-population response for a segment', async () => {
+    const data = accountFixture()
+    expect(isAccountMetrics(data, data.range.from, data.range.to, 'mobile_linked')).toBe(false)
+    data.population = 'mobile_linked'
+    data.rows[0]!.mobileLinkedAccounts = data.rows[0]!.accounts
+    expect(isAccountMetrics(data, data.range.from, data.range.to, 'mobile_linked')).toBe(true)
+    expect(isAccountMetrics(data, data.range.from, data.range.to, 'unlinked')).toBe(false)
+    vi.stubEnv('ANALYTICS_FUNNEL_READ_SECRET', 'test-only')
+    const request = vi.fn<typeof fetch>(async () => Response.json(accountFixture()))
+    vi.stubGlobal('fetch', request)
+    expect(await fetchAccountMetrics({ ...data.range, population: 'mobile_linked' })).toEqual({ ok: false, reason: 'invalid_response' })
+    expect(request.mock.calls[0]?.[0]).toContain('population=mobile_linked')
+  })
+  it('keeps date ranges and diagnostic controls when switching population', () => {
+    const href = populationHref({ accountFrom: '2026-09-01', accountTo: '2026-09-21', from: '2026-08-23', to: '2026-09-21', window: '24h', order: 'journey', population: 'all' }, 'mobile_linked')
+    const qs = new URL(href, 'https://example.test').searchParams
+    expect(Object.fromEntries(qs)).toMatchObject({ accountFrom: '2026-09-01', accountTo: '2026-09-21', from: '2026-08-23', to: '2026-09-21', window: '24h', order: 'journey', population: 'mobile_linked' })
+  })
+  it('renders distinct exact-day and cumulative labels, coverage and small samples', () => {
+    for (const metric of ['appReturn', 'tradingReturn', 'funding', 'firstTrade', 'revenue'] as const) {
+      const html = renderToStaticMarkup(createElement(AccountCohortReport, { data: accountFixture(), initialMetric: metric }))
+      expect(html).toContain(horizonLabel(metric, 1))
+      expect(html).toContain(horizonLabel(metric, 7))
+      expect(html).toContain('External crypto funding is not yet measured')
+      expect(html).toContain('Small sample')
+      expect(html).toContain('different eligible cohorts')
+    }
+  })
+
   it('accepts v1 with explicit immature nulls and rejects invented future zeros', () => {
     const data = accountFixture()
     expect(isAccountMetrics(data, data.range.from, data.range.to)).toBe(true)
@@ -76,7 +106,7 @@ describe('account measurement contract', () => {
     data.rows[0]!.observedFundedAccounts = 4
     const html = renderToStaticMarkup(createElement(AccountCohortReport, { data, initialMetric: 'funding' }))
     expect(html).toContain('Observed so far')
-    expect(html).toContain('not D1/D7 conversion rates')
+    expect(html).toContain('not fixed-window conversion rates')
     expect(html).toContain('20.0%')
     expect(html).toContain('Still observing')
     data.rows[0]!.observedFundedAccounts = null

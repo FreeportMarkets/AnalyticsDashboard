@@ -23,7 +23,14 @@ export interface AccountCohort {
   observedFirstTradeAccounts: number | null;
   horizons: AccountHorizon[];
 }
+export type AccountPopulation = 'all' | 'mobile_linked' | 'unlinked'
+export const ACCOUNT_POPULATIONS: Record<AccountPopulation, string> = { all: 'All accounts', mobile_linked: 'Mobile-linked accounts', unlinked: 'No verified mobile link' }
+export function horizonLabel(metric: AccountMetric, day: number) {
+  return metric === 'appReturn' || metric === 'tradingReturn' ? `On day ${day}` : day === 1 ? 'Within 24h' : `Within ${day} days`
+}
+
 export interface AccountMetrics {
+  population?: AccountPopulation;
   schemaVersion: 1;
   generatedAt: string;
   timezone: 'America/New_York';

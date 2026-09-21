@@ -26,7 +26,7 @@ function boundaries(node: ReactNode): ReactElement<{children: ReactElement}>[] {
 describe('Account page source isolation', () => {
   it('routes independent NY/UTC dates and preserves account bounds through diagnostic controls', async () => {
     vi.useFakeTimers(); vi.setSystemTime(new Date('2026-09-22T01:00:00Z'))
-    const params = { from: '2026-09-09', to: '2026-09-22', accountFrom: '2026-09-08', accountTo: '2026-09-21' }
+    const params = { from: '2026-09-09', to: '2026-09-22', accountFrom: '2026-09-08', accountTo: '2026-09-21', population: 'mobile_linked' }
     const sections = boundaries(await JourneyPage({ searchParams: Promise.resolve(params) }))
     expect(sections[0]!.props.children.props).toMatchObject({ from: params.accountFrom, to: params.accountTo })
     const intro = sections[1]!.props.children
@@ -41,7 +41,7 @@ describe('Account page source isolation', () => {
     expect(links.filter(q => q.get('window') === '24h')).toHaveLength(1)
     expect(links.find(q => q.get('window') === '24h')!.get('accountFrom')).toBe(params.accountFrom)
     const legacy = boundaries(await JourneyPage({ searchParams: Promise.resolve({ from: params.from, to: params.to }) }))
-    expect(legacy[0]!.props.children.props).toEqual({ from: undefined, to: undefined })
+    expect(legacy[0]!.props.children.props).toEqual({ from: undefined, to: undefined, population: 'all' })
   })
   it.each([['Users', UsersPage, activeUsers], ['Funnels', FunnelsPage, availableEvents]] as const)('%s returns account and legacy source boundaries without awaiting either source', async (_name, Page, query) => {
     vi.clearAllMocks()

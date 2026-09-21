@@ -1,4 +1,4 @@
-import { COHORT_DAYS, type AccountMetrics } from './accountMetrics'
+import { COHORT_DAYS, type AccountMetrics, type AccountPopulation } from './accountMetrics'
 
 export type AccountMetricsFailure = 'not_configured' | 'unauthorized' | 'bad_range' | 'not_deployed' | 'unavailable' | 'invalid_response'
 export type AccountMetricsResult = { ok: true; data: AccountMetrics } | { ok: false; reason: AccountMetricsFailure }
@@ -9,13 +9,15 @@ const timestamp = (value: unknown) => value === null || typeof value === 'string
 const money = (value: unknown) => value === null || typeof value === 'string' && /^\d+(\.\d+)?$/.test(value) && Number.isFinite(Number(value))
 
 /** Reject contract drift rather than rendering plausible numbers with wrong denominators. */
-export function isAccountMetrics(value: unknown, from: string, to: string): value is AccountMetrics {
+export function isAccountMetrics(value: unknown, from: string, to: string, population: AccountPopulation = 'all'): value is AccountMetrics {
   if (!record(value) || value.schemaVersion !== 1 || value.timezone !== 'America/New_York' || value.cohortBasis !== 'account_created'
     || !timestamp(value.generatedAt) || value.generatedAt === null || !record(value.range) || value.range.from !== from || value.range.to !== to
     || !record(value.coverage) || !['partial', 'unavailable', 'stale'].includes(String(value.coverage.status))
     || !Array.isArray(value.coverage.warnings) || !value.coverage.warnings.every(w => typeof w === 'string')
     || !['accountsAsOf', 'activityAsOf', 'activitySourceFrom', 'activitySourceThrough'].every(key => timestamp(value.coverage && (value.coverage as Record<string, unknown>)[key]))
     || !Array.isArray(value.rows) || value.expectedLtv !== null || value.acquisitionCost !== null) return false
+  // Older endpoints may omit the population only for the unfiltered report.
+  if ((value.population === undefined ? 'all' : value.population) !== population) return false
   // Status can be unavailable because only activity is missing. Validate each
   // source separately so valid financial observations remain usable.
   if (value.coverage.accountsAsOf === null && value.rows.length > 0) return false
@@ -27,6 +29,8 @@ export function isAccountMetrics(value: unknown, from: string, to: string): valu
       || !integer(row.accounts) || !integer(row.mobileLinkedAccounts) || row.mobileLinkedAccounts > row.accounts
       || !['observedFundedAccounts', 'observedFirstTradeAccounts'].every(key => row[key] === null || integer(row[key]) && (row[key] as number) <= (row.accounts as number))
       || !Array.isArray(row.horizons) || row.horizons.length !== COHORT_DAYS.length) return false
+    if (population === 'mobile_linked' && row.mobileLinkedAccounts !== row.accounts) return false
+    if (population === 'unlinked' && row.mobileLinkedAccounts !== 0) return false
     dates.add(row.cohortDate)
     const days = new Set<number>()
     return row.horizons.every(cell => {
@@ -49,17 +53,17 @@ export function isAccountMetrics(value: unknown, from: string, to: string): valu
   })
 }
 
-export async function fetchAccountMetrics({ from, to }: { from: string; to: string }): Promise<AccountMetricsResult> {
+export async function fetchAccountMetrics({ from, to, population = 'all' }: { from: string; to: string; population?: AccountPopulation }): Promise<AccountMetricsResult> {
   const secret = process.env.ANALYTICS_FUNNEL_READ_SECRET
   if (!secret) return { ok: false, reason: 'not_configured' }
   const base = process.env.TRADING_API_BASE_URL ?? 'https://trading-api.freeportmarkets.com'
   try {
-    const response = await fetch(`${base}/v1/analytics/accounts?${new URLSearchParams({ from, to })}`, {
+    const response = await fetch(`${base}/v1/analytics/accounts?${new URLSearchParams({ from, to, population })}`, {
       headers: { 'x-funnel-secret': secret }, signal: AbortSignal.timeout(10_000), next: { revalidate: 60 },
     })
     if (!response.ok) return { ok: false, reason: response.status === 401 ? 'unauthorized' : response.status === 400 ? 'bad_range' : response.status === 404 || response.status === 501 ? 'not_deployed' : 'unavailable' }
     const data: unknown = await response.json()
-    return isAccountMetrics(data, from, to) ? { ok: true, data } : { ok: false, reason: 'invalid_response' }
+    return isAccountMetrics(data, from, to, population) ? { ok: true, data } : { ok: false, reason: 'invalid_response' }
   } catch {
     return { ok: false, reason: 'unavailable' }
   }

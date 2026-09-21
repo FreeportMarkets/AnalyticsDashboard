@@ -1,4 +1,6 @@
 import { Suspense } from 'react'
+import { AccountPopulationControls } from '@/components/AccountPopulationControls'
+import { ACCOUNT_POPULATIONS, type AccountPopulation } from '@/lib/accountMetrics'
 import { JourneyDaily } from '@/components/JourneyDaily'
 import { AccountCohortsLoading } from '@/components/AccountCohortsSection'
 import { auth } from '@/auth'
@@ -37,6 +39,7 @@ async function IntroDiagnostics({ params }: { params: Record<string, string | st
   const preserveAccountRange = (qs: URLSearchParams) => {
     if (accountFrom) qs.set('accountFrom', accountFrom)
     if (accountTo) qs.set('accountTo', accountTo)
+    if (first(params.population)) qs.set('population', first(params.population)!)
     return qs
   }
 
@@ -74,6 +77,7 @@ async function IntroDiagnostics({ params }: { params: Record<string, string | st
     if (r.to) qs.set('to', r.to)
     qs.set('accountFrom', r.accountFrom)
     qs.set('accountTo', r.accountTo)
+    if (first(params.population)) qs.set('population', first(params.population)!)
     return {
       label: r.label,
       href: `/journey?${qs.toString()}`,
@@ -236,10 +240,13 @@ async function IntroDiagnostics({ params }: { params: Record<string, string | st
 export default async function JourneyPage({ searchParams }: { searchParams: Promise<Record<string, string | string[] | undefined>> }) {
   const [session, params] = await Promise.all([auth(), searchParams])
   if (!session?.user) return null
+  const population = first(params.population) ?? 'all'
+  const validPopulation = Object.hasOwn(ACCOUNT_POPULATIONS, population)
   return <main className="mx-auto w-full max-w-[1600px] space-y-8 px-4 py-8 sm:px-8">
     <PageHeader title="Journey" subtitle="Account creation cohorts and independent device intro diagnostics." />
-    <Suspense key={`accounts:${first(params.accountFrom)}:${first(params.accountTo)}`} fallback={<AccountCohortsLoading />}>
-      <JourneyDaily from={first(params.accountFrom)} to={first(params.accountTo)} />
+    <AccountPopulationControls params={params} population={population} />
+    <Suspense key={`accounts:${first(params.accountFrom)}:${first(params.accountTo)}:${population}`} fallback={<AccountCohortsLoading />}>
+      {validPopulation ? <JourneyDaily from={first(params.accountFrom)} to={first(params.accountTo)} population={population as AccountPopulation} /> : <p role="status" className="text-sm text-alert">Unknown account population. Choose a population above to load its report.</p>}
     </Suspense>
     <Suspense key={`intro:${JSON.stringify(params)}`} fallback={<p role="status" className="text-sm text-ink-2">Loading device intro diagnostics…</p>}>
       <IntroDiagnostics params={params} />
