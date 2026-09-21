@@ -1,11 +1,13 @@
+import { Suspense } from 'react'
+import Link from 'next/link'
 import { auth, signOut } from '@/auth'
+import { DepositsSection, DepositsLoading } from '@/components/DepositsSection'
 import {
   volumeSummary,
   dailyVolume,
   topAssets,
   venueSplit,
   recentTrades,
-  depositSummary,
 } from '@/lib/metrics/trades'
 import { watermarkAge } from '@/lib/metrics/staleness'
 import { NY_TZ } from '@/lib/time'
@@ -41,7 +43,6 @@ function formatTradeTs(iso: string): string {
 
 const usd = (n: number) => `$${Math.round(n).toLocaleString('en-US')}`
 const compact = (n: number) => Math.round(n).toLocaleString('en-US')
-const pct1 = (n: number) => `${(n * 100).toFixed(1)}%`
 const num2 = (n: number) => n.toLocaleString('en-US', { maximumFractionDigits: 2 })
 
 /**
@@ -83,13 +84,16 @@ export default async function TradesPage({
   const [session, end] = [await auth(), todayNy()]
   const start = rangeStart(end, range)
 
-  const [vol, daily, assets, venues, recent, deposits, ages, hlTotal, hlDaily] = await Promise.all([
+  const recentWithIdentities = recentTrades(start, end, 50).then(async recent => ({
+    recent,
+    privyMap: await fetchWalletIdentities(sql, recent.map(r => r.walletAddress)),
+  }))
+  const [vol, daily, assets, venues, { recent, privyMap }, ages, hlTotal, hlDaily] = await Promise.all([
     volumeSummary(start, end),
     dailyVolume(start, end),
     topAssets(start, end, 15),
     venueSplit(start, end),
-    recentTrades(start, end, 50),
-    depositSummary(start, end),
+    recentWithIdentities,
     watermarkAge(),
     hlVolumeTotal(start, end).catch(() => ({ notionalUsd: 0, builderFeeUsd: 0, fillCount: 0 })),
     hlVolumeDaily(start, end).catch(() => [] as Array<{ day: string; notionalUsd: number; fillCount: number }>),
@@ -100,11 +104,6 @@ export default async function TradesPage({
   // back to the reconstruction (labeled "est.") until then. Mirrors Overview.
   const hlHasData = hlTotal.fillCount > 0
   const hlDailyByDay = new Map(hlDaily.map(d => [d.day, d.notionalUsd]))
-  // Identity lookup is scoped to just the wallets on this page (a single
-  // indexed query against the privy_identities mirror), not a 14s live Privy
-  // fetch of all ~5,830 wallets -- see src/lib/privyIdentities.ts. Runs after
-  // `recent` resolves since it needs those wallet addresses.
-  const privyMap = await fetchWalletIdentities(sql, recent.map(r => r.walletAddress))
 
   const swap = vol.byType.find(t => t.type === 'swap') ?? { type: 'swap', count: 0, volumeUsd: 0 }
   const perpsDb = vol.byType.find(t => t.type === 'perps') ?? { type: 'perps', count: 0, volumeUsd: 0 }
@@ -138,7 +137,7 @@ export default async function TradesPage({
             <span>{formatDateRange(start, end)} · {NY_TZ}</span>
             <nav aria-label="Date range" className="flex items-center gap-1">
               {(Object.keys(RANGES) as RangeKey[]).map(key => (
-                <a
+                <Link
                   key={key}
                   href={key === '7d' ? '/trades' : `/trades?range=${key}`}
                   aria-current={key === range ? 'true' : undefined}
@@ -147,14 +146,14 @@ export default async function TradesPage({
                   }`}
                 >
                   {RANGES[key].label}
-                </a>
+                </Link>
               ))}
             </nav>
           </div>
         }
         right={
           <div className="flex items-center gap-4">
-            <AutoRefresh intervalMs={60_000} />
+            <AutoRefresh intervalMs={60_000} renderedAt={Date.now()} />
             <StalenessBadge ages={ages} />
             <form action={async () => { 'use server'; await signOut({ redirectTo: '/login' }) }}>
               <button className="text-xs text-ink-2 outline-none transition-colors hover:text-ink-1 focus-visible:ring-2 focus-visible:ring-accent">
@@ -358,43 +357,9 @@ export default async function TradesPage({
           </div>
         </section>
 
-        {/* --- Deposits funnel --- */}
-        <section aria-label="Deposits" className="mt-8 border-t border-hairline pt-8">
-          <SectionHeading>Deposits</SectionHeading>
-          <div className="mt-4 grid gap-x-6 divide-y divide-hairline sm:grid-cols-4 sm:divide-x sm:divide-y-0">
-            <StatTile label="Initiated" value={deposits.initiated} format={compact} />
-            <div className="sm:pl-6">
-              <StatTile label="Success" value={deposits.success} format={compact} />
-            </div>
-            <div className="sm:pl-6">
-              <StatTile label="Error" value={deposits.error} format={compact} />
-            </div>
-            <div className="sm:pl-6">
-              <StatTile label="Conversion" value={deposits.conversionRate * 100} format={n => pct1(n / 100)} />
-            </div>
-          </div>
-          <div className="mt-6">
-            <SectionHeading as="h3">By provider</SectionHeading>
-            <div className="mt-3">
-              <DataTable
-                rowKey={row => row.provider}
-                rows={deposits.byProvider}
-                columns={[
-                  { key: 'provider', header: 'Provider', render: r => r.provider },
-                  { key: 'initiated', header: 'Initiated', align: 'right', render: r => compact(r.initiated) },
-                  { key: 'success', header: 'Success', align: 'right', render: r => compact(r.success) },
-                  { key: 'error', header: 'Error', align: 'right', render: r => compact(r.error) },
-                  {
-                    key: 'conversion',
-                    header: 'Conversion',
-                    align: 'right',
-                    render: r => (r.initiated > 0 ? pct1(r.success / r.initiated) : '—'),
-                  },
-                ]}
-              />
-            </div>
-          </div>
-        </section>
+        <Suspense key={`${start}:${end}`} fallback={<DepositsLoading />}>
+          <DepositsSection start={start} end={end} />
+        </Suspense>
       </div>
     </main>
   )

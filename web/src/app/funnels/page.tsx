@@ -1,3 +1,5 @@
+import { Suspense } from 'react'
+import { AccountCohortsSection, AccountCohortsLoading } from '@/components/AccountCohortsSection'
 import { auth, signOut } from '@/auth'
 import {
   availableEvents,
@@ -93,25 +95,7 @@ export default async function FunnelsPage({
         .map(s => (s ?? '').trim())
         .filter(Boolean)
 
-  const [events, ages] = await Promise.all([
-    availableEvents(start, end),
-    watermarkAge(),
-  ])
-  const eventNames = events.map(e => e.event)
-  const eventSet = new Set(eventNames)
-
-  const validSteps = requestedSteps.filter(s => eventSet.has(s))
-  const invalidSteps = requestedSteps.filter(s => !eventSet.has(s))
-  const canRunFunnel = validSteps.length >= 2 && validSteps.length <= 6
-
   const current = { range, steps: requestedSteps, windowKey, by }
-
-  const [funnel, engagement] = await Promise.all([
-    canRunFunnel ? computeFunnel(start, end, validSteps, WINDOWS[windowKey], by) : Promise.resolve(null),
-    featureEngagement(start, end),
-  ])
-
-  const maxUsers = Math.max(funnel?.steps[0]?.users ?? 1, 1)
 
   return (
     <main className="mx-auto w-full max-w-[1600px] px-8 py-8">
@@ -138,8 +122,7 @@ export default async function FunnelsPage({
         }
         right={
           <div className="flex items-center gap-4">
-            <AutoRefresh intervalMs={60_000} />
-            <StalenessBadge ages={ages} />
+            <AutoRefresh intervalMs={60_000} renderedAt={Date.now()} />
             <form action={async () => { 'use server'; await signOut({ redirectTo: '/login' }) }}>
               <button className="text-xs text-ink-2 outline-none transition-colors hover:text-ink-1 focus-visible:ring-2 focus-visible:ring-accent">
                 {session?.user?.email} · sign out
@@ -149,6 +132,47 @@ export default async function FunnelsPage({
         }
       />
 
+      <Suspense key={`accounts:${start}:${end}`} fallback={<AccountCohortsLoading />}>
+        <AccountCohortsSection from={start} to={end} initialMetric="funding" />
+      </Suspense>
+      <Suspense key={`web:${JSON.stringify(current)}`} fallback={<p role="status" className="mt-8 text-sm text-ink-2">Loading web event diagnostics…</p>}>
+        <WebEventDiagnostics start={start} end={end} current={current} />
+      </Suspense>
+    </main>
+  )
+}
+
+
+async function WebEventDiagnostics({ start, end, current }: {
+  start: string; end: string;
+  current: { range: RangeKey; steps: string[]; windowKey: WindowKey; by: BreakdownDim | undefined }
+}) {
+  const { range, steps: requestedSteps, windowKey, by } = current
+  try {
+    const [events, ages] = await Promise.all([
+      availableEvents(start, end, 'web'),
+      watermarkAge(),
+    ])
+    const eventNames = events.map(e => e.event)
+    const eventSet = new Set(eventNames)
+
+    const validSteps = requestedSteps.filter(s => eventSet.has(s))
+    const invalidSteps = requestedSteps.filter(s => !eventSet.has(s))
+    const canRunFunnel = validSteps.length >= 2 && validSteps.length <= 6
+
+
+    const [funnel, engagement] = await Promise.all([
+      canRunFunnel ? computeFunnel(start, end, validSteps, WINDOWS[windowKey], by, 'web') : Promise.resolve(null),
+      featureEngagement(start, end, 'web'),
+    ])
+
+    const maxUsers = Math.max(funnel?.steps[0]?.users ?? 1, 1)
+
+    return (<>
+      <section className="mt-8 border-t border-hairline pt-8">
+        <SectionHeading meta={<StalenessBadge ages={ages} />}>Web event funnels</SectionHeading>
+        <p className="mt-2 max-w-3xl text-sm text-ink-2">Diagnostic sequences from web events in the legacy analytics mirror. These counts use connected wallets and a per-step time window; they are not mobile acquisition cohorts or verified funded-account conversion.</p>
+      </section>
       <div key={`${range}-${requestedSteps.join(',')}-${windowKey}-${by ?? ''}`} className="animate-content-fade">
         <section aria-label="Presets" className="mt-8">
           <SectionHeading>Presets</SectionHeading>
@@ -303,6 +327,8 @@ export default async function FunnelsPage({
           </div>
         </section>
       </div>
-    </main>
-  )
+    </>)
+  } catch {
+    return <section className="mt-8 border-t border-hairline pt-8"><SectionHeading>Web event funnels</SectionHeading><p role="status" className="mt-3 text-sm text-alert">The legacy web event source is unavailable. Account cohorts above use an independent source.</p></section>
+  }
 }

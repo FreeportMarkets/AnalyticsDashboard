@@ -1,9 +1,9 @@
 import { formatAge, isStale } from '@/lib/metrics/staleness'
 
 /**
- * Watermark age per sync source. Renders "Live" when healthy (all sources
+ * Watermark age per sync source. Renders "Mirror checked" when healthy (all sources
  * within STALE_THRESHOLD), with per-source details in a tooltip. When stale
- * (any source over threshold), shows "Data Xm behind" with per-source breakdown
+ * (any source over threshold), shows "Mirror Xm behind" with per-source breakdown
  * visible below. The sync deliberately holds a 10-minute watermark lag to avoid
  * skipping late-arriving events, so 10m is normal; 15m+ means cron is not running.
  */
@@ -17,9 +17,9 @@ export function StalenessBadge({
   const anyStale = ages.some(a => isStale(a.ageSeconds))
 
   if (!anyStale) {
-    // Healthy state: compact "Live" indicator with detailed tooltip
+    // Healthy state: compact mirror-check indicator with detailed tooltip
     const sourceDetails = ages.map(a => `${a.source} ${formatAge(a.ageSeconds)} behind`).join(', ')
-    const tooltipText = `Data synced — ${sourceDetails}. The sync holds a deliberate 10-minute lag so late-arriving events aren't missed.`
+    const tooltipText = `Legacy mirror sync cursors — ${sourceDetails}. Cursors show when sources were checked, not current mobile coverage. The sync holds a deliberate 10-minute lag.`
 
     return (
       <div
@@ -27,8 +27,8 @@ export function StalenessBadge({
         title={tooltipText}
       >
         <span aria-hidden="true" className="h-1.5 w-1.5 rounded-full bg-positive" />
-        <span>Live</span>
-        <span className="sr-only">Data is live, all sources synced within normal lag</span>
+        <span>Mirror checked</span>
+        <span className="sr-only">Legacy mirror sync cursors are within normal lag; source coverage is separate</span>
       </div>
     )
   }
@@ -46,7 +46,7 @@ export function StalenessBadge({
         title="One or more data sources are stale. The sync cron may not be running. Check logs."
       >
         <span aria-hidden="true" className="h-1.5 w-1.5 rounded-full bg-alert" />
-        <span>Data {maxFormatted} behind</span>
+        <span>Mirror {maxFormatted} behind</span>
         <span className="sr-only">Data is stale. {staleLabel} old.</span>
       </div>
       <div className="mt-1.5 flex flex-col gap-1 text-xs text-alert">

@@ -32,12 +32,13 @@ export interface EventCount {
 }
 
 /** Distinct event names present in the range, for populating a step picker. */
-export async function availableEvents(startDate: string, endDate: string): Promise<EventCount[]> {
+export async function availableEvents(startDate: string, endDate: string, scope: 'web' | 'legacy' = 'legacy'): Promise<EventCount[]> {
   const { fromUtc, toUtc } = nyRangeToUtc(startDate, endDate)
   const rows = (await sql(
     `SELECT event, count(*)::int AS count
        FROM events
       WHERE ts >= $1 AND ts < $2
+        ${scope === 'web' ? "AND platform = 'web'" : ''}
       GROUP BY 1
       ORDER BY count DESC, event ASC`,
     [fromUtc.toISOString(), toUtc.toISOString()]
@@ -88,7 +89,8 @@ export async function computeFunnel(
   endDate: string,
   steps: string[],
   windowSeconds: number,
-  breakdownBy?: BreakdownDim
+  breakdownBy?: BreakdownDim,
+  scope: 'web' | 'legacy' = 'legacy'
 ): Promise<FunnelResult> {
   if (steps.length < MIN_STEPS || steps.length > MAX_STEPS) {
     throw new Error(`computeFunnel: steps must have between ${MIN_STEPS} and ${MAX_STEPS} entries, got ${steps.length}`)
@@ -131,7 +133,7 @@ export async function computeFunnel(
          AND ts >= $1 AND ts < $2
          AND wallet_address IS NOT NULL
          AND wallet_address <> ALL($3::text[])
-         AND (platform IS NULL OR platform <> 'server')
+         AND ${scope === 'web' ? "platform = 'web'" : "(platform IS NULL OR platform <> 'server')"}
        GROUP BY wallet_address
     )`,
   ]
@@ -149,7 +151,7 @@ export async function computeFunnel(
            AND e.ts <= prev.ts${i - 1} + ($4::numeric * INTERVAL '1 second')
            AND e.ts >= $1 AND e.ts < $2
            AND e.wallet_address <> ALL($3::text[])
-           AND (e.platform IS NULL OR e.platform <> 'server')
+           AND ${scope === 'web' ? "e.platform = 'web'" : "(e.platform IS NULL OR e.platform <> 'server')"}
          GROUP BY e.wallet_address, prev.dim
       )`
     )
@@ -214,17 +216,18 @@ export interface FeatureEngagementRow {
  * bridge_transfer -- aren't in this dataset's actual event names) to
  * whatever events actually occurred.
  */
-export async function featureEngagement(startDate: string, endDate: string): Promise<FeatureEngagementRow[]> {
+export async function featureEngagement(startDate: string, endDate: string, scope: 'web' | 'legacy' = 'legacy'): Promise<FeatureEngagementRow[]> {
   const { fromUtc, toUtc } = nyRangeToUtc(startDate, endDate)
   const rows = (await sql(
     `SELECT event,
             count(*)::int AS total,
             count(DISTINCT wallet_address) FILTER (
               WHERE wallet_address IS NOT NULL AND wallet_address <> ALL($3::text[])
-                AND (platform IS NULL OR platform <> 'server')
+                AND ${scope === 'web' ? "platform = 'web'" : "(platform IS NULL OR platform <> 'server')"}
             )::int AS users
        FROM events
       WHERE ts >= $1 AND ts < $2
+        ${scope === 'web' ? "AND platform = 'web'" : ''}
       GROUP BY 1
       ORDER BY total DESC`,
     [fromUtc.toISOString(), toUtc.toISOString(), SYSTEM_WALLETS]
