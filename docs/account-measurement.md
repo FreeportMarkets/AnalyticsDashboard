@@ -128,6 +128,49 @@ The inline Journey guide explains population, activation, exact-day return and
 observed gross fees. LTV and churn are not inferred from short-window return.
 No mobile app change or OTA is needed for this dashboard batch.
 
+## Operating Journey alongside AppsFlyer
+
+Start with a question and keep its population and time window fixed:
+
+| Question | Report | Read it as |
+| --- | --- | --- |
+| Do newly created accounts start trading? | Journey, First recorded trade, a mature Within 7 days column | Recorded traders divided by the eligible accounts shown in that cell |
+| Do mobile-linked accounts return? | Journey, Mobile-linked, App return, On day 7 | Observed app use on that exact day; not seven-day cumulative retention or permanent churn |
+| Are card deposits converting? | Journey, Verified card funding | Proven card funding only; a zero does not establish no external crypto funding |
+| Which installed-user cohorts or campaigns produce trades and fees? | AppsFlyer, acquisition view | Installs and unique event users within the same install cohort, subject to identity and event coverage |
+| How much fee revenue arrived during a reporting period? | AppsFlyer, activity view, reconciled to the backend delivery ledger | All eligible users' reported fees, including users installed before the selected period |
+
+For a founder readout, retain the date range, selected population, horizon,
+numerator, denominator and source timestamps alongside each percentage. Compare
+equal-age mature cohorts; never treat the difference between independent Journey
+tabs as funnel drop-off. A mobile-linked account segment is not an AppsFlyer
+install cohort, so matching date labels alone do not make their rates comparable.
+
+AppsFlyer delivery verification has three steps: confirm the underlying receipt,
+check the backend delivery ledger, then match the event in AppsFlyer's reports.
+HTTP acceptance alone does not prove reporting. Compare the same platform,
+timezone and date basis. An aggregate dollar match proves aggregate reporting;
+event-by-event reconciliation additionally requires raw records and their
+install/account identifiers. Delayed S2S events can be dated at arrival rather
+than their original occurrence, per the
+[AppsFlyer timestamp rules](https://support.appsflyer.com/hc/en-us/articles/207034486-Server-to-server-events-API-for-mobile-S2S-mobile).
+
+After the verified card exporter is enabled and genuine events appear, configure
+AppsFlyer acquisition widgets for unique `first_card_deposit` users and their
+conversion rate, grouped by media source and campaign. `card_deposit` counts
+individual verified receipts. Sum `deposit_amount_usd` from `card_deposit` only
+in a report that supports summing that custom parameter; standard dashboard
+support for that sum has not been established. Do not add the first-card amount
+again, and never report deposit principal as `af_revenue`. A missing card event
+before worker activation is a rollout gap, not proof that no deposit happened.
+
+Rollout acceptance: verify the backend population contract before deploying this
+dashboard; validate card selection in staging preview before production export;
+then reconcile a genuine production receipt through to AppsFlyer. No synthetic
+conversions, duplicate historical sends or new customer payments are needed to
+validate the reporting path. External-funding measurement and expected-LTV
+modeling remain separately scoped work.
+
 
 Follow-up validation: 290 dashboard tests passed (two optional DynamoDB tests
 skipped), TypeScript and date-query lint passed. Actual updated components were
