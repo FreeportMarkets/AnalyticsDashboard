@@ -24,5 +24,7 @@ page files). Recover the old Streamlit code from git history if ever needed.
 
 ## Docs
 
+- [Creator qualification and manual payments](docs/creator-payments.md) — the Creators page, ledger boundaries, payout steps and backend-first release order.
+
 - [Account measurement and dashboard source guide](docs/account-measurement.md).
 - Legacy device intro diagnostics: `docs/analytics-funnel.md` in `freeport-trading-backend`. These are event reach diagnostics, not verified new-account or funding conversion.

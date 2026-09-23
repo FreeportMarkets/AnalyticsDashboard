@@ -11,6 +11,7 @@ const LIVE_LINKS: Array<{ href: string; label: string }> = [
   { href: '/trades', label: 'Trades' },
   { href: '/users', label: 'Users' },
   { href: '/referrals', label: 'Referrals' },
+  { href: '/creators', label: 'Creators' },
 ]
 
 const SOON_LINKS: Array<{ label: string }> = []
