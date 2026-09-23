@@ -46,7 +46,7 @@ browser. The backend still authenticates the dashboard through its shared admin
 key, not independent human credentials. Optional `POINTS_API_BASE_URL` supports
 isolated staging/testing and defaults to the existing production points API.
 
-Ship the backend creator pipeline PR and migration0170 first, verify its running
+Ship [backend PR470](https://github.com/FreeportMarkets/freeport-trading-backend/pull/470) and migration0170 first, verify its running
 version/endpoints, then ship this dashboard PR. A missing backend route fails
 closed with an unavailable message. No FreeApp update is required for this page.
 Neither PR creates payments or changes production merely by being opened.

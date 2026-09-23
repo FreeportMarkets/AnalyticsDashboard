@@ -150,6 +150,48 @@ describe("Creator operator page", () => {
         `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><link rel="stylesheet" href="/qa.css"></head><body><p style="padding:1rem">Synthetic payout fixture · local visual verification · no real payment</p>${html}</body></html>`,
       );
   });
+  it("shows limitations and binds each stage to its own action form", async () => {
+    const row = {
+      ledger_kind: "creator_earning",
+      creator_id: creator.id,
+      beneficiary_did: "did:privy:test",
+      obligation_type: "qualified_user",
+      amount_usd: "10.000000",
+      currency: "USD",
+      batch_id: null,
+      flagged: false,
+    };
+    vi.mocked(creatorRequest).mockImplementation(async (path) => {
+      if (path.includes("/statement"))
+        return {
+          ...statement,
+          limitations: ["Unresolved source evidence remains excluded."],
+          rows: [
+            {
+              ...row,
+              ledger_id: "33333333-3333-4333-8333-333333333333",
+              payout_stage: "reviewable",
+            },
+            {
+              ...row,
+              ledger_id: "44444444-4444-4444-8444-444444444444",
+              payout_stage: "approved_unpaid",
+            },
+          ],
+        } as never;
+      return fixture(path) as never;
+    });
+    const html = renderToStaticMarkup(
+      await CreatorsPage({ searchParams: Promise.resolve({}) }),
+    );
+    expect(html).toContain("Unresolved source evidence remains excluded.");
+    expect(html).toMatch(
+      /form="creator-approve-form"[^>]*value="creator_earning:33333333/,
+    );
+    expect(html).toMatch(
+      /form="creator-freeze-form"[^>]*value="creator_earning:44444444/,
+    );
+  });
   it("shows an unavailable state instead of false zero balances", async () => {
     vi.mocked(creatorRequest).mockRejectedValue(
       new Error("Creator service unavailable."),

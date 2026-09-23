@@ -284,9 +284,25 @@ export default async function CreatorsPage({
           Statement cutoff: {statement.as_of}. Totals include all rows in this
           filter, across pages. Refresh before preparing a payment.
         </p>
-        <form action={creatorPayoutAction} className="mt-5 space-y-4">
-          <input type="hidden" name="creator_id" value={creatorId ?? ""} />
-          <input type="hidden" name="idempotency_key" value={randomUUID()} />
+        {statement.limitations.length > 0 && (
+          <aside
+            aria-label="Statement limitations"
+            className="mt-3 border border-alert p-3 text-sm text-alert"
+          >
+            <h3 className="font-medium">Before preparing payments</h3>
+            <ul className="mt-2 list-disc space-y-1 pl-5">
+              {statement.limitations.map((limitation, i) => (
+                <li key={i}>{limitation}</li>
+              ))}
+            </ul>
+          </aside>
+        )}
+        <div className="mt-5 space-y-4">
+          <p className="text-sm text-ink-2">
+            Reviewable rows are selected for approval. Approved rows are
+            selected for payment preparation; each action submits only its own
+            selection.
+          </p>
           <div className="overflow-x-auto">
             <DataTable
               rows={statement.rows}
@@ -300,6 +316,11 @@ export default async function CreatorsPage({
                       aria-label={`Select ${r.obligation_type} ${r.ledger_id}`}
                       type="checkbox"
                       name="row"
+                      form={
+                        r.payout_stage === "reviewable"
+                          ? "creator-approve-form"
+                          : "creator-freeze-form"
+                      }
                       value={`${r.ledger_kind}:${r.ledger_id}`}
                       disabled={
                         !!r.batch_id ||
@@ -380,50 +401,65 @@ export default async function CreatorsPage({
           )}
           {!!statement.rows.length && (
             <>
-              <button
-                className={button}
-                name="operation"
-                value="approve"
-                formNoValidate
-              >
-                Approve selected reviewable rows
-              </button>
-              <fieldset className="border border-hairline p-4">
-                <legend className="px-2 text-sm font-medium">
-                  Prepare a manual payment
-                </legend>
-                <p className="mb-3 max-w-[75ch] text-sm text-ink-2">
-                  Select approved rows for one beneficiary. Verify their payout
-                  destination directly. Preparing a batch reserves these rows
-                  and fixes the exact amount; it does not send money.
-                </p>
-                <div className="flex flex-wrap items-end gap-3">
-                  <label className="grid flex-1 gap-1 text-sm">
-                    Beneficiary DID
-                    <input
-                      name="beneficiary_did"
-                      required
-                      className={input}
-                      placeholder="did:privy:…"
-                    />
-                  </label>
-                  <label className="grid flex-1 gap-1 text-sm">
-                    Verified destination (include network)
-                    <input
-                      name="destination"
-                      required
-                      className={input}
-                      placeholder="e.g. Solana USDC · wallet address"
-                    />
-                  </label>
-                  <button className={button} name="operation" value="freeze">
-                    Prepare selected payment
-                  </button>
-                </div>
-              </fieldset>
+              <form id="creator-approve-form" action={creatorPayoutAction}>
+                <input
+                  type="hidden"
+                  name="creator_id"
+                  value={creatorId ?? ""}
+                />
+                <button className={button} name="operation" value="approve">
+                  Approve selected reviewable rows
+                </button>
+              </form>
+              <form id="creator-freeze-form" action={creatorPayoutAction}>
+                <input
+                  type="hidden"
+                  name="creator_id"
+                  value={creatorId ?? ""}
+                />
+                <input
+                  type="hidden"
+                  name="idempotency_key"
+                  value={randomUUID()}
+                />
+                <fieldset className="border border-hairline p-4">
+                  <legend className="px-2 text-sm font-medium">
+                    Prepare a manual payment
+                  </legend>
+                  <p className="mb-3 max-w-[75ch] text-sm text-ink-2">
+                    Select approved rows for one beneficiary. Verify their
+                    payout destination directly. Preparing a batch reserves
+                    these rows and fixes the exact amount; it does not send
+                    money.
+                  </p>
+                  <div className="flex flex-wrap items-end gap-3">
+                    <label className="grid flex-1 gap-1 text-sm">
+                      Beneficiary DID
+                      <input
+                        name="beneficiary_did"
+                        required
+                        className={input}
+                        placeholder="did:privy:…"
+                      />
+                    </label>
+                    <label className="grid flex-1 gap-1 text-sm">
+                      Verified destination (include network)
+                      <input
+                        name="destination"
+                        required
+                        className={input}
+                        placeholder="e.g. Solana USDC · wallet address"
+                      />
+                    </label>
+                    <button className={button} name="operation" value="freeze">
+                      Prepare selected payment
+                    </button>
+                  </div>
+                </fieldset>
+              </form>
             </>
           )}
-        </form>
+        </div>
         {statement.next_cursor && (
           <Link
             className={`${button} mt-3 inline-block`}
