@@ -1,9 +1,10 @@
 import { sql } from '@/lib/db'
+import { fetchHlLedgerMetrics } from '@/lib/hlLedgerApi'
 
 /**
- * Dashboard reads for HL builder-fee-authoritative volume. These hit the
- * pre-aggregated `wallet_volume_daily` table (populated by the cron), never
- * HL — so page loads stay fast and never risk HL rate limits.
+ * Dashboard reads for recorded HL fill volume. The backend flag reads its
+ * shared ledger; the default reads pre-aggregated `wallet_volume_daily`.
+ * Neither path calls Hyperliquid during a page load.
  *
  * `day` in wallet_volume_daily is already an NY calendar date, so range
  * filters here are plain date comparisons (inclusive), NOT the ts/nyRange
@@ -14,10 +15,24 @@ export interface VolumeTotal {
   notionalUsd: number
   builderFeeUsd: number
   fillCount: number
+  source?: 'backend'
+  unresolvedBuilderFeeUsd?: number
 }
+
+const backendLedgerEnabled = () => process.env.HL_VOLUME_SOURCE === 'backend'
 
 /** Total authoritative volume over an inclusive NY-day range. */
 export async function hlVolumeTotal(startDay: string, endDay: string): Promise<VolumeTotal> {
+  if (backendLedgerEnabled()) {
+    const report = await fetchHlLedgerMetrics(startDay, endDay)
+    return {
+      notionalUsd: report.days.reduce((sum, day) => sum + Number(day.notionalUsd), 0),
+      builderFeeUsd: report.days.reduce((sum, day) => sum + Number(day.confirmedFeeUsd), 0),
+      unresolvedBuilderFeeUsd: report.days.reduce((sum, day) => sum + Number(day.unresolvedBuilderFeeUsd), 0),
+      fillCount: report.days.reduce((sum, day) => sum + day.fillCount, 0),
+      source: 'backend',
+    }
+  }
   const rows = (await sql(
     `SELECT
         coalesce(sum(notional_usd), 0)::float8    AS notional,
@@ -36,6 +51,10 @@ export async function hlVolumeDaily(
   startDay: string,
   endDay: string
 ): Promise<Array<{ day: string; notionalUsd: number; fillCount: number }>> {
+  if (backendLedgerEnabled()) {
+    const report = await fetchHlLedgerMetrics(startDay, endDay)
+    return report.days.map(day => ({ day: day.day, notionalUsd: Number(day.notionalUsd), fillCount: day.fillCount }))
+  }
   const rows = (await sql(
     `SELECT day::text AS day,
             sum(notional_usd)::float8 AS notional,
@@ -54,9 +73,8 @@ export async function hlVolumeDaily(
  * tiles (`{ current, previous }`), plus `hasData` so the page can fall back to
  * the DB reconstruction until the backfill has populated the table.
  *
- * `hasData` is false only when BOTH periods are empty -- a genuinely
- * un-backfilled range -- so a real zero-volume period still reads as
- * authoritative rather than silently reverting to the estimate.
+ * An empty report cannot distinguish a real zero-volume period from missing
+ * ingestion, so both empty periods use the labeled estimate path.
  */
 export async function hlVolumeKpi(
   start: string,
@@ -73,6 +91,8 @@ export async function hlVolumeKpi(
       current: cur.notionalUsd,
       previous: prev.notionalUsd,
       builderFeeUsd: cur.builderFeeUsd,
+      // An empty backend response does not prove complete coverage. Until the
+      // ledger API exposes a coverage watermark, keep the estimate fallback.
       hasData: cur.fillCount > 0 || prev.fillCount > 0,
     }
   } catch {
