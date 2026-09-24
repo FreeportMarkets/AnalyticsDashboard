@@ -11,9 +11,9 @@ export const normalizeWallet = (wallet: string) => /^0x[0-9a-f]+$/i.test(wallet)
 
 /**
  * Account counts must include walletless users and deduplicate by Privy DID.
- * The identity-label mirror lacks created_at and updates only nightly.
- * This separate, persistently cached snapshot keeps "today" current without
- * re-listing users on each navigation or changing identity enrichment.
+ * The identity mirror updates only nightly. This separate, persistently
+ * cached snapshot keeps "today" current without re-listing users on each
+ * navigation or changing identity enrichment.
  * Contract: https://docs.privy.io/api-reference/users/get-all
  */
 export async function loadJourneyAccounts(): Promise<{ accounts: JourneyAccount[]; fetchedAt: string }> {

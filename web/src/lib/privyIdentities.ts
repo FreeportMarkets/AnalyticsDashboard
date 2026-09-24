@@ -16,8 +16,8 @@ type SqlTag = ReturnType<typeof neon>
  * backed by a table refreshed nightly (see `refreshPrivyIdentities`, wired
  * into the existing /api/cron/reconcile cron).
  *
- * `./privy.ts` itself is untouched -- `fetchPrivyUsers`/`fetchPrivyUserByDid`
- * still talk to the live Privy API and are reused here (by the nightly
+ * `fetchPrivyUsers`/`fetchPrivyUserByDid` in `./privy.ts` still talk to the
+ * live Privy API and are reused here (by the nightly
  * refresh) and by /referrals (as the capped per-DID fallback for identities
  * this mirror hasn't caught up to yet, e.g. a user created since last
  * night's refresh).
@@ -61,16 +61,17 @@ export async function refreshPrivyIdentities(sql: SqlTag): Promise<RefreshResult
   for (let i = 0; i < entries.length; i += UPSERT_CHUNK) {
     const chunk = entries.slice(i, i + UPSERT_CHUNK)
     const result = await sql(
-      `INSERT INTO privy_identities (wallet_address, did, label, login_type, contact, synced_at)
+      `INSERT INTO privy_identities (wallet_address, did, label, login_type, contact, synced_at, created_at)
        SELECT * FROM UNNEST(
-         $1::text[], $2::text[], $3::text[], $4::text[], $5::text[], $6::timestamptz[]
+         $1::text[], $2::text[], $3::text[], $4::text[], $5::text[], $6::timestamptz[], $7::timestamptz[]
        )
        ON CONFLICT (wallet_address) DO UPDATE SET
          did        = excluded.did,
          label      = excluded.label,
          login_type = excluded.login_type,
          contact    = excluded.contact,
-         synced_at  = excluded.synced_at`,
+         synced_at  = excluded.synced_at,
+         created_at = excluded.created_at`,
       [
         chunk.map(([wallet]) => wallet),
         chunk.map(([, ident]) => ident.privyDid || null),
@@ -78,6 +79,7 @@ export async function refreshPrivyIdentities(sql: SqlTag): Promise<RefreshResult
         chunk.map(([, ident]) => ident.loginType),
         chunk.map(([, ident]) => ident.contact),
         chunk.map(() => now),
+        chunk.map(([, ident]) => ident.createdAt ?? null),
       ],
       { fullResults: true }
     )
@@ -106,7 +108,7 @@ export async function fetchWalletIdentities(sql: SqlTag, wallets: Iterable<strin
 
   try {
     const rows = (await sql(
-      `SELECT wallet_address, did, label, login_type, contact
+      `SELECT wallet_address, did, label, login_type, contact, created_at
          FROM privy_identities
         WHERE wallet_address = ANY($1::text[])`,
       [addrs]
@@ -116,6 +118,7 @@ export async function fetchWalletIdentities(sql: SqlTag, wallets: Iterable<strin
       label: string | null
       login_type: string | null
       contact: string | null
+      created_at: Date | string | null
     }>
 
     for (const r of rows) {
@@ -128,10 +131,38 @@ export async function fetchWalletIdentities(sql: SqlTag, wallets: Iterable<strin
         // already the email/phone/etc. contact string extractIdentity()
         // derived at write time, so it doubles as `email` on read.
         email: r.contact,
+        createdAt: r.created_at instanceof Date ? r.created_at.toISOString() : r.created_at,
       })
     }
   } catch {
-    // Fail soft -- see doc comment above.
+    // The new signup column may not be migrated yet. Preserve identity labels
+    // while signup highlighting waits for the migration and nightly refresh.
+    try {
+      const rows = (await sql(
+        `SELECT wallet_address, did, label, login_type, contact
+           FROM privy_identities
+          WHERE wallet_address = ANY($1::text[])`,
+        [addrs]
+      )) as Array<{
+        wallet_address: string
+        did: string | null
+        label: string | null
+        login_type: string | null
+        contact: string | null
+      }>
+      for (const r of rows) {
+        map.set(r.wallet_address, {
+          privyDid: r.did ?? '',
+          label: r.label,
+          loginType: (r.login_type as LoginType | null) ?? 'wallet_only',
+          contact: r.contact,
+          email: r.contact,
+          createdAt: null,
+        })
+      }
+    } catch {
+      // Fail soft on a missing table or DB outage, as before.
+    }
   }
 
   return map

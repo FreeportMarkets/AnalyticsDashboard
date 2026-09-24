@@ -124,6 +124,16 @@ body {
   animation: row-reveal 150ms ease-out forwards;
 }
 
+.row-recent-user {
+  background-color: color-mix(in oklch, var(--color-accent) 12%, transparent);
+  box-shadow: inset 3px 0 var(--color-accent);
+  transition: background-color 150ms ease-out;
+}
+.row-recent-user:hover,
+.row-recent-user:focus-within {
+  background-color: color-mix(in oklch, var(--color-accent) 19%, transparent);
+}
+
 @media (prefers-reduced-motion: reduce) {
   .animate-numeral-in,
   .animate-content-fade {

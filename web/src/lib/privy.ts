@@ -53,6 +53,7 @@ export interface PrivyIdentity {
   loginType: LoginType
   contact: string | null
   email: string | null
+  createdAt?: string | null
 }
 
 /** Keyed by LOWERCASED wallet address. A Privy user can own multiple wallets -- every one is indexed. */
@@ -182,6 +183,9 @@ function extractIdentity(user: Record<string, unknown>): ExtractedIdentity {
       loginType,
       contact,
       email: email ?? googleEmail ?? appleEmail ?? null,
+      createdAt: typeof user.created_at === 'number' && Number.isFinite(user.created_at) && user.created_at > 0
+        ? new Date(user.created_at * 1000).toISOString()
+        : null,
     },
     wallets,
   }

@@ -133,10 +133,11 @@ describe.skipIf(!TEST_DATABASE_URL)('privyIdentities (real Neon test database)',
       // mock closure reads this each time it's invoked. Shaped loosely
       // (matching what extractIdentity() in privy.ts actually reads off
       // `linked_accounts`) since the two pages use different account types.
-      let mockPage: { data: Array<{ id: string; linked_accounts: Record<string, unknown>[] }>; next_cursor?: string } = {
+      let mockPage: { data: Array<{ id: string; created_at: number; linked_accounts: Record<string, unknown>[] }>; next_cursor?: string } = {
         data: [
           {
             id: did,
+            created_at: 1788840000,
             linked_accounts: [
               { type: 'wallet', address: wallet.toUpperCase() },
               { type: 'email', address: 'refresh1@example.com' },
@@ -173,8 +174,8 @@ describe.skipIf(!TEST_DATABASE_URL)('privyIdentities (real Neon test database)',
       expect(result.upserted).toBeGreaterThanOrEqual(1)
 
       const rows = (await sql`
-        SELECT wallet_address, did, label, login_type, contact FROM privy_identities WHERE wallet_address = ${wallet}
-      `) as Array<{ wallet_address: string; did: string; label: string; login_type: string; contact: string }>
+        SELECT wallet_address, did, label, login_type, contact, created_at FROM privy_identities WHERE wallet_address = ${wallet}
+      `) as Array<{ wallet_address: string; did: string; label: string; login_type: string; contact: string; created_at: string }>
       expect(rows).toHaveLength(1)
       expect(rows[0]).toMatchObject({
         wallet_address: wallet,
@@ -182,7 +183,9 @@ describe.skipIf(!TEST_DATABASE_URL)('privyIdentities (real Neon test database)',
         label: 'refresh1@example.com',
         login_type: 'email',
         contact: 'refresh1@example.com',
+        created_at: new Date(1788840000 * 1000).toISOString(),
       })
+      expect((await fetchWalletIdentities(sql, [wallet])).get(wallet)?.createdAt).toBe(new Date(1788840000 * 1000).toISOString())
 
       // Re-run with an updated label -- ON CONFLICT (wallet_address) DO
       // UPDATE must overwrite, not duplicate the row.
@@ -190,6 +193,7 @@ describe.skipIf(!TEST_DATABASE_URL)('privyIdentities (real Neon test database)',
         data: [
           {
             id: did,
+            created_at: 1788926400,
             linked_accounts: [
               { type: 'wallet', address: wallet },
               { type: 'google_oauth', name: 'Updated Name', email: 'refresh1@example.com' },
@@ -208,6 +212,7 @@ describe.skipIf(!TEST_DATABASE_URL)('privyIdentities (real Neon test database)',
       `) as Array<{ wallet_address: string; label: string; login_type: string }>
       expect(updated).toHaveLength(1)
       expect(updated[0]).toMatchObject({ wallet_address: wallet, label: 'Updated Name', login_type: 'google' })
+      expect((await fetchWalletIdentities(sql, [wallet])).get(wallet)?.createdAt).toBe(new Date(1788926400 * 1000).toISOString())
     })
   })
 })

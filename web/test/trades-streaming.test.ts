@@ -5,7 +5,7 @@ const { renderToStaticMarkup } = createRequire(import.meta.url)('react-dom/serve
 
 vi.mock('@/auth', () => ({ auth: async () => ({ user: { email: 'qa@example.test' } }), signOut: vi.fn() }))
 vi.mock('@/lib/db', () => ({ sql: vi.fn() }))
-vi.mock('@/lib/metrics/trades', () => ({ volumeSummary: vi.fn(), dailyVolume: vi.fn(), topAssets: vi.fn(), venueSplit: vi.fn(), recentTrades: vi.fn(), depositSummary: vi.fn() }))
+vi.mock('@/lib/metrics/trades', () => ({ volumeSummary: vi.fn(), dailyVolume: vi.fn(), topAssets: vi.fn(), venueSplit: vi.fn(), recentTrades: vi.fn(), recentlyFundedWallets: vi.fn(async () => new Set()), depositSummary: vi.fn() }))
 vi.mock('@/lib/metrics/staleness', () => ({ watermarkAge: async () => [], formatAge: vi.fn(), isStale: vi.fn() }))
 vi.mock('@/lib/metrics/hlVolumeRead', () => ({ hlVolumeTotal: async () => ({ notionalUsd: 125, builderFeeUsd: 1, fillCount: 2 }), hlVolumeDaily: async () => [] }))
 vi.mock('@/lib/privyIdentities', () => ({ fetchWalletIdentities: vi.fn(async () => new Map()) }))

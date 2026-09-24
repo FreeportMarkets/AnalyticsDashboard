@@ -8,6 +8,7 @@ import {
   topAssets,
   venueSplit,
   recentTrades,
+  recentlyFundedWallets,
 } from '@/lib/metrics/trades'
 import { watermarkAge } from '@/lib/metrics/staleness'
 import { NY_TZ } from '@/lib/time'
@@ -84,11 +85,17 @@ export default async function TradesPage({
   const [session, end] = [await auth(), todayNy()]
   const start = rangeStart(end, range)
 
-  const recentWithIdentities = recentTrades(start, end, 50).then(async recent => ({
-    recent,
-    privyMap: await fetchWalletIdentities(sql, recent.map(r => r.walletAddress)),
-  }))
-  const [vol, daily, assets, venues, { recent, privyMap }, ages, hlTotal, hlDaily] = await Promise.all([
+  const now = new Date()
+  const newUserSince = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000)
+  const recentWithIdentities = recentTrades(start, end, 50).then(async recent => {
+    const wallets = recent.map(r => r.walletAddress)
+    const [privyMap, fundedWallets] = await Promise.all([
+      fetchWalletIdentities(sql, wallets),
+      recentlyFundedWallets(wallets, newUserSince, now),
+    ])
+    return { recent, privyMap, fundedWallets }
+  })
+  const [vol, daily, assets, venues, { recent, privyMap, fundedWallets }, ages, hlTotal, hlDaily] = await Promise.all([
     volumeSummary(start, end),
     dailyVolume(start, end),
     topAssets(start, end, 15),
@@ -104,6 +111,15 @@ export default async function TradesPage({
   // back to the reconstruction (labeled "est.") until then. Mirrors Overview.
   const hlHasData = hlTotal.fillCount > 0
   const hlDailyByDay = new Map(hlDaily.map(d => [d.day, d.notionalUsd]))
+  const recentUserLabel = (wallet: string) => {
+    const signup = privyMap.get(wallet.toLowerCase())?.createdAt
+    const signupTime = signup ? new Date(signup).getTime() : NaN
+    if (Number.isFinite(signupTime) && signupTime >= newUserSince.getTime() && signupTime <= now.getTime()) {
+      return 'New signup'
+    }
+    if (fundedWallets.has(wallet.toLowerCase())) return 'Recently funded'
+    return null
+  }
 
   const swap = vol.byType.find(t => t.type === 'swap') ?? { type: 'swap', count: 0, volumeUsd: 0 }
   const perpsDb = vol.byType.find(t => t.type === 'perps') ?? { type: 'perps', count: 0, volumeUsd: 0 }
@@ -321,6 +337,9 @@ export default async function TradesPage({
         {/* --- Recent trades --- */}
         <section aria-label="Recent trades" className="mt-8 border-t border-hairline pt-8">
           <SectionHeading>Recent trades</SectionHeading>
+          <p className="mt-1 text-xs text-ink-3">
+            Highlighted rows are from users who signed up or recorded a successful funding event in the last 30 days.
+          </p>
           <div className="mt-3">
             <DataTable
               /* The one table that keeps an inner scroll: 50 rows of trades
@@ -329,10 +348,23 @@ export default async function TradesPage({
                  the app now scrolls with the page instead. */
               maxHeight="32rem"
               rowKey={row => `${row.ts}-${row.walletAddress}-${row.asset}-${row.side ?? ''}-${row.volumeUsd}`}
+              rowClassName={row => recentUserLabel(row.walletAddress) ? 'row-recent-user' : 'row-hover'}
               rows={recent}
               columns={[
                 { key: 'ts', header: 'Time', render: r => formatTradeTs(r.ts) },
-                { key: 'trader', header: 'Trader', render: r => <TraderCell wallet={r.walletAddress} privyMap={privyMap} /> },
+                {
+                  key: 'trader', header: 'Trader',
+                  render: r => (
+                    <div className="flex items-center gap-2">
+                      <TraderCell wallet={r.walletAddress} privyMap={privyMap} />
+                      {recentUserLabel(r.walletAddress) && (
+                        <span className="shrink-0 rounded-sm border border-accent px-1.5 py-0.5 text-[10px] font-medium text-accent">
+                          {recentUserLabel(r.walletAddress)}
+                        </span>
+                      )}
+                    </div>
+                  ),
+                },
                 { key: 'type', header: 'Type', render: r => r.type },
                 {
                   key: 'action',

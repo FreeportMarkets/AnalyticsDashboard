@@ -252,6 +252,24 @@ export interface RecentTradeRow {
   isClose: boolean | null
 }
 
+/** Wallets with a recorded successful funding event in the last 30 days. */
+export async function recentlyFundedWallets(wallets: string[], since: Date, now: Date): Promise<Set<string>> {
+  const addresses = [...new Set(wallets.map(wallet => wallet.toLowerCase()))]
+  if (addresses.length === 0) return new Set()
+
+  const rows = (await sql(
+    `SELECT DISTINCT lower(wallet_address) AS wallet_address
+       FROM events
+      WHERE ts >= $1 AND ts <= $2
+        AND event IN ('deposit_success', 'deposit_completed', 'deposit_funds_arrived')
+        AND (platform IS NULL OR platform <> 'server')
+        AND lower(wallet_address) = ANY($3::text[])`,
+    [since.toISOString(), now.toISOString(), addresses]
+  )) as Array<{ wallet_address: string }>
+
+  return new Set(rows.map(row => row.wallet_address))
+}
+
 /**
  * Last N swap+perps trades. `asset` falls back to `to_token` for swaps
  * (which have no `asset`/`display_symbol`). `volumeUsd` is the same
