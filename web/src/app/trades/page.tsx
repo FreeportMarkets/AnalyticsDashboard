@@ -28,6 +28,16 @@ import { AutoRefresh } from '@/components/AutoRefresh'
 
 export const dynamic = 'force-dynamic'
 
+const TRADES_BATCH = 50
+const MAX_VISIBLE_TRADES = 1000
+
+function visibleTradeCount(raw: string | string[] | undefined): number {
+  if (typeof raw !== 'string' || !/^\d+$/.test(raw)) return TRADES_BATCH
+  const count = Number(raw)
+  if (!Number.isSafeInteger(count) || count < TRADES_BATCH) return TRADES_BATCH
+  return Math.min(MAX_VISIBLE_TRADES, Math.ceil(count / TRADES_BATCH) * TRADES_BATCH)
+}
+
 function formatDateRange(start: string, end: string): string {
   const fmt = new Intl.DateTimeFormat('en-US', { month: 'short', day: 'numeric' })
   const startLabel = fmt.format(new Date(`${start}T12:00:00Z`))
@@ -81,21 +91,23 @@ export default async function TradesPage({
   const params = await searchParams
   const rawRange = typeof params.range === 'string' ? params.range : undefined
   const range: RangeKey = isRangeKey(rawRange) ? rawRange : '7d'
+  const tradeCount = visibleTradeCount(params.trades)
 
   const [session, end] = [await auth(), todayNy()]
   const start = rangeStart(end, range)
 
   const now = new Date()
   const newUserSince = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000)
-  const recentWithIdentities = recentTrades(start, end, 50).then(async recent => {
+  const recentWithIdentities = recentTrades(start, end, tradeCount + 1).then(async rows => {
+    const recent = rows.slice(0, tradeCount)
     const wallets = recent.map(r => r.walletAddress)
     const [privyMap, fundedWallets] = await Promise.all([
       fetchWalletIdentities(sql, wallets),
       recentlyFundedWallets(wallets, newUserSince, now),
     ])
-    return { recent, privyMap, fundedWallets }
+    return { recent, hasMoreTrades: rows.length > tradeCount, privyMap, fundedWallets }
   })
-  const [vol, daily, assets, venues, { recent, privyMap, fundedWallets }, ages, hlTotal, hlDaily] = await Promise.all([
+  const [vol, daily, assets, venues, { recent, hasMoreTrades, privyMap, fundedWallets }, ages, hlTotal, hlDaily] = await Promise.all([
     volumeSummary(start, end),
     dailyVolume(start, end),
     topAssets(start, end, 15),
@@ -120,6 +132,10 @@ export default async function TradesPage({
     if (fundedWallets.has(wallet.toLowerCase())) return 'Recently funded'
     return null
   }
+  const nextTradeHref = `/trades?${new URLSearchParams({
+    ...(range === '7d' ? {} : { range }),
+    trades: String(tradeCount + TRADES_BATCH),
+  })}#recent-trade-${tradeCount}`
 
   const swap = vol.byType.find(t => t.type === 'swap') ?? { type: 'swap', count: 0, volumeUsd: 0 }
   const perpsDb = vol.byType.find(t => t.type === 'perps') ?? { type: 'perps', count: 0, volumeUsd: 0 }
@@ -335,19 +351,20 @@ export default async function TradesPage({
         </section>
 
         {/* --- Recent trades --- */}
-        <section aria-label="Recent trades" className="mt-8 border-t border-hairline pt-8">
+        <section aria-label="Recent trades" id="recent-trades" className="mt-8 border-t border-hairline pt-8">
           <SectionHeading>Recent trades</SectionHeading>
           <p className="mt-1 text-xs text-ink-3">
             Highlighted rows are from users who signed up or recorded a successful funding event in the last 30 days.
           </p>
           <div className="mt-3">
             <DataTable
-              /* The one table that keeps an inner scroll: 50 rows of trades
+              /* The one table that keeps an inner scroll: a growing list of trades
                  sitting between two other sections would push the Deposits
                  funnel roughly 1800px down the page. Every other table in
                  the app now scrolls with the page instead. */
               maxHeight="32rem"
-              rowKey={row => `${row.ts}-${row.walletAddress}-${row.asset}-${row.side ?? ''}-${row.volumeUsd}`}
+              rowKey={row => `${row.walletAddress}-${row.timestamp}`}
+              rowId={(_, index) => `recent-trade-${index + 1}`}
               rowClassName={row => recentUserLabel(row.walletAddress) ? 'row-recent-user' : 'row-hover'}
               rows={recent}
               columns={[
@@ -386,6 +403,18 @@ export default async function TradesPage({
                 },
               ]}
             />
+          </div>
+          <div className="mt-3 flex items-center justify-between gap-4">
+            <span className="numeral text-xs text-ink-3">Showing {compact(recent.length)} trades</span>
+            {hasMoreTrades && tradeCount < MAX_VISIBLE_TRADES && (
+              <Link
+                href={nextTradeHref}
+                prefetch={false}
+                className="inline-flex min-h-11 items-center rounded-md border border-hairline px-4 py-2 text-sm font-medium text-ink-1 outline-none transition-colors hover:border-accent hover:text-accent focus-visible:ring-2 focus-visible:ring-accent"
+              >
+                See more trades
+              </Link>
+            )}
           </div>
         </section>
 

@@ -20,12 +20,14 @@ export function DataTable<T>({
   columns,
   rows,
   rowKey,
+  rowId,
   rowClassName,
   maxHeight,
 }: {
   columns: Array<DataTableColumn<T>>
   rows: T[]
   rowKey: (row: T) => string
+  rowId?: (row: T, index: number) => string
   rowClassName?: (row: T) => string
   /** e.g. '28rem'. Omit for a table that scrolls with the page. */
   maxHeight?: string
@@ -56,8 +58,12 @@ export function DataTable<T>({
               </td>
             </tr>
           ) : (
-            rows.map(row => (
-              <tr key={rowKey(row)} className={`${rowClassName?.(row) ?? 'row-hover'} border-b border-hairline last:border-0`}>
+            rows.map((row, index) => (
+              <tr
+                key={rowKey(row)}
+                id={rowId?.(row, index)}
+                className={`${rowClassName?.(row) ?? 'row-hover'} scroll-mt-12 border-b border-hairline last:border-0`}
+              >
                 {columns.map(col => (
                   <td
                     key={col.key}

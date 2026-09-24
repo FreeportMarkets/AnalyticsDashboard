@@ -231,6 +231,7 @@ export async function venueSplit(startDate: string, endDate: string): Promise<Ve
 
 export interface RecentTradeRow {
   ts: string
+  timestamp: string
   type: string
   asset: string
   side: string | null
@@ -282,6 +283,7 @@ export async function recentTrades(startDate: string, endDate: string, limit = 5
   const { fromUtc, toUtc } = nyRangeToUtc(startDate, endDate)
   const rows = (await sql(
     `SELECT ts,
+            timestamp,
             type,
             coalesce(display_symbol, asset, to_token, 'unknown') AS asset,
             side,
@@ -298,11 +300,12 @@ export async function recentTrades(startDate: string, endDate: string, limit = 5
       WHERE ts >= $1 AND ts < $2
         AND type IN ('swap', 'perps')
         AND wallet_address <> ALL($3::text[])
-      ORDER BY ts DESC
+      ORDER BY ts DESC, wallet_address DESC, timestamp DESC
       LIMIT $4`,
     [fromUtc.toISOString(), toUtc.toISOString(), SYSTEM_WALLETS, limit]
   )) as Array<{
     ts: Date
+    timestamp: string
     type: string
     asset: string
     side: string | null
@@ -319,6 +322,7 @@ export async function recentTrades(startDate: string, endDate: string, limit = 5
 
   return rows.map(r => ({
     ts: r.ts.toISOString(),
+    timestamp: r.timestamp,
     type: r.type,
     asset: r.asset,
     side: r.side,

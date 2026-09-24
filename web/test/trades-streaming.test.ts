@@ -24,6 +24,12 @@ function find(node: ReactNode, type: unknown): ReactElement | undefined {
   if (!isValidElement<{ children?: ReactNode }>(node)) return undefined
   return node.type === type ? node : find(node.props.children, type)
 }
+function linkTo(node: ReactNode, fragment: string): ReactElement<{ href: string }> | undefined {
+  if (Array.isArray(node)) return node.map(child => linkTo(child, fragment)).find(Boolean)
+  if (!isValidElement<{ href?: string; children?: ReactNode }>(node)) return undefined
+  if (node.type === 'a' && node.props.href?.includes(fragment)) return node as ReactElement<{ href: string }>
+  return linkTo(node.props.children, fragment)
+}
 beforeEach(() => {
   vi.clearAllMocks()
   vi.mocked(metrics.volumeSummary).mockResolvedValue(volume)
@@ -56,6 +62,23 @@ describe('Trades dependency isolation', () => {
     expect(fetchWalletIdentities).toHaveBeenCalledOnce()
     slow.resolve(volume)
     await pending
+  })
+
+  it('offers the next 50 trades and returns to the last visible row', async () => {
+    vi.mocked(metrics.recentTrades).mockResolvedValue(
+      Array.from({ length: 51 }, (_, index) => ({ walletAddress: `wallet-${index}` })) as Awaited<ReturnType<typeof metrics.recentTrades>>
+    )
+    const tree = await TradesPage({ searchParams: Promise.resolve({ range: '30d' }) })
+    expect(metrics.recentTrades).toHaveBeenCalledWith(expect.any(String), expect.any(String), 51)
+    expect(fetchWalletIdentities).toHaveBeenCalledWith(expect.anything(), expect.arrayContaining(['wallet-0', 'wallet-49']))
+    expect(linkTo(tree, 'trades=100')?.props.href).toBe('/trades?range=30d&trades=100#recent-trade-50')
+  })
+
+  it('bounds the requested trade count and loads one extra row to detect more', async () => {
+    await TradesPage({ searchParams: Promise.resolve({ trades: '100' }) })
+    expect(metrics.recentTrades).toHaveBeenCalledWith(expect.any(String), expect.any(String), 101)
+    await TradesPage({ searchParams: Promise.resolve({ trades: '999999' }) })
+    expect(metrics.recentTrades).toHaveBeenLastCalledWith(expect.any(String), expect.any(String), 1001)
   })
 
   it('renders successful deposit values as event diagnostics, never funded-account conversion', async () => {
