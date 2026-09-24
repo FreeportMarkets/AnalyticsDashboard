@@ -7,15 +7,17 @@ vi.mock('@/auth', () => ({ auth: async () => ({ user: { email: 'qa@example.test'
 vi.mock('@/lib/db', () => ({ sql: vi.fn() }))
 vi.mock('@/lib/metrics/trades', () => ({ volumeSummary: vi.fn(), dailyVolume: vi.fn(), topAssets: vi.fn(), venueSplit: vi.fn(), recentTrades: vi.fn(), recentlyFundedWallets: vi.fn(async () => new Set()), depositSummary: vi.fn() }))
 vi.mock('@/lib/metrics/staleness', () => ({ watermarkAge: async () => [], formatAge: vi.fn(), isStale: vi.fn() }))
-vi.mock('@/lib/metrics/hlVolumeRead', () => ({ hlVolumeTotal: async () => ({ notionalUsd: 125, builderFeeUsd: 1, fillCount: 2 }), hlVolumeDaily: async () => [] }))
+vi.mock('@/lib/metrics/hlVolumeRead', () => ({ hlVolumeTotal: vi.fn(), hlVolumeDaily: vi.fn() }))
 vi.mock('@/lib/privyIdentities', () => ({ fetchWalletIdentities: vi.fn(async () => new Map()) }))
 vi.mock('next/link', () => ({ default: 'a' }))
 vi.mock('@/components/AutoRefresh', () => ({ AutoRefresh: () => null }))
 
 import TradesPage from '@/app/trades/page'
 import * as metrics from '@/lib/metrics/trades'
+import { hlVolumeDaily, hlVolumeTotal } from '@/lib/metrics/hlVolumeRead'
 import { fetchWalletIdentities } from '@/lib/privyIdentities'
 import { DepositsSection } from '@/components/DepositsSection'
+import { TimeSeriesLine } from '@/components/TimeSeriesLine'
 
 const volume = { totalVolumeUsd: 125, totalTrades: 2, uniqueTraders: 1, avgTradeSize: 62.5, byType: [], perpsByClient: [] }
 function deferred<T>() { let resolve!: (value: T) => void; let reject!: (reason: Error) => void; const promise = new Promise<T>((a, b) => { resolve = a; reject = b }); return { promise, resolve, reject } }
@@ -28,9 +30,33 @@ beforeEach(() => {
   vi.clearAllMocks()
   vi.mocked(metrics.volumeSummary).mockResolvedValue(volume)
   for (const fn of [metrics.dailyVolume, metrics.topAssets, metrics.venueSplit, metrics.recentTrades]) vi.mocked(fn).mockResolvedValue([])
+  vi.mocked(hlVolumeTotal).mockResolvedValue({ notionalUsd: 125, builderFeeUsd: 1, fillCount: 2 })
+  vi.mocked(hlVolumeDaily).mockResolvedValue([])
 })
 
 describe('Trades dependency isolation', () => {
+  it('renders a day present only in the backend fill ledger', async () => {
+    vi.mocked(hlVolumeTotal).mockResolvedValue({ notionalUsd: 150, builderFeeUsd: 1, fillCount: 2, source: 'backend' })
+    vi.mocked(hlVolumeDaily).mockResolvedValue([{ day: '2026-09-21', notionalUsd: 150, fillCount: 2 }])
+    vi.mocked(metrics.dailyVolume).mockResolvedValue([{ day: '2026-09-22', swapVolumeUsd: 20, perpsVolumeUsd: 80, tradeCount: 3 }])
+    const tree = await TradesPage({ searchParams: Promise.resolve({}) })
+    const chart = find(tree, TimeSeriesLine) as ReactElement<{ data: Array<{ day: string; value: number }> }>
+    expect(chart.props.data.map(({ day, value }) => ({ day, value }))).toEqual([
+      { day: '2026-09-21', value: 150 },
+      { day: '2026-09-22', value: 20 },
+    ])
+  })
+
+  it('keeps estimated daily perps when the backend report is empty', async () => {
+    vi.mocked(hlVolumeTotal).mockResolvedValue({ notionalUsd: 0, builderFeeUsd: 0, fillCount: 0, source: 'backend' })
+    vi.mocked(metrics.dailyVolume).mockResolvedValue([{ day: '2026-09-22', swapVolumeUsd: 20, perpsVolumeUsd: 80, tradeCount: 3 }])
+    const tree = await TradesPage({ searchParams: Promise.resolve({}) })
+    const chart = find(tree, TimeSeriesLine) as ReactElement<{ data: Array<{ day: string; value: number }> }>
+    expect(chart.props.data.map(({ day, value }) => ({ day, value }))).toEqual([
+      { day: '2026-09-22', value: 100 },
+    ])
+  })
+
   it('returns trading content with an independent deposits Suspense boundary', async () => {
     const deposits = deferred<Awaited<ReturnType<typeof metrics.depositSummary>>>()
     vi.mocked(metrics.depositSummary).mockReturnValue(deposits.promise)

@@ -2,9 +2,9 @@ import { sql } from '@/lib/db'
 import { fetchHlLedgerMetrics } from '@/lib/hlLedgerApi'
 
 /**
- * Dashboard reads for HL builder-fee-authoritative volume. These hit the
- * pre-aggregated `wallet_volume_daily` table (populated by the cron), never
- * HL — so page loads stay fast and never risk HL rate limits.
+ * Dashboard reads for recorded HL fill volume. The backend flag reads its
+ * shared ledger; the default reads pre-aggregated `wallet_volume_daily`.
+ * Neither path calls Hyperliquid during a page load.
  *
  * `day` in wallet_volume_daily is already an NY calendar date, so range
  * filters here are plain date comparisons (inclusive), NOT the ts/nyRange
@@ -73,9 +73,8 @@ export async function hlVolumeDaily(
  * tiles (`{ current, previous }`), plus `hasData` so the page can fall back to
  * the DB reconstruction until the backfill has populated the table.
  *
- * `hasData` is false only when BOTH periods are empty -- a genuinely
- * un-backfilled range -- so a real zero-volume period still reads as
- * authoritative rather than silently reverting to the estimate.
+ * An empty report cannot distinguish a real zero-volume period from missing
+ * ingestion, so both empty periods use the labeled estimate path.
  */
 export async function hlVolumeKpi(
   start: string,
@@ -92,7 +91,9 @@ export async function hlVolumeKpi(
       current: cur.notionalUsd,
       previous: prev.notionalUsd,
       builderFeeUsd: cur.builderFeeUsd,
-      hasData: cur.source === 'backend' || prev.source === 'backend' || cur.fillCount > 0 || prev.fillCount > 0,
+      // An empty backend response does not prove complete coverage. Until the
+      // ledger API exposes a coverage watermark, keep the estimate fallback.
+      hasData: cur.fillCount > 0 || prev.fillCount > 0,
     }
   } catch {
     // Resilient to the table not existing yet (migration not run) so the

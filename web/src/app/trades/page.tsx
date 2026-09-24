@@ -16,6 +16,7 @@ import { RANGES, isRangeKey, rangeStart, todayNy, type RangeKey } from '@/lib/ra
 import { sql } from '@/lib/db'
 import { fetchWalletIdentities } from '@/lib/privyIdentities'
 import { hlVolumeTotal, hlVolumeDaily } from '@/lib/metrics/hlVolumeRead'
+import { mergeDailyVolumeRows } from '@/lib/metrics/mergeDailyVolumeRows'
 import { PageHeader } from '@/components/PageHeader'
 import { SectionHeading } from '@/components/SectionHeading'
 import { StatTile } from '@/components/StatTile'
@@ -111,8 +112,10 @@ export default async function TradesPage({
   // Prefer HL builder-fee-authoritative PERPS volume once the backfill has
   // populated the table; swap volume is always exact from our own DB. Falls
   // back to the reconstruction (labeled "est.") until then. Mirrors Overview.
-  const hlHasData = hlTotal.source === 'backend' || hlTotal.fillCount > 0
-  const hlDailyByDay = new Map(hlDaily.map(d => [d.day, d.notionalUsd]))
+  // Both reads must agree that fill data exists; a failed daily read must not
+  // turn the chart into a row of zeroes beneath a nonzero headline.
+  const hlHasData = hlTotal.fillCount > 0 && hlDaily.length > 0
+  const displayedDaily = mergeDailyVolumeRows(daily, hlDaily, hlHasData)
   const recentUserLabel = (wallet: string) => {
     const signup = privyMap.get(wallet.toLowerCase())?.createdAt
     const signupTime = signup ? new Date(signup).getTime() : NaN
@@ -278,10 +281,10 @@ export default async function TradesPage({
           </SectionHeading>
           <div className="mt-4">
             <TimeSeriesLine
-              data={daily.map(d => {
+              data={displayedDaily.map(d => {
                 // Authoritative HL perps per day when backfilled, else the
                 // reconstruction. Swap is always exact.
-                const perpsForDay = hlHasData ? (hlDailyByDay.get(d.day) ?? 0) : d.perpsVolumeUsd
+                const perpsForDay = d.perpsVolumeUsd
                 const totalForDay = perpsForDay + d.swapVolumeUsd
                 return {
                   day: d.day,
@@ -289,7 +292,7 @@ export default async function TradesPage({
                   tooltip: (
                     <>
                       <span className="numeral">{usd(totalForDay)} total</span>
-                      <span className="text-ink-3">{compact(d.tradeCount)} trades</span>
+                      <span className="text-ink-3">{compact(d.tradeCount)} logged trades</span>
                       <span className="text-ink-3">perps {usd(perpsForDay)} · swap {usd(d.swapVolumeUsd)}</span>
                     </>
                   ),
@@ -302,22 +305,22 @@ export default async function TradesPage({
           <div className="mt-5">
             <DataTable
               rowKey={row => row.day}
-              rows={[...daily].reverse()}
+              rows={[...displayedDaily].reverse()}
               columns={[
                 { key: 'day', header: 'Day', render: r => r.day },
-                { key: 'trades', header: 'Trades', align: 'right', render: r => compact(r.tradeCount) },
+                { key: 'trades', header: 'Logged trades', align: 'right', render: r => compact(r.tradeCount) },
                 { key: 'swap', header: 'Swap Volume', align: 'right', render: r => usd(r.swapVolumeUsd) },
                 {
                   key: 'perps',
                   header: volSource === 'hl' ? 'Perps Volume' : 'Perps Volume (est.)',
                   align: 'right',
-                  render: r => usd(hlHasData ? (hlDailyByDay.get(r.day) ?? 0) : r.perpsVolumeUsd),
+                  render: r => usd(r.perpsVolumeUsd),
                 },
                 {
                   key: 'total',
                   header: volSource === 'hl' ? 'Total' : 'Total (est.)',
                   align: 'right',
-                  render: r => usd((hlHasData ? (hlDailyByDay.get(r.day) ?? 0) : r.perpsVolumeUsd) + r.swapVolumeUsd),
+                  render: r => usd(r.perpsVolumeUsd + r.swapVolumeUsd),
                 },
               ]}
             />
