@@ -12,6 +12,7 @@ npm run dev
 
 Environment variables (Vercel project settings / `web/.env.local`):
 - `ANALYTICS_FUNNEL_READ_SECRET` — reads account cohorts, legacy device intro diagnostics and deposit events from the trading backend (`/v1/analytics/accounts`, `/v1/analytics/funnel`, `/v1/analytics/deposits`). Value is in Secrets Manager.
+- `HL_VOLUME_SOURCE=backend` — after the backend fill-ledger endpoint is deployed and source parity is accepted, read Trades and Overview perp volume from `/v1/analytics/hl-ledger` using the same server-side secret. Until enabled, the existing Neon volume table remains the read source. The Trades page then shows recipient-proven fees separately from unresolved builder fees.
 - Neon / DynamoDB / Privy credentials for the other pages — see `web/src/lib/`.
 
 ## History

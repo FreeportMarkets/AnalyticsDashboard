@@ -209,7 +209,7 @@ export default async function OverviewPage({
         <p className="mt-3 text-xs text-ink-3">
           Deltas compare against the prior {rangeSpanDays(range)} days.{' '}
           {volume.source === 'hl' ? (
-            <>Volume is Hyperliquid per-fill data attributed by builder fee — every fill through Freeport, exact.</>
+            <>Perps volume uses recorded Hyperliquid fills, including closes with no builder fee. Fee revenue requires separate recipient proof.</>
           ) : (
             <>
               <span className="text-ink-2" title={EST_TAG_TITLE}>est.</span>{' '}

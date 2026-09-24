@@ -1,4 +1,5 @@
 import { sql } from '@/lib/db'
+import { fetchHlLedgerMetrics } from '@/lib/hlLedgerApi'
 
 /**
  * Dashboard reads for HL builder-fee-authoritative volume. These hit the
@@ -14,10 +15,24 @@ export interface VolumeTotal {
   notionalUsd: number
   builderFeeUsd: number
   fillCount: number
+  source?: 'backend'
+  unresolvedBuilderFeeUsd?: number
 }
+
+const backendLedgerEnabled = () => process.env.HL_VOLUME_SOURCE === 'backend'
 
 /** Total authoritative volume over an inclusive NY-day range. */
 export async function hlVolumeTotal(startDay: string, endDay: string): Promise<VolumeTotal> {
+  if (backendLedgerEnabled()) {
+    const report = await fetchHlLedgerMetrics(startDay, endDay)
+    return {
+      notionalUsd: report.days.reduce((sum, day) => sum + Number(day.notionalUsd), 0),
+      builderFeeUsd: report.days.reduce((sum, day) => sum + Number(day.confirmedFeeUsd), 0),
+      unresolvedBuilderFeeUsd: report.days.reduce((sum, day) => sum + Number(day.unresolvedBuilderFeeUsd), 0),
+      fillCount: report.days.reduce((sum, day) => sum + day.fillCount, 0),
+      source: 'backend',
+    }
+  }
   const rows = (await sql(
     `SELECT
         coalesce(sum(notional_usd), 0)::float8    AS notional,
@@ -36,6 +51,10 @@ export async function hlVolumeDaily(
   startDay: string,
   endDay: string
 ): Promise<Array<{ day: string; notionalUsd: number; fillCount: number }>> {
+  if (backendLedgerEnabled()) {
+    const report = await fetchHlLedgerMetrics(startDay, endDay)
+    return report.days.map(day => ({ day: day.day, notionalUsd: Number(day.notionalUsd), fillCount: day.fillCount }))
+  }
   const rows = (await sql(
     `SELECT day::text AS day,
             sum(notional_usd)::float8 AS notional,
@@ -73,7 +92,7 @@ export async function hlVolumeKpi(
       current: cur.notionalUsd,
       previous: prev.notionalUsd,
       builderFeeUsd: cur.builderFeeUsd,
-      hasData: cur.fillCount > 0 || prev.fillCount > 0,
+      hasData: cur.source === 'backend' || prev.source === 'backend' || cur.fillCount > 0 || prev.fillCount > 0,
     }
   } catch {
     // Resilient to the table not existing yet (migration not run) so the

@@ -43,6 +43,7 @@ function formatTradeTs(iso: string): string {
 }
 
 const usd = (n: number) => `$${Math.round(n).toLocaleString('en-US')}`
+const usdCents = (n: number) => `$${n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
 const compact = (n: number) => Math.round(n).toLocaleString('en-US')
 const num2 = (n: number) => n.toLocaleString('en-US', { maximumFractionDigits: 2 })
 
@@ -102,14 +103,15 @@ export default async function TradesPage({
     venueSplit(start, end),
     recentWithIdentities,
     watermarkAge(),
-    hlVolumeTotal(start, end).catch(() => ({ notionalUsd: 0, builderFeeUsd: 0, fillCount: 0 })),
+    hlVolumeTotal(start, end).catch(() => ({ notionalUsd: 0, builderFeeUsd: 0, fillCount: 0,
+      source: undefined as 'backend' | undefined, unresolvedBuilderFeeUsd: undefined as number | undefined })),
     hlVolumeDaily(start, end).catch(() => [] as Array<{ day: string; notionalUsd: number; fillCount: number }>),
   ])
 
   // Prefer HL builder-fee-authoritative PERPS volume once the backfill has
   // populated the table; swap volume is always exact from our own DB. Falls
   // back to the reconstruction (labeled "est.") until then. Mirrors Overview.
-  const hlHasData = hlTotal.fillCount > 0
+  const hlHasData = hlTotal.source === 'backend' || hlTotal.fillCount > 0
   const hlDailyByDay = new Map(hlDaily.map(d => [d.day, d.notionalUsd]))
   const recentUserLabel = (wallet: string) => {
     const signup = privyMap.get(wallet.toLowerCase())?.createdAt
@@ -196,7 +198,7 @@ export default async function TradesPage({
           </div>
           <div className="sm:pl-6">
             <StatTile
-              label={volSource === 'hl' ? 'Avg Trade Size' : 'Avg Trade Size (est.)'}
+              label="Avg Trade Size (est.)"
               value={vol.totalTrades > 0 ? totalVolume / vol.totalTrades : 0}
               format={usd}
             />
@@ -204,7 +206,7 @@ export default async function TradesPage({
         </section>
         <p className="mt-2 text-xs text-ink-3">
           {volSource === 'hl' ? (
-            <>Perps volume is Hyperliquid per-fill data (builder-fee attributed); swap volume is exact.</>
+            <>Perps volume uses recorded Hyperliquid fills, including closes with no builder fee; swap volume is exact. Fee revenue requires separate recipient proof.</>
           ) : (
             <>
               <span className="text-ink-2" title={EST_TAG_TITLE}>est.</span>{' '}
@@ -221,7 +223,7 @@ export default async function TradesPage({
           </div>
           <div className="sm:pl-6">
             <StatTile
-              label="Web Terminal Volume"
+              label="Web Terminal Volume (est.)"
               value={webTerminalVolume}
               format={usd}
               valueTitle={`${(webShare * 100).toFixed(1)}% of perps volume placed from the web terminal (per the x-client tag), applied to the authoritative perps total.`}
@@ -231,6 +233,23 @@ export default async function TradesPage({
         <p className="numeral mt-2 text-xs text-ink-3">
           {compact(perpsDb.count)} perps orders · {compact(swap.count)} swaps · {compact(webTerminalTrades)} from web terminal
         </p>
+
+        {hlTotal.source === 'backend' && (
+          <section aria-label="Perp fee evidence" className="mt-8 border-t border-hairline pt-8">
+            <SectionHeading meta="Provisional · recorded fills">Perp fee evidence</SectionHeading>
+            <div className="mt-4 grid gap-x-6 divide-y divide-hairline sm:grid-cols-2 sm:divide-x sm:divide-y-0">
+              <StatTile label="Confirmed Freeport fees" value={hlTotal.builderFeeUsd} format={usdCents}
+                valueTitle={`$${hlTotal.builderFeeUsd.toFixed(6)} recipient-proven USDC`} />
+              <div className="sm:pl-6">
+                <StatTile label="Unresolved builder fees" value={hlTotal.unresolvedBuilderFeeUsd ?? 0} format={usdCents}
+                  valueTitle="Venue-reported USDC builder fees without recipient proof" />
+              </div>
+            </div>
+            <p className="mt-2 text-xs text-ink-2">
+              Unresolved fees are not included in Freeport revenue. Totals can rise as late fills and fee proof arrive.
+            </p>
+          </section>
+        )}
 
         {/* --- Mobile vs Web --- */}
         <section aria-label="Perps volume by surface" className="mt-8 border-t border-hairline pt-8">
