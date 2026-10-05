@@ -34,6 +34,8 @@ function linkTo(node: ReactNode, fragment: string): ReactElement<{ href: string 
 }
 beforeEach(() => {
   vi.clearAllMocks()
+  vi.mocked(fetchWalletIdentities).mockResolvedValue(new Map())
+  vi.mocked(metrics.recentlyFundedWallets).mockResolvedValue(new Set())
   vi.mocked(metrics.volumeSummary).mockResolvedValue(volume)
   for (const fn of [metrics.dailyVolume, metrics.topAssets, metrics.venueSplit, metrics.recentTrades]) vi.mocked(fn).mockResolvedValue([])
   vi.mocked(hlVolumeTotal).mockResolvedValue({ notionalUsd: 125, builderFeeUsd: 1, fillCount: 2 })
@@ -41,6 +43,63 @@ beforeEach(() => {
 })
 
 describe('Trades dependency isolation', () => {
+  it.each(['identity', 'funding', 'both'])('keeps loaded trades when %s enrichment fails', async failure => {
+    vi.mocked(metrics.recentTrades).mockResolvedValue([{ ts: '2026-10-05T17:20:48.587Z', timestamp: 'fill-1',
+      type: 'perps', asset: 'BTC', side: 'long', size: 0.00053, price: 85291, leverage: null,
+      client: 'unknown', venue: 'hyperliquid', status: 'filled', volumeUsd: 45.204230,
+      isClose: true, recordedFill: true, walletAddress: '0xf21aec8af0a4dae86a0fa579bc60effd43c1d087' }])
+    const fundingMap = new Set(['0xf21aec8af0a4dae86a0fa579bc60effd43c1d087'])
+    vi.mocked(metrics.recentlyFundedWallets).mockResolvedValue(fundingMap)
+    vi.mocked(fetchWalletIdentities).mockResolvedValue(new Map([['0xf21aec8af0a4dae86a0fa579bc60effd43c1d087', {
+      privyDid: 'did:privy:test', label: 'Test Trader', loginType: 'google', contact: null, email: null,
+    }]]))
+    if (failure !== 'funding') vi.mocked(fetchWalletIdentities).mockRejectedValueOnce(new Error('identity lookup failed'))
+    if (failure !== 'identity') vi.mocked(metrics.recentlyFundedWallets).mockRejectedValueOnce(new Error('funding lookup failed'))
+    const html = renderToStaticMarkup(await TradesPage({ searchParams: Promise.resolve({}) }))
+    const recentSection = html.split('aria-label="Recent trades"')[1]!.split('</section>')[0]!
+    expect(recentSection).toContain('0xf21aec8af0a4dae86a0fa579bc60effd43c1d087')
+    expect(recentSection).toContain('0.00053')
+    expect(recentSection).toContain('Showing 1 trades')
+    expect(recentSection).not.toContain('Recent trades are unavailable')
+    if (failure === 'identity') expect(recentSection).toContain('Recently funded')
+    if (failure === 'funding') expect(recentSection).toContain('Test Trader')
+  })
+  it.each(['0.000000001', '0.1234567890123456789'])('renders the exact ledger size %s', async sizeText => {
+    vi.mocked(metrics.recentTrades).mockResolvedValue([{ ts: '2026-10-05T17:20:48.587Z', timestamp: 'fill-1',
+      type: 'perps', asset: 'BTC', side: 'long', size: Number(sizeText), sizeText, price: 85291, leverage: null,
+      client: 'unknown', venue: 'hyperliquid', status: 'filled', volumeUsd: 1,
+      isClose: true, recordedFill: true, walletAddress: '0xf21aec8af0a4dae86a0fa579bc60effd43c1d087' }])
+    const html = renderToStaticMarkup(await TradesPage({ searchParams: Promise.resolve({}) }))
+    const recentSection = html.split('aria-label="Recent trades"')[1]!.split('</section>')[0]!
+    expect(recentSection).toContain(`>${sizeText}</td>`)
+  })
+  it('renders recorded fill sizes and wallets without estimated volume labels', async () => {
+    vi.mocked(metrics.recentTrades).mockResolvedValue([
+      { ts: '2026-10-05T17:20:48.587Z', timestamp: 'hyperliquid:875727468560255', type: 'perps',
+        asset: 'BTC', side: 'long', size: 0.00053, price: 85291, leverage: null, client: 'unknown',
+        venue: 'hyperliquid', status: 'filled', volumeUsd: 45.204230, isClose: true, action: 'Close', recordedFill: true,
+        walletAddress: '0xf21aec8af0a4dae86a0fa579bc60effd43c1d087' },
+      { ts: '2026-10-05T17:20:34.030Z', timestamp: 'hyperliquid:67933775089653', type: 'perps',
+        asset: 'BTC', side: 'long', size: 0.00053, price: 85302, leverage: null, client: 'unknown',
+        venue: 'hyperliquid', status: 'filled', volumeUsd: 45.210060, isClose: false, action: 'Open', recordedFill: true,
+        walletAddress: '0xf21aec8af0a4dae86a0fa579bc60effd43c1d087' },
+    ])
+    const html = renderToStaticMarkup(await TradesPage({ searchParams: Promise.resolve({}) }))
+    const recentSection = html.split('aria-label="Recent trades"')[1]!.split('</section>')[0]!
+    expect(recentSection).toContain('0.00053')
+    expect(recentSection).toContain('0xf21aec8af0a4dae86a0fa579bc60effd43c1d087')
+    expect(recentSection).toContain('unknown')
+    expect(recentSection).not.toContain('title="Perps stores')
+  })
+
+  it('keeps the page available with an explicit recent-fill read failure', async () => {
+    vi.mocked(metrics.recentTrades).mockRejectedValue(new Error('contract mismatch'))
+    const html = renderToStaticMarkup(await TradesPage({ searchParams: Promise.resolve({}) }))
+    expect(html).toContain('Recent trades are unavailable')
+    const recentSection = html.split('aria-label="Recent trades"')[1]!.split('</section>')[0]!
+    expect(recentSection).not.toContain('No data in this range')
+    expect(recentSection).not.toContain('Showing 0 trades')
+  });
   it('renders a day present only in the backend fill ledger', async () => {
     vi.mocked(hlVolumeTotal).mockResolvedValue({ notionalUsd: 150, builderFeeUsd: 1, fillCount: 2, source: 'backend' })
     vi.mocked(hlVolumeDaily).mockResolvedValue([{ day: '2026-09-21', notionalUsd: 150, fillCount: 2 }])

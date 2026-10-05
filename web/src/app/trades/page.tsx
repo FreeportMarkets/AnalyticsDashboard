@@ -103,13 +103,16 @@ export default async function TradesPage({
   const recentWithIdentities = recentTrades(start, end, tradeCount + 1).then(async rows => {
     const recent = rows.slice(0, tradeCount)
     const wallets = recent.map(r => r.walletAddress)
+    // Optional labels/highlights must never discard successfully loaded trades.
     const [privyMap, fundedWallets] = await Promise.all([
-      fetchWalletIdentities(sql, wallets),
-      recentlyFundedWallets(wallets, newUserSince, now),
+      fetchWalletIdentities(sql, wallets).catch(() => new Map()),
+      recentlyFundedWallets(wallets, newUserSince, now).catch(() => new Set<string>()),
     ])
-    return { recent, hasMoreTrades: rows.length > tradeCount, privyMap, fundedWallets }
+    return { recent, hasMoreTrades: rows.length > tradeCount, privyMap, fundedWallets, recentUnavailable: false }
+  }, () => {
+    return { recent: [], hasMoreTrades: false, privyMap: new Map(), fundedWallets: new Set<string>(), recentUnavailable: true }
   })
-  const [vol, daily, assets, venues, { recent, hasMoreTrades, privyMap, fundedWallets }, ages, hlTotal, hlDaily] = await Promise.all([
+  const [vol, daily, assets, venues, { recent, hasMoreTrades, privyMap, fundedWallets, recentUnavailable }, ages, hlTotal, hlDaily] = await Promise.all([
     volumeSummary(start, end),
     dailyVolume(start, end),
     topAssets(start, end, 15),
@@ -377,8 +380,9 @@ export default async function TradesPage({
           <SectionHeading>Recent trades</SectionHeading>
           <p className="mt-1 text-xs text-ink-3">
             Highlighted rows are from users who signed up or recorded a successful funding event in the last 30 days.
+            {' '}Perps show individual recorded fills; partial fills appear separately. Client and leverage are unknown when absent from fill evidence.
           </p>
-          <div className="mt-3">
+          {recentUnavailable ? <p role="status" className="mt-3 text-sm text-ink-2">Recent trades are unavailable. The fill ledger could not be read; try refreshing.</p> : <div className="mt-3">
             <DataTable
               /* The one table that keeps an inner scroll: a growing list of trades
                  sitting between two other sections would push the Deposits
@@ -408,11 +412,11 @@ export default async function TradesPage({
                 {
                   key: 'action',
                   header: 'Action',
-                  render: r => (r.isClose === null ? '—' : r.isClose ? 'Close' : 'Open'),
+                  render: r => r.action ?? (r.isClose === null ? '—' : r.isClose ? 'Close' : 'Open'),
                 },
                 { key: 'asset', header: 'Asset', render: r => r.asset },
                 { key: 'side', header: 'Side', render: r => r.side ?? '—' },
-                { key: 'size', header: 'Size', align: 'right', render: r => (r.size == null ? '—' : num2(r.size)) },
+                { key: 'size', header: 'Size', align: 'right', render: r => r.sizeText ?? (r.size == null ? '—' : r.recordedFill ? r.size.toLocaleString('en-US', { maximumSignificantDigits: 21 }) : num2(r.size)) },
                 { key: 'price', header: 'Price', align: 'right', render: r => (r.price == null ? '—' : usd(r.price)) },
                 { key: 'leverage', header: 'Lev', align: 'right', render: r => (r.leverage == null ? '—' : `${num2(r.leverage)}x`) },
                 { key: 'client', header: 'Client', render: r => r.client },
@@ -421,12 +425,12 @@ export default async function TradesPage({
                   key: 'volume',
                   header: 'Volume',
                   align: 'right',
-                  render: r => <>{usd(r.volumeUsd)}{r.type === 'perps' && <EstTag />}</>,
+                  render: r => <>{usd(r.volumeUsd)}{r.type === 'perps' && !r.recordedFill && <EstTag />}</>,
                 },
               ]}
             />
-          </div>
-          <div className="mt-3 flex items-center justify-between gap-4">
+          </div>}
+          {!recentUnavailable && <div className="mt-3 flex items-center justify-between gap-4">
             <span className="numeral text-xs text-ink-3">Showing {compact(recent.length)} trades</span>
             {hasMoreTrades && tradeCount < MAX_VISIBLE_TRADES && (
               <Link
@@ -437,7 +441,7 @@ export default async function TradesPage({
                 See more trades
               </Link>
             )}
-          </div>
+          </div>}
         </section>
 
         <Suspense key={`${start}:${end}`} fallback={<DepositsLoading />}>
