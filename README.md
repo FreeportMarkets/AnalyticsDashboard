@@ -15,6 +15,12 @@ Environment variables (Vercel project settings / `web/.env.local`):
 - `HL_VOLUME_SOURCE=backend` — after the backend fill-ledger endpoint is deployed and source parity is accepted, read Trades and Overview perp volume from `/v1/analytics/hl-ledger` using the same server-side secret. Until enabled, the existing Neon volume table remains the read source. The Trades page then shows recipient-proven fees separately from unresolved builder fees.
 - Neon / DynamoDB / Privy credentials for the other pages — see `web/src/lib/`.
 
+## Recent perp fills (October 5 candidate)
+
+Deploy the backend `/v1/analytics/hl-ledger/trades` endpoint before this dashboard change. Recent trades uses that endpoint with the existing server-side read secret regardless of `HL_VOLUME_SOURCE`; spot rows remain in Neon. Perps are individual recorded fills with actual notional, not legacy order estimates. Partial fills stay separate; unavailable reads show an explicit error. Client/leverage are unknown where execution evidence does not supply them. Existing aggregate panels and volume-source selection are unchanged. Fills become visible after collector ingestion; this is not an instant order-status feed.
+
+Read-only production verification matched eight owner fills totaling $330.889960. The actual 91-day reader returned 1001 rows in 194ms including connection; PostgreSQL execution was 1.454ms. Deployed HTTP verification remains a backend rollout gate. The actual Trades page was rendered locally using two verified BTC fills, retaining full wallet controls and 0.00053 size precision. Three pre-existing integration suites require `TEST_DATABASE_URL` even to collect; no production database writes were used to run them.
+
 ## History
 
 The original dashboard was a single-file **Streamlit** app (`app.py`) hosted at

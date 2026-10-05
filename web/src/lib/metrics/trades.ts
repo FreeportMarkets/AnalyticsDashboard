@@ -2,6 +2,7 @@ import { sql } from '@/lib/db'
 import { fetchDeposits } from '../depositsApi'
 import { nyDateExpr } from '@/lib/time'
 import { nyRangeToUtc } from './nyRange'
+import { fetchHlLedgerTrades } from '../hlLedgerTradesApi'
 
 /**
  * Trades & Volume metrics -- ported verbatim from app.py's `with tab_trades:`
@@ -230,6 +231,9 @@ export async function venueSplit(startDate: string, endDate: string): Promise<Ve
 }
 
 export interface RecentTradeRow {
+  /** Fill direction preserves reversals/liquidations instead of calling every fill an open. */
+  action?: string
+  recordedFill?: boolean
   ts: string
   timestamp: string
   type: string
@@ -280,8 +284,9 @@ export async function recentlyFundedWallets(wallets: string[], since: Date, now:
  * `@/lib/privy`.
  */
 export async function recentTrades(startDate: string, endDate: string, limit = 50): Promise<RecentTradeRow[]> {
+  if (!Number.isSafeInteger(limit) || limit < 1 || limit > 1001) throw Error('Invalid trade limit')
   const { fromUtc, toUtc } = nyRangeToUtc(startDate, endDate)
-  const rows = (await sql(
+  const [fills, rows] = await Promise.all([fetchHlLedgerTrades(startDate, endDate, limit), sql(
     `SELECT ts,
             timestamp,
             type,
@@ -298,12 +303,12 @@ export async function recentTrades(startDate: string, endDate: string, limit = 5
             is_close
        FROM trades
       WHERE ts >= $1 AND ts < $2
-        AND type IN ('swap', 'perps')
+        AND type = 'swap'
         AND wallet_address <> ALL($3::text[])
       ORDER BY ts DESC, wallet_address DESC, timestamp DESC
       LIMIT $4`,
     [fromUtc.toISOString(), toUtc.toISOString(), SYSTEM_WALLETS, limit]
-  )) as Array<{
+  )]) as [Awaited<ReturnType<typeof fetchHlLedgerTrades>>, Array<{
     ts: Date
     timestamp: string
     type: string
@@ -318,9 +323,9 @@ export async function recentTrades(startDate: string, endDate: string, limit = 5
     volume_usd: number
     wallet_address: string
     is_close: boolean | null
-  }>
+  }>]
 
-  return rows.map(r => ({
+  const swaps: RecentTradeRow[] = rows.map(r => ({
     ts: r.ts.toISOString(),
     timestamp: r.timestamp,
     type: r.type,
@@ -336,6 +341,20 @@ export async function recentTrades(startDate: string, endDate: string, limit = 5
     walletAddress: r.wallet_address,
     isClose: r.type === 'perps' ? (r.is_close ?? false) : null,
   }))
+  const perps: RecentTradeRow[] = fills.map(fill => ({
+    ts: fill.filledAt, timestamp: `hyperliquid:${fill.fillId}`, type: 'perps',
+    asset: fill.market.split(':').at(-1)!,
+    side: ['Open Long', 'Close Long'].includes(fill.direction ?? '') ? 'long' :
+      ['Open Short', 'Close Short'].includes(fill.direction ?? '') ? 'short' : null,
+    size: Number(fill.size), price: Number(fill.price), volumeUsd: Number(fill.notionalUsd),
+    leverage: null, client: 'unknown', status: 'filled', venue: 'hyperliquid',
+    walletAddress: fill.walletAddress,
+    isClose: fill.direction?.startsWith('Close ') ? true : fill.direction?.startsWith('Open ') ? false : null,
+    action: fill.direction?.startsWith('Close ') ? 'Close' : fill.direction?.startsWith('Open ') ? 'Open' : fill.direction ?? '—',
+    recordedFill: true,
+  }))
+  return [...swaps, ...perps].sort((a, b) => b.ts.localeCompare(a.ts) ||
+    b.walletAddress.localeCompare(a.walletAddress) || b.timestamp.localeCompare(a.timestamp)).slice(0, limit)
 }
 
 export interface DepositSummary {

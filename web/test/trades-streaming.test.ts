@@ -41,6 +41,33 @@ beforeEach(() => {
 })
 
 describe('Trades dependency isolation', () => {
+  it('renders recorded fill sizes and wallets without estimated volume labels', async () => {
+    vi.mocked(metrics.recentTrades).mockResolvedValue([
+      { ts: '2026-10-05T17:20:48.587Z', timestamp: 'hyperliquid:875727468560255', type: 'perps',
+        asset: 'BTC', side: 'long', size: 0.00053, price: 85291, leverage: null, client: 'unknown',
+        venue: 'hyperliquid', status: 'filled', volumeUsd: 45.204230, isClose: true, action: 'Close', recordedFill: true,
+        walletAddress: '0xf21aec8af0a4dae86a0fa579bc60effd43c1d087' },
+      { ts: '2026-10-05T17:20:34.030Z', timestamp: 'hyperliquid:67933775089653', type: 'perps',
+        asset: 'BTC', side: 'long', size: 0.00053, price: 85302, leverage: null, client: 'unknown',
+        venue: 'hyperliquid', status: 'filled', volumeUsd: 45.210060, isClose: false, action: 'Open', recordedFill: true,
+        walletAddress: '0xf21aec8af0a4dae86a0fa579bc60effd43c1d087' },
+    ])
+    const html = renderToStaticMarkup(await TradesPage({ searchParams: Promise.resolve({}) }))
+    const recentSection = html.split('aria-label="Recent trades"')[1]!.split('</section>')[0]!
+    expect(recentSection).toContain('0.00053')
+    expect(recentSection).toContain('0xf21aec8af0a4dae86a0fa579bc60effd43c1d087')
+    expect(recentSection).toContain('unknown')
+    expect(recentSection).not.toContain('title="Perps stores')
+  })
+
+  it('keeps the page available with an explicit recent-fill read failure', async () => {
+    vi.mocked(metrics.recentTrades).mockRejectedValue(new Error('contract mismatch'))
+    const html = renderToStaticMarkup(await TradesPage({ searchParams: Promise.resolve({}) }))
+    expect(html).toContain('Recent trades are unavailable')
+    const recentSection = html.split('aria-label="Recent trades"')[1]!.split('</section>')[0]!
+    expect(recentSection).not.toContain('No data in this range')
+    expect(recentSection).not.toContain('Showing 0 trades')
+  });
   it('renders a day present only in the backend fill ledger', async () => {
     vi.mocked(hlVolumeTotal).mockResolvedValue({ notionalUsd: 150, builderFeeUsd: 1, fillCount: 2, source: 'backend' })
     vi.mocked(hlVolumeDaily).mockResolvedValue([{ day: '2026-09-21', notionalUsd: 150, fillCount: 2 }])
