@@ -12,8 +12,8 @@ export function TraderCell({ wallet, privyMap }: { wallet: string; privyMap: Pri
   const hasIdentity = label !== truncated
 
   return (
-    <div>
-      {hasIdentity && <span className="block text-ink-1">{label}</span>}
+    <div className="max-w-[18rem]">
+      {hasIdentity && <span title={label} className="line-clamp-1 break-all text-ink-1">{label}</span>}
       <WalletAddress wallet={wallet} />
     </div>
   )

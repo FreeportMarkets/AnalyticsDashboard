@@ -4,7 +4,7 @@ import { useRef, useState } from 'react'
 
 /** Full, selectable address with a clipboard action and manual-copy fallback. */
 export function WalletAddress({ wallet }: { wallet: string }) {
-  const input = useRef<HTMLInputElement>(null)
+  const address = useRef<HTMLSpanElement>(null)
   const [status, setStatus] = useState<'idle' | 'copied' | 'error'>('idle')
 
   async function copy() {
@@ -12,24 +12,27 @@ export function WalletAddress({ wallet }: { wallet: string }) {
       await navigator.clipboard.writeText(wallet)
       setStatus('copied')
     } catch {
-      input.current?.focus()
-      input.current?.select()
+      if (address.current) {
+        address.current.focus()
+        const range = document.createRange()
+        range.selectNodeContents(address.current)
+        const selection = window.getSelection()
+        selection?.removeAllRanges()
+        selection?.addRange(range)
+      }
       setStatus('error')
     }
   }
 
   return (
-    <div className="min-w-[23rem]">
-      <div className="flex items-center gap-2">
-        <input
-          ref={input}
+    <div className="max-w-[18rem]">
+      <div className="flex items-start gap-2">
+        <span
+          ref={address}
           aria-label="Trader wallet address"
-          readOnly
-          value={wallet}
-          size={Math.max(wallet.length, 1)}
-          onFocus={event => event.currentTarget.select()}
-          className="numeral min-w-0 flex-1 rounded-sm bg-transparent text-[11px] text-ink-2 outline-none focus:ring-1 focus:ring-accent"
-        />
+          tabIndex={0}
+          className="numeral min-w-0 flex-1 select-text break-all rounded-sm text-[11px] text-ink-2 outline-none focus:ring-1 focus:ring-accent"
+        >{wallet}</span>
         <button
           type="button"
           onClick={copy}
@@ -41,8 +44,8 @@ export function WalletAddress({ wallet }: { wallet: string }) {
           {status === 'copied' ? 'Copied' : 'Copy'}
         </button>
       </div>
-      <span role="status" className="text-xs text-ink-2">
-        {status === 'error' ? 'Copy unavailable. Address selected; press Ctrl/Cmd+C.' : ''}
+      <span role="status" className={status === 'copied' ? 'sr-only' : 'text-xs text-ink-2'}>
+        {status === 'copied' ? 'Wallet address copied.' : status === 'error' ? 'Copy unavailable. Address selected; press Ctrl/Cmd+C.' : ''}
       </span>
     </div>
   )
