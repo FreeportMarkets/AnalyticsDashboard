@@ -234,6 +234,8 @@ export interface RecentTradeRow {
   /** Fill direction preserves reversals/liquidations instead of calling every fill an open. */
   action?: string
   recordedFill?: boolean
+  /** Preserve the ledger decimal for display without float conversion or rounding. */
+  sizeText?: string
   ts: string
   timestamp: string
   type: string
@@ -346,13 +348,15 @@ export async function recentTrades(startDate: string, endDate: string, limit = 5
     asset: fill.market.split(':').at(-1)!,
     side: ['Open Long', 'Close Long'].includes(fill.direction ?? '') ? 'long' :
       ['Open Short', 'Close Short'].includes(fill.direction ?? '') ? 'short' : null,
-    size: Number(fill.size), price: Number(fill.price), volumeUsd: Number(fill.notionalUsd),
+    size: Number(fill.size), sizeText: fill.size, price: Number(fill.price), volumeUsd: Number(fill.notionalUsd),
     leverage: null, client: 'unknown', status: 'filled', venue: 'hyperliquid',
     walletAddress: fill.walletAddress,
     isClose: fill.direction?.startsWith('Close ') ? true : fill.direction?.startsWith('Open ') ? false : null,
     action: fill.direction?.startsWith('Close ') ? 'Close' : fill.direction?.startsWith('Open ') ? 'Open' : fill.direction ?? '—',
     recordedFill: true,
   }))
+  // Match backend ORDER BY filled_at DESC, user_address DESC, fill_id DESC.
+  // Fill IDs are text in PostgreSQL; keep lexical ordering, including same-wallet ties.
   return [...swaps, ...perps].sort((a, b) => b.ts.localeCompare(a.ts) ||
     b.walletAddress.localeCompare(a.walletAddress) || b.timestamp.localeCompare(a.timestamp)).slice(0, limit)
 }

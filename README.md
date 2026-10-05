@@ -19,6 +19,8 @@ Environment variables (Vercel project settings / `web/.env.local`):
 
 Deploy the backend `/v1/analytics/hl-ledger/trades` endpoint before this dashboard change. Recent trades uses that endpoint with the existing server-side read secret regardless of `HL_VOLUME_SOURCE`; spot rows remain in Neon. Perps are individual recorded fills with actual notional, not legacy order estimates. Partial fills stay separate; unavailable reads show an explicit error. Client/leverage are unknown where execution evidence does not supply them. Existing aggregate panels and volume-source selection are unchanged. Fills become visible after collector ingestion; this is not an instant order-status feed.
 
+Identity and funding enrichment fail independently: loaded trades and any successful enrichment remain visible. Recorded sizes display the original decimal string, including quantities below eight decimal places. Equal-time pagination uses the same descending timestamp/wallet/text fill-ID ordering as the backend merged in PR527; mixed spot/perp and same-wallet ties have regression coverage.
+
 Read-only production verification matched eight owner fills totaling $330.889960. The actual 91-day reader returned 1001 rows in 194ms including connection; PostgreSQL execution was 1.454ms. Deployed HTTP verification remains a backend rollout gate. The actual Trades page was rendered locally using two verified BTC fills, retaining full wallet controls and 0.00053 size precision. Three pre-existing integration suites require `TEST_DATABASE_URL` even to collect; no production database writes were used to run them.
 
 ## History

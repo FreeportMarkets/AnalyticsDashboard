@@ -45,11 +45,22 @@ describe('Recent trades source composition', () => {
   })
   it('preserves equal-time top-N wallet/id ordering as more rows are requested', async () => {
     const source = [fill('7', '0xcccccccccccccccccccccccccccccccccccccccc'),
-      fill('8', '0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'), fill('9')]
+      fill('9', '0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'),
+      fill('10', '0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'), fill('11')]
+    vi.mocked(sql).mockResolvedValue([{ ts: new Date(source[0]!.filledAt), timestamp: 'spot-id', type: 'swap',
+      asset: 'KALSHI', wallet_address: 'solana-wallet', volume_usd: 25, is_close: null }])
     vi.mocked(fetchHlLedgerTrades).mockImplementation(async (_from, _to, limit) => source.slice(0, limit))
-    const first = await recentTrades('2026-10-05', '2026-10-05', 2)
-    const expanded = await recentTrades('2026-10-05', '2026-10-05', 3)
-    expect(expanded.slice(0, 2)).toEqual(first)
+    const first = await recentTrades('2026-10-05', '2026-10-05', 3)
+    const expanded = await recentTrades('2026-10-05', '2026-10-05', 5)
+    expect(first.map(row => row.timestamp)).toEqual(['spot-id', 'hyperliquid:7', 'hyperliquid:9'])
+    expect(expanded.slice(0, 3)).toEqual(first)
+    expect(expanded[3]!.timestamp).toBe('hyperliquid:10')
+  })
+  it('preserves exact decimal size strings for rendering', async () => {
+    const sizes = ['0.000000001', '0.1234567890123456789']
+    vi.mocked(fetchHlLedgerTrades).mockResolvedValue(sizes.map((size, index) => ({ ...fill(String(index)), size })))
+    const rows = await recentTrades('2026-10-05', '2026-10-05')
+    expect(rows.map(row => row.sizeText).sort()).toEqual([...sizes].sort())
   })
   it('preserves reversal direction without claiming it is an opening or a long position', async () => {
     vi.mocked(fetchHlLedgerTrades).mockResolvedValue([{ ...fill('1'), direction: 'Long > Short', side: 'A' }])

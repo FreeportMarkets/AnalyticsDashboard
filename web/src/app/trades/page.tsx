@@ -103,12 +103,13 @@ export default async function TradesPage({
   const recentWithIdentities = recentTrades(start, end, tradeCount + 1).then(async rows => {
     const recent = rows.slice(0, tradeCount)
     const wallets = recent.map(r => r.walletAddress)
+    // Optional labels/highlights must never discard successfully loaded trades.
     const [privyMap, fundedWallets] = await Promise.all([
-      fetchWalletIdentities(sql, wallets),
-      recentlyFundedWallets(wallets, newUserSince, now),
+      fetchWalletIdentities(sql, wallets).catch(() => new Map()),
+      recentlyFundedWallets(wallets, newUserSince, now).catch(() => new Set<string>()),
     ])
     return { recent, hasMoreTrades: rows.length > tradeCount, privyMap, fundedWallets, recentUnavailable: false }
-  }).catch(() => {
+  }, () => {
     return { recent: [], hasMoreTrades: false, privyMap: new Map(), fundedWallets: new Set<string>(), recentUnavailable: true }
   })
   const [vol, daily, assets, venues, { recent, hasMoreTrades, privyMap, fundedWallets, recentUnavailable }, ages, hlTotal, hlDaily] = await Promise.all([
@@ -415,7 +416,7 @@ export default async function TradesPage({
                 },
                 { key: 'asset', header: 'Asset', render: r => r.asset },
                 { key: 'side', header: 'Side', render: r => r.side ?? '—' },
-                { key: 'size', header: 'Size', align: 'right', render: r => (r.size == null ? '—' : r.recordedFill ? r.size.toLocaleString('en-US', { maximumFractionDigits: 8 }) : num2(r.size)) },
+                { key: 'size', header: 'Size', align: 'right', render: r => r.sizeText ?? (r.size == null ? '—' : r.recordedFill ? r.size.toLocaleString('en-US', { maximumSignificantDigits: 21 }) : num2(r.size)) },
                 { key: 'price', header: 'Price', align: 'right', render: r => (r.price == null ? '—' : usd(r.price)) },
                 { key: 'leverage', header: 'Lev', align: 'right', render: r => (r.leverage == null ? '—' : `${num2(r.leverage)}x`) },
                 { key: 'client', header: 'Client', render: r => r.client },
