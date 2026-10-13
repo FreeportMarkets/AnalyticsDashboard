@@ -37,3 +37,18 @@ page files). Recover the old Streamlit code from git history if ever needed.
 
 - [Account measurement and dashboard source guide](docs/account-measurement.md).
 - Legacy device intro diagnostics: `docs/analytics-funnel.md` in `freeport-trading-backend`. These are event reach diagnostics, not verified new-account or funding conversion.
+
+## Amendment history compatibility
+
+Native Hyperliquid amendment fills can carry `amount_basis: "notional"` and
+`notional_usd`, while `amount_usd` (margin) and `leverage` are absent because
+fill-time values are unknown. The shared volume SQL reads explicit notional
+from the existing `raw` JSON; the mapper preserves null margin/leverage and
+the table displays unknown leverage as an em dash. The recorded-fill table
+continues to use the backend fill ledger; this change covers the Neon-backed
+estimated volume calculations. Deploy this reader before
+enabling the backend notional-only amendment history writer. No migration is
+needed; legacy volume calculations are unchanged for unmarked records.
+
+Run `cd web && npm test -- test/amend-notional.test.ts test/mapTrade.test.ts`
+for local mapping and actual Postgres-expression regressions (PGlite, no remote DB).

@@ -46,7 +46,9 @@ const SYSTEM_WALLETS = ['server', 'unknown', 'system', '']
  * `apply_perps_leverage` + `_detect_ostium` in app.py. Constant string, no
  * user input -- safe to inline directly into query text.
  *
- * `amount_usd` on a perps row is MARGIN, not notional -- this expression
+ * Amendment receipts with unknown margin/leverage carry explicit notional in
+ * raw JSON. Read it directly without manufacturing margin or 1x leverage.
+ * Legacy `amount_usd` on a perps row is MARGIN, not notional -- this expression
  * multiplies by leverage (or falls back to size * price / raw size for
  * Ostium) to reconstruct notional. THIS IS THE ONLY VOLUME EXPRESSION IN
  * THE APP -- every volume figure, on every page, must sum this, not raw
@@ -57,6 +59,11 @@ export const VOLUME_USD_EXPR = `
     CASE
       WHEN type = 'perps' THEN
         CASE
+          WHEN raw->>'amount_basis' = 'notional' THEN
+            CASE WHEN jsonb_typeof(raw->'notional_usd') = 'number'
+                 THEN (raw->>'notional_usd')::numeric
+                 ELSE NULL
+            END
           WHEN coalesce(is_close, false) THEN
             CASE WHEN lower(coalesce(category, '')) = 'ostium'
                  THEN abs(coalesce(size, 0))
