@@ -23,10 +23,10 @@ async function volume(overrides: Record<string, unknown>) {
 }
 describe('amend receipts retain unknown margin through mapping and actual volume SQL', () => {
   it.each([false, true])('counts confirmed notional with close=%s without inventing margin', async (is_close) => {
-    const result = await volume({ is_close })
+    const result = await volume({ is_close, notional_usd: 150 })
     expect(result.row.amount_usd).toBeNull()
     expect(result.row.leverage).toBeNull()
-    expect(Number(result.volume)).toBe(191.997)
+    expect(Number(result.volume)).toBe(150)
   })
   it('keeps legacy margin/leverage volume unchanged', async () => {
     const result = await volume({ amount_basis: undefined, notional_usd: undefined,
