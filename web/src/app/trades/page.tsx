@@ -72,7 +72,7 @@ const num2 = (n: number) => n.toLocaleString('en-US', { maximumFractionDigits: 2
  * about methodology, not a warning, and shouldn't read like one.
  */
 const EST_TAG_TITLE =
-  "Perps stores amount_usd as margin, not notional, so volume here is reconstructed as margin × leverage (opens) or size × price (closes). That runs roughly 15% above Hyperliquid's actual per-fill data, which reflects filled size rather than the intended order size this reconstruction uses. Swap volume is exact."
+  "Amended fills with unknown margin use confirmed notional directly. Other perps store amount_usd as margin, not notional, so volume is reconstructed as margin × leverage (opens) or size × price (closes). That runs roughly 15% above Hyperliquid's actual per-fill data, which reflects filled size rather than the intended order size this reconstruction uses. Swap volume is exact."
 
 function EstTag() {
   return (
