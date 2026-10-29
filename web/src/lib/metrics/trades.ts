@@ -2,7 +2,7 @@ import { sql } from '@/lib/db'
 import { fetchDeposits } from '../depositsApi'
 import { nyDateExpr } from '@/lib/time'
 import { nyRangeToUtc } from './nyRange'
-import { fetchHlLedgerTrades } from '../hlLedgerTradesApi'
+import { fetchHlLedgerTrades, type HlLedgerTrade } from '../hlLedgerTradesApi'
 
 /**
  * Trades & Volume metrics -- ported verbatim from app.py's `with tab_trades:`
@@ -285,6 +285,69 @@ export async function recentlyFundedWallets(wallets: string[], since: Date, now:
 }
 
 /**
+ * How long after a Hyperliquid fill its trade-log row can appear.
+ *
+ * The backend writes the `freeport-trades-history` row AFTER the order
+ * response comes back filled (orders.ts -> buildPerpsTradeLog ->
+ * logPerpsTrade stamps `timestamp = new Date()`), so the log row trails the
+ * fill's HL block time; it never precedes it. Measured on 2026-10-29 across
+ * all 102 perps log rows: lag 313ms min / 386ms p50 / 1.5s max, none negative.
+ * Fills matched were identical at 2s, 5s and 15s windows; widening to 120s
+ * only added rows 28-120s later, which are other orders. 15s is 10x the
+ * observed maximum without reaching the next order.
+ */
+export const FILL_LOG_WINDOW_SECONDS = 15
+
+/**
+ * One batched lookup for a page of fills: for each fill, the earliest perps
+ * trade-log row for the same wallet (case-insensitive) and asset in
+ * [filled_at, filled_at + window]. Label normalization matches the swap rows.
+ * Inputs are parallel arrays; `idx` is the 1-based fill position.
+ */
+export const FILL_CLIENT_SQL = `
+  SELECT f.idx::int AS idx, m.client
+    FROM unnest($1::text[], $2::text[], $3::timestamptz[]) WITH ORDINALITY AS f(wallet, asset, filled_at, idx)
+    CROSS JOIN LATERAL (
+      SELECT coalesce(nullif(lower(t.client), ''), 'untagged') AS client
+        FROM trades t
+       WHERE t.type = 'perps'
+         AND t.category = 'hyperliquid'
+         AND t.ts >= f.filled_at
+         AND t.ts <= f.filled_at + make_interval(secs => ${FILL_LOG_WINDOW_SECONDS})
+         AND lower(t.wallet_address) = f.wallet
+         AND (t.asset IS NULL OR t.asset = f.asset)
+       ORDER BY t.ts ASC, t.timestamp ASC
+       LIMIT 1
+    ) m
+`.trim()
+
+/** Market `xyz:HOOD` / `BTC` -> trade-log asset `HOOD` / `BTC` (last segment of market_id). */
+const fillAsset = (market: string) => market.split(':').at(-1)!
+
+/**
+ * Client per fill, from the trade log written when the order was placed
+ * (x-client header). Fills of one order share its client: a fill that has no
+ * log row of its own inherits it from a sibling with the same wallet+orderId.
+ * Fills with no log row at all (liquidations, TP/SL triggers, resting limits
+ * filled later, copy-engine orders) are 'untagged' -- the fill ledger carries
+ * no source field, so they are not guessed.
+ */
+export async function perpFillClients(fills: HlLedgerTrade[]): Promise<string[]> {
+  if (fills.length === 0) return []
+  const rows = (await sql(FILL_CLIENT_SQL, [
+    fills.map(f => f.walletAddress.toLowerCase()),
+    fills.map(f => fillAsset(f.market)),
+    fills.map(f => f.filledAt),
+  ])) as Array<{ idx: number; client: string }>
+  const clients: Array<string | undefined> = new Array(fills.length)
+  for (const row of rows) clients[row.idx - 1] = row.client
+  const orderKey = (f: HlLedgerTrade) => f.orderId === null ? null : `${f.walletAddress.toLowerCase()}:${f.orderId}`
+  const byOrder = new Map<string, string>()
+  fills.forEach((f, i) => { const key = orderKey(f); if (key && clients[i] && !byOrder.has(key)) byOrder.set(key, clients[i]!) })
+  return fills.map((f, i) => clients[i] ?? byOrder.get(orderKey(f) ?? '') ?? 'untagged')
+}
+
+/**
  * Last N swap+perps trades. `asset` falls back to `to_token` for swaps
  * (which have no `asset`/`display_symbol`). `volumeUsd` is the same
  * reconstruction as everywhere else in this file -- "est." for perps rows.
@@ -350,13 +413,14 @@ export async function recentTrades(startDate: string, endDate: string, limit = 5
     walletAddress: r.wallet_address,
     isClose: r.type === 'perps' ? (r.is_close ?? false) : null,
   }))
-  const perps: RecentTradeRow[] = fills.map(fill => ({
+  const fillClients = await perpFillClients(fills)
+  const perps: RecentTradeRow[] = fills.map((fill, i) => ({
     ts: fill.filledAt, timestamp: `hyperliquid:${fill.fillId}`, type: 'perps',
-    asset: fill.market.split(':').at(-1)!,
+    asset: fillAsset(fill.market),
     side: ['Open Long', 'Close Long'].includes(fill.direction ?? '') ? 'long' :
       ['Open Short', 'Close Short'].includes(fill.direction ?? '') ? 'short' : null,
     size: Number(fill.size), sizeText: fill.size, price: Number(fill.price), volumeUsd: Number(fill.notionalUsd),
-    leverage: null, client: 'unknown', status: 'filled', venue: 'hyperliquid',
+    leverage: null, client: fillClients[i]!, status: 'filled', venue: 'hyperliquid',
     walletAddress: fill.walletAddress,
     isClose: fill.direction?.startsWith('Close ') ? true : fill.direction?.startsWith('Open ') ? false : null,
     action: fill.direction?.startsWith('Close ') ? 'Close' : fill.direction?.startsWith('Open ') ? 'Open' : fill.direction ?? '—',

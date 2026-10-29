@@ -39,7 +39,7 @@ describe('Recent trades source composition', () => {
     expect(rows.map(r => r.type)).toEqual(['swap', 'perps', 'perps'])
     expect(rows[1]!.volumeUsd).toBe(44.98407)
     expect(rows[1]!.leverage).toBeNull()
-    expect(rows[1]!.client).toBe('unknown')
+    expect(rows[1]!.client).toBe('untagged')
     expect(String(vi.mocked(sql).mock.calls[0]![0])).toContain("AND type = 'swap'")
     expect(new Set(rows.map(r => r.timestamp)).size).toBe(3)
   })
