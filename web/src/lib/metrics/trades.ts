@@ -297,54 +297,105 @@ export async function recentlyFundedWallets(wallets: string[], since: Date, now:
  * observed maximum without reaching the next order.
  */
 export const FILL_LOG_WINDOW_SECONDS = 15
+const WINDOW_MS = FILL_LOG_WINDOW_SECONDS * 1000
 
 /**
- * One batched lookup for a page of fills: for each fill, the earliest perps
- * trade-log row for the same wallet (case-insensitive) and asset in
- * [filled_at, filled_at + window]. Label normalization matches the swap rows.
- * Inputs are parallel arrays; `idx` is the 1-based fill position.
+ * One batched read of every perps trade-log row that could belong to a page
+ * cluster: same wallet (case-insensitive) and asset, ts in
+ * [first fill, last fill + window]. Venue is stored as `hyperliquid` today
+ * (all 2026-10-29 rows); older writers used `hl`. Labels are normalized like
+ * the swap rows. Inputs are parallel arrays; `idx` is the 1-based cluster.
  */
 export const FILL_CLIENT_SQL = `
-  SELECT f.idx::int AS idx, m.client
-    FROM unnest($1::text[], $2::text[], $3::timestamptz[]) WITH ORDINALITY AS f(wallet, asset, filled_at, idx)
-    CROSS JOIN LATERAL (
-      SELECT coalesce(nullif(lower(t.client), ''), 'untagged') AS client
-        FROM trades t
-       WHERE t.type = 'perps'
-         AND t.category = 'hyperliquid'
-         AND t.ts >= f.filled_at
-         AND t.ts <= f.filled_at + make_interval(secs => ${FILL_LOG_WINDOW_SECONDS})
-         AND lower(t.wallet_address) = f.wallet
-         AND (t.asset IS NULL OR t.asset = f.asset)
-       ORDER BY t.ts ASC, t.timestamp ASC
-       LIMIT 1
-    ) m
+  SELECT c.idx::int AS idx, t.ts, coalesce(nullif(lower(t.client), ''), 'untagged') AS client
+    FROM unnest($1::text[], $2::text[], $3::timestamptz[], $4::timestamptz[])
+         WITH ORDINALITY AS c(wallet, asset, from_ts, to_ts, idx)
+    JOIN trades t
+      ON t.type = 'perps'
+     AND lower(coalesce(t.category, '')) IN ('hl', 'hyperliquid')
+     AND t.ts >= c.from_ts
+     AND t.ts <= c.to_ts + make_interval(secs => ${FILL_LOG_WINDOW_SECONDS})
+     AND lower(t.wallet_address) = c.wallet
+     AND t.asset = c.asset
+   ORDER BY c.idx, t.ts, t.timestamp
 `.trim()
 
 /** Market `xyz:HOOD` / `BTC` -> trade-log asset `HOOD` / `BTC` (last segment of market_id). */
 const fillAsset = (market: string) => market.split(':').at(-1)!
 
+interface FillOrder { fills: number[]; at: number }
+
 /**
- * Client per fill, from the trade log written when the order was placed
- * (x-client header). Fills of one order share its client: a fill that has no
- * log row of its own inherits it from a sibling with the same wallet+orderId.
- * Fills with no log row at all (liquidations, TP/SL triggers, resting limits
- * filled later, copy-engine orders) are 'untagged' -- the fill ledger carries
- * no source field, so they are not guessed.
+ * Pair a cluster's orders (sorted by first fill) with its log rows (sorted by
+ * ts) without guessing. The trade log stores no HL order id, so pairing is by
+ * time, and it is only accepted when it is forced:
+ *  - one log row per order, and each row i lies in [order i, order i+1):
+ *    a row cannot precede its own fill, so row i can only be order i's; or
+ *  - one log row per order and every row carries the same client, so the
+ *    pairing does not change the answer.
+ * Anything else -- an unlogged fill (liquidation, TP/SL, resting limit,
+ * copy-engine order) next to a logged order, two orders filling before
+ * either row lands with different clients, or a row from an order outside
+ * the page -- leaves the whole cluster untagged.
+ */
+function pairCluster(orders: FillOrder[], logs: Array<{ at: number; client: string }>): string[] | null {
+  if (logs.length !== orders.length) return null
+  const forced = logs.every((log, i) => log.at >= orders[i]!.at &&
+    (i + 1 < orders.length ? log.at < orders[i + 1]!.at : log.at <= orders[i]!.at + WINDOW_MS))
+  if (forced) return logs.map(log => log.client)
+  const clients = new Set(logs.map(log => log.client))
+  return clients.size === 1 ? orders.map(() => logs[0]!.client) : null
+}
+
+/**
+ * Client per fill, from the trade log written when the order filled
+ * (x-client header). Fills sharing wallet+orderId are one order and share
+ * its client. Same-wallet same-asset orders whose fills are within the
+ * window of each other form one cluster, resolved by `pairCluster`.
+ * Unmatched fills are 'untagged': the fill ledger carries no source field,
+ * so copy-engine fills are not identifiable here.
  */
 export async function perpFillClients(fills: HlLedgerTrade[]): Promise<string[]> {
   if (fills.length === 0) return []
+  const orders = new Map<string, FillOrder & { wallet: string; asset: string }>()
+  fills.forEach((f, i) => {
+    const wallet = f.walletAddress.toLowerCase()
+    const key = f.orderId === null ? `fill:${f.fillId}` : `${wallet}:${f.orderId}`
+    const at = Date.parse(f.filledAt)
+    const order = orders.get(key)
+    if (order) { order.fills.push(i); order.at = Math.min(order.at, at) } else {
+      orders.set(key, { fills: [i], at, wallet, asset: fillAsset(f.market) })
+    }
+  })
+  const groups = new Map<string, Array<FillOrder & { wallet: string; asset: string }>>()
+  for (const order of orders.values()) {
+    const key = `${order.wallet}\u0000${order.asset}`
+    groups.set(key, [...(groups.get(key) ?? []), order])
+  }
+  const clusters: Array<Array<FillOrder & { wallet: string; asset: string }>> = []
+  for (const group of groups.values()) {
+    group.sort((x, y) => x.at - y.at)
+    for (const order of group) {
+      const last = clusters.at(-1)
+      if (last && last[0]!.wallet === order.wallet && last[0]!.asset === order.asset &&
+        order.at - last.at(-1)!.at <= WINDOW_MS) last.push(order)
+      else clusters.push([order])
+    }
+  }
   const rows = (await sql(FILL_CLIENT_SQL, [
-    fills.map(f => f.walletAddress.toLowerCase()),
-    fills.map(f => fillAsset(f.market)),
-    fills.map(f => f.filledAt),
-  ])) as Array<{ idx: number; client: string }>
-  const clients: Array<string | undefined> = new Array(fills.length)
-  for (const row of rows) clients[row.idx - 1] = row.client
-  const orderKey = (f: HlLedgerTrade) => f.orderId === null ? null : `${f.walletAddress.toLowerCase()}:${f.orderId}`
-  const byOrder = new Map<string, string>()
-  fills.forEach((f, i) => { const key = orderKey(f); if (key && clients[i] && !byOrder.has(key)) byOrder.set(key, clients[i]!) })
-  return fills.map((f, i) => clients[i] ?? byOrder.get(orderKey(f) ?? '') ?? 'untagged')
+    clusters.map(c => c[0]!.wallet),
+    clusters.map(c => c[0]!.asset),
+    clusters.map(c => new Date(c[0]!.at).toISOString()),
+    clusters.map(c => new Date(c.at(-1)!.at).toISOString()),
+  ])) as Array<{ idx: number; ts: Date | string; client: string }>
+  const logs = clusters.map(() => [] as Array<{ at: number; client: string }>)
+  for (const row of rows) logs[row.idx - 1]!.push({ at: new Date(row.ts).getTime(), client: row.client })
+  const result: string[] = fills.map(() => 'untagged')
+  clusters.forEach((cluster, c) => {
+    const clients = pairCluster(cluster, logs[c]!)
+    if (clients) cluster.forEach((order, i) => { for (const f of order.fills) result[f] = clients[i]! })
+  })
+  return result
 }
 
 /**
@@ -413,7 +464,11 @@ export async function recentTrades(startDate: string, endDate: string, limit = 5
     walletAddress: r.wallet_address,
     isClose: r.type === 'perps' ? (r.is_close ?? false) : null,
   }))
-  const fillClients = await perpFillClients(fills)
+  // Optional enrichment: a failed client lookup must not hide loaded fills or swaps.
+  const fillClients = await perpFillClients(fills).catch((err: unknown) => {
+    console.error('recentTrades: perp fill client lookup failed', err instanceof Error ? err.name : 'unknown')
+    return fills.map(() => 'unknown')
+  })
   const perps: RecentTradeRow[] = fills.map((fill, i) => ({
     ts: fill.filledAt, timestamp: `hyperliquid:${fill.fillId}`, type: 'perps',
     asset: fillAsset(fill.market),

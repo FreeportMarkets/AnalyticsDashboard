@@ -33,7 +33,7 @@ describe('Recorded fill contract', () => {
 describe('Recent trades source composition', () => {
   it('reads spot only from history and merges exact fills without adding legacy perps', async () => {
     vi.mocked(fetchHlLedgerTrades).mockResolvedValue([fill('1'), { ...fill('2'), direction: 'Close Long', side: 'A' }])
-    vi.mocked(sql).mockResolvedValue([{ ts: new Date('2026-10-05T18:00:00Z'), timestamp: 'spot-id', type: 'swap',
+    vi.mocked(sql).mockResolvedValueOnce([{ ts: new Date('2026-10-05T18:00:00Z'), timestamp: 'spot-id', type: 'swap',
       asset: 'KALSHI', wallet_address: 'solana-wallet', volume_usd: 25, is_close: null }])
     const rows = await recentTrades('2026-10-05', '2026-10-05', 3)
     expect(rows.map(r => r.type)).toEqual(['swap', 'perps', 'perps'])

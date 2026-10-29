@@ -77,8 +77,39 @@ describe('perp fill client attribution', () => {
     await log(WALLET_A, at(edge), 'web')
     await log(WALLET_B, at(edge + 1), 'mobile')
     expect(await perpFillClients([fill('1'), fill('2', { walletAddress: WALLET_B })])).toEqual(['web', 'untagged'])
-    await log(WALLET_A, at(0), 'mobile')
-    expect(await perpFillClients([fill('1')])).toEqual(['mobile'])
+    await log(WALLET_B, at(0), 'mobile', 'BTC')
+    expect(await perpFillClients([fill('3', { walletAddress: WALLET_B, market: 'BTC' })])).toEqual(['mobile'])
+  })
+
+  it('accepts the hl and hyperliquid venue spellings case-insensitively', async () => {
+    await log(WALLET_A, at(400), 'web', 'HOOD', { category: 'hl' })
+    await log(WALLET_B, at(400), 'mobile', 'HOOD', { category: 'HyperLiquid' })
+    expect(await perpFillClients([fill('1'), fill('2', { walletAddress: WALLET_B })])).toEqual(['web', 'mobile'])
+  })
+
+  it('leaves both orders untagged when both fill before either row lands with different clients', async () => {
+    await log(WALLET_A, at(400), 'mobile')
+    await log(WALLET_A, at(500), 'web')
+    const fills = [fill('1'), fill('2', { filledAt: at(100) })]
+    expect(await perpFillClients(fills)).toEqual(['untagged', 'untagged'])
+  })
+
+  it('assigns the shared client when both fill before either row and the rows agree', async () => {
+    await log(WALLET_A, at(400), 'mobile')
+    await log(WALLET_A, at(500), 'mobile')
+    expect(await perpFillClients([fill('1'), fill('2', { filledAt: at(100) })])).toEqual(['mobile', 'mobile'])
+  })
+
+  it('does not let an unlogged fill take the client of a logged later order', async () => {
+    await log(WALLET_A, at(1_400), 'web') // only the later order logged
+    const fills = [fill('1'), fill('2', { filledAt: at(1_000) })]
+    expect(await perpFillClients(fills)).toEqual(['untagged', 'untagged'])
+  })
+
+  it('leaves a fill untagged when an extra row from an order outside the page is in its window', async () => {
+    await log(WALLET_A, at(300), 'mobile') // e.g. an older order not on this page
+    await log(WALLET_A, at(400), 'web')
+    expect(await perpFillClients([fill('1')])).toEqual(['untagged'])
   })
 
   it('picks the nearest row when two orders follow closely', async () => {
@@ -106,6 +137,20 @@ describe('perp fill client attribution', () => {
     vi.mocked(sql).mockClear()
     expect(await perpFillClients([])).toEqual([])
     expect(vi.mocked(sql)).not.toHaveBeenCalled()
+  })
+
+  it('keeps fills and swaps when only the client lookup fails', async () => {
+    vi.mocked(fetchHlLedgerTrades).mockResolvedValue([fill('1')])
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => {})
+    vi.mocked(sql).mockImplementation((async (query: string) => {
+      if (query.includes('WITH ORDINALITY')) throw Error('timeout')
+      return [{ ts: new Date(at(5_000)), timestamp: 'spot-id', type: 'swap', asset: 'KALSHI', client: 'mobile',
+        wallet_address: 'solana-wallet', volume_usd: 25, is_close: null }]
+    }) as unknown as typeof sql)
+    const rows = await recentTrades('2026-10-05', '2026-10-05', 5)
+    expect(rows.map(r => [r.type, r.client])).toEqual([['swap', 'mobile'], ['perps', 'unknown']])
+    expect(errors).toHaveBeenCalledWith('recentTrades: perp fill client lookup failed', 'Error')
+    errors.mockRestore()
   })
 
   it('shows the attributed client on recent trade rows', async () => {

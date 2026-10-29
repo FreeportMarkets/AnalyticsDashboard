@@ -380,7 +380,7 @@ export default async function TradesPage({
           <SectionHeading>Recent trades</SectionHeading>
           <p className="mt-1 text-xs text-ink-3">
             Highlighted rows are from users who signed up or recorded a successful funding event in the last 30 days.
-            {' '}Perps show individual recorded fills; partial fills appear separately. A fill's client comes from the trade-log row its order wrote (x-client header, up to 15s after the fill); fills with no such row (liquidations, TP/SL, resting limits, copy-engine orders) show &ldquo;untagged&rdquo;. Leverage is unknown when absent from fill evidence.
+            {' '}Perps show individual recorded fills; partial fills appear separately. A fill's client comes from the trade-log row its order wrote (x-client header, up to 15s after the fill). Fills with no such row (liquidations, TP/SL, resting limits, copy-engine orders), or whose row cannot be told apart from a nearby same-asset order, show &ldquo;untagged&rdquo;; &ldquo;unknown&rdquo; means the lookup failed. Leverage is unknown when absent from fill evidence.
           </p>
           {recentUnavailable ? <p role="status" className="mt-3 text-sm text-ink-2">Recent trades are unavailable. The fill ledger could not be read; try refreshing.</p> : <div className="mt-3">
             <DataTable
